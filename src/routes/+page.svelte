@@ -1,156 +1,135 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+    import StockPrediction from "./components/stock_prediction.svelte";
+    import Settings from "./components/sys_settings.svelte";
+    import RealTimeData from "./components/stock_realtime.svelte";
+    import HistoricalData from "./components/stock_historical.svelte";
 
-  let name = $state("");
-  let greetMsg = $state("");
-
-  async function greet(event: Event) {
-    event.preventDefault();
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsg = await invoke("greet", { name });
-  }
+    let activeView: "stock" | "realtime" | "historical" | "settings" = "stock";
 </script>
 
-<main class="container">
-  <h1>Welcome to Tauri + Svelte</h1>
+<div class="main-container">
+    <nav class="sidebar">
+        <div class="logo">StockAI</div>
+        <ul>
+            <li
+                class:active={activeView === "stock"}
+                on:click={() => (activeView = "stock")}
+            >
+                <span>📈 股票预测</span>
+            </li>
+            <li
+                class:active={activeView === "realtime"}
+                on:click={() => (activeView = "realtime")}
+            >
+                <span>⌚ 实时行情</span>
+            </li>
+            <li
+                class:active={activeView === "historical"}
+                on:click={() => (activeView = "historical")}
+            >
+                <span>📅 历史数据</span>
+            </li>
+            <li
+                class:active={activeView === "settings"}
+                on:click={() => (activeView = "settings")}
+            >
+                <span>⚙️ 系统设置</span>
+            </li>
+        </ul>
+    </nav>
 
-  <div class="row">
-    <a href="https://vitejs.dev" target="_blank">
-      <img src="/vite.svg" class="logo vite" alt="Vite Logo" />
-    </a>
-    <a href="https://tauri.app" target="_blank">
-      <img src="/tauri.svg" class="logo tauri" alt="Tauri Logo" />
-    </a>
-    <a href="https://kit.svelte.dev" target="_blank">
-      <img src="/svelte.svg" class="logo svelte-kit" alt="SvelteKit Logo" />
-    </a>
-  </div>
-  <p>Click on the Tauri, Vite, and SvelteKit logos to learn more.</p>
+    <main class="content">
+        {#if activeView === "stock"}
+            <StockPrediction />
+        {:else if activeView === "realtime"}
+            <RealTimeData />
+        {:else if activeView === "historical"}
+            <HistoricalData />
+        {:else if activeView === "settings"}
+            <Settings />
+        {/if}
+    </main>
+</div>
 
-  <form class="row" onsubmit={greet}>
-    <input id="greet-input" placeholder="Enter a name..." bind:value={name} />
-    <button type="submit">Greet</button>
-  </form>
-  <p>{greetMsg}</p>
-</main>
-
+<!-- 保持原有样式不变 -->
 <style>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
+    :root {
+        --sidebar-width: 240px;
+        --primary-color: #1a1d24;
+        --active-color: #6366f1;
+        --hover-bg: rgba(255, 255, 255, 0.05);
+        --text-primary: #f8fafc;
+    }
 
-.logo.svelte-kit:hover {
-  filter: drop-shadow(0 0 2em #ff3e00);
-}
+    .main-container {
+        display: flex;
+        min-height: 100vh;
+        background: #0f172a;
+        color: var(--text-primary);
+    }
 
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
+    .sidebar {
+        width: var(--sidebar-width);
+        background: var(--primary-color);
+        padding: 1.5rem;
+        position: relative;
+    }
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
+    .logo {
+        font-size: 1.5rem;
+        font-weight: 600;
+        padding: 1rem;
+        margin-bottom: 2rem;
+        color: var(--active-color);
+        text-align: center;
+    }
 
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
+    ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+    }
 
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
+    li {
+        padding: 1rem;
+        margin: 0.5rem 0;
+        border-radius: 0.5rem;
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
+    li:hover {
+        background: var(--hover-bg);
+    }
 
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
+    li.active {
+        background: var(--active-color);
+        font-weight: 500;
+    }
 
-.row {
-  display: flex;
-  justify-content: center;
-}
+    .content {
+        flex: 1;
+        padding: 2rem;
+        background: #0f172a;
+        overflow-y: auto;
+    }
 
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
+    @media (max-width: 768px) {
+        :root {
+            --sidebar-width: 100%;
+        }
 
-a:hover {
-  color: #535bf2;
-}
+        .main-container {
+            flex-direction: column;
+        }
 
-h1 {
-  text-align: center;
-}
+        .sidebar {
+            width: 100%;
+            height: auto;
+        }
 
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
-
+        .content {
+            min-height: calc(100vh - 160px);
+        }
+    }
 </style>
