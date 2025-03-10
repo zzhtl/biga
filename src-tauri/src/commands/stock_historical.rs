@@ -1,0 +1,35 @@
+use crate::db::create_historical_data;
+use crate::error::AppError;
+use crate::{api::stock, db::models::HistoricalData};
+use sqlx::SqlitePool;
+use tauri::State;
+
+#[tauri::command]
+pub async fn get_historical_data(
+    symbol: String,
+    start: String,
+    end: String,
+    pool: State<'_, SqlitePool>, // 从全局状态中提取连接池
+) -> Result<Vec<HistoricalData>, AppError> {
+    // 1. 从API获取数据
+    let api_data = stock::fetch_historical_data(&symbol).await?;
+
+    // 2. 存储到数据库
+    for data in &api_data {
+        create_historical_data(&pool, data).await?;
+    }
+    // 3. 从数据库查询
+    let records = sqlx::query_as!(
+        HistoricalData,
+        "SELECT * FROM historical_data
+        WHERE symbol = ? AND date BETWEEN ? AND ?
+        ORDER BY date DESC",
+        symbol,
+        start,
+        end
+    )
+    .fetch_all(&*pool)
+    .await?;
+
+    Ok(records)
+}
