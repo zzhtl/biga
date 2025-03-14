@@ -6,9 +6,6 @@ pub enum AppError {
     #[error("API request failed: {0}")]
     ApiError(#[from] reqwest::Error),
 
-    #[error("Data parsing error: {0}")]
-    ParseError(String),
-
     #[error("Invalid date format: {0}")]
     DateError(#[from] chrono::ParseError),
 
@@ -17,9 +14,6 @@ pub enum AppError {
 
     #[error("Data parsing error: {0}")]
     ParseIntError(std::num::ParseIntError),
-
-    #[error("Parse error: {0}")]
-    ParseFormatError(chrono::format::ParseError),
 
     #[error("数据库迁移失败: {0}")]
     MigrationError(#[from] sqlx::migrate::MigrateError),
