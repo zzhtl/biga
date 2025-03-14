@@ -78,6 +78,28 @@
             console.error("Failed to refresh history data:", error);
         }
     }
+
+    // 新增文档点击处理函数
+    function handleDocumentClick(event: MouseEvent) {
+        const target = event.target as HTMLElement;
+        const isInside = target.closest(".custom-select");
+        if (!isInside && isDropdownOpen) {
+            isDropdownOpen = false;
+        }
+    }
+
+    // 自动清理的effect
+    $effect(() => {
+        if (isDropdownOpen) {
+            document.addEventListener("click", handleDocumentClick);
+        } else {
+            document.removeEventListener("click", handleDocumentClick);
+        }
+
+        return () => {
+            document.removeEventListener("click", handleDocumentClick);
+        };
+    });
 </script>
 
 <div class="container">
