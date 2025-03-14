@@ -1,13 +1,53 @@
 <script lang="ts">
+    import { onMount } from "svelte";
+    import { invoke } from "@tauri-apps/api/core";
+
     let startDate = $state("");
     let endDate = $state("");
     let selectedSymbol = $state("AAPL");
+    let stockSymbols = $state<
+        Array<{ symbol: string; name: string; exchange: string }>
+    >([]);
+
+    onMount(async () => {
+        try {
+            const symbols: Array<{
+                symbol: string;
+                name: string;
+                exchange: string;
+            }> = await invoke("get_stock_infos");
+            stockSymbols = symbols;
+
+            if (stockSymbols.length > 0) {
+                // 设置默认选中第一个股票
+                selectedSymbol = stockSymbols[0].symbol;
+            }
+        } catch (error) {
+            console.error("Failed to fetch stock symbols:", error);
+        }
+    });
 
     function fetchHistory() {
-        // 这里可以添加实际的数据获取逻辑
         console.log(
             `Fetching ${selectedSymbol} from ${startDate} to ${endDate}`,
         );
+        // 实际调用获取历史数据的接口
+    }
+
+    async function refreshStockSymbols() {
+        try {
+            let success = await invoke("refresh_stock_infos");
+        } catch (error) {
+            console.error("Failed to refresh stock symbols:", error);
+        }
+    }
+
+    async function refreshHistory() {
+        try {
+            await invoke("refresh_historical_data", { symbol: selectedSymbol });
+        } catch (error) {
+            console.error("Failed to refresh history data:", error);
+        }
     }
 </script>
 
@@ -15,17 +55,28 @@
     <h1>历史数据查询</h1>
 
     <div class="controls">
-        <select bind:value={selectedSymbol}>
-            <option value="AAPL">Apple (AAPL)</option>
-            <option value="TSLA">Tesla (TSLA)</option>
-            <option value="NVDA">NVIDIA (NVDA)</option>
+        <!-- 加大后的选择框 -->
+        <select class="stock-select" bind:value={selectedSymbol}>
+            {#each stockSymbols as stock (stock.symbol)}
+                <option value={stock.symbol}>
+                    {stock.name} ({stock.exchange}: {stock.symbol})
+                </option>
+            {/each}
         </select>
+
+        <!-- 新增刷新按钮 -->
+        <div class="action-buttons">
+            <button class="refresh" onclick={refreshStockSymbols}
+                >🔄 刷新股票</button
+            >
+            <button class="refresh" onclick={refreshHistory}>🔄 刷新数据</button
+            >
+        </div>
 
         <input type="date" bind:value={startDate} />
         <span>至</span>
         <input type="date" bind:value={endDate} />
-
-        <button on:click={fetchHistory}>查询</button>
+        <button onclick={fetchHistory}>查询</button>
     </div>
 
     <div class="chart-container">
@@ -121,6 +172,27 @@
 
     .table-row {
         border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    /* 新增样式 */
+    .stock-select {
+        min-width: 200px;
+        padding: 0.8rem 1.2rem;
+        font-size: 1.1rem;
+    }
+
+    .action-buttons {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    button.refresh {
+        background: #3b82f6;
+        padding: 0.5rem 1rem;
+    }
+
+    button.refresh:hover {
+        background: #2563eb;
     }
 
     @media (max-width: 768px) {
