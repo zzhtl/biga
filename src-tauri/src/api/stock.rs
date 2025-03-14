@@ -1,7 +1,6 @@
 use crate::db::models::{HistoricalData, HistoricalDataItem, StockInfo, StockInfoItem};
 use crate::error::AppError;
 use chrono::NaiveDate;
-use std::env;
 
 // 查看全部股票名称以及代码
 const ALL_SYMBOL_API: &str = "https://api.zhituapi.com/hs/list/all?token=ZHITU_TOKEN_LIMIT_TEST";
@@ -28,8 +27,7 @@ fn parse_stock_info(items: Vec<StockInfoItem>) -> Result<Vec<StockInfo>, AppErro
 }
 
 pub async fn fetch_historical_data(symbol: &str) -> Result<Vec<HistoricalData>, AppError> {
-    let token = env::var("DDE0C310-D0DE-4767-9712-A424BAC4326D").unwrap();
-
+    let token = "DDE0C310-D0DE-4767-9712-A424BAC4326D";
     let response = reqwest::get(&format!("{}/{}/d?token={}", HISTORY_API, symbol, token))
         .await?
         .json::<Vec<HistoricalDataItem>>() // 直接解析为结构体数组

@@ -36,12 +36,6 @@
         isDropdownOpen = false;
     }
 
-    function fetchHistory() {
-        console.log(
-            `Fetching ${selectedSymbol} from ${startDate} to ${endDate}`,
-        );
-    }
-
     // 修改后的 refreshStockSymbols 函数
     async function refreshStockSymbols() {
         try {
@@ -71,14 +65,6 @@
         }
     });
 
-    async function refreshHistory() {
-        try {
-            await invoke("refresh_historical_data", { symbol: selectedSymbol });
-        } catch (error) {
-            console.error("Failed to refresh history data:", error);
-        }
-    }
-
     // 新增文档点击处理函数
     function handleDocumentClick(event: MouseEvent) {
         const target = event.target as HTMLElement;
@@ -100,6 +86,20 @@
             document.removeEventListener("click", handleDocumentClick);
         };
     });
+
+    async function refreshHistory() {
+        try {
+            await invoke("refresh_historical_data", { symbol: selectedSymbol });
+        } catch (error) {
+            console.error("Failed to refresh history data:", error);
+        }
+    }
+
+    function fetchHistory() {
+        console.log(
+            `Fetching ${selectedSymbol} from ${startDate} to ${endDate}`,
+        );
+    }
 </script>
 
 <div class="container">
