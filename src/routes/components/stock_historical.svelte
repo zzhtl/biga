@@ -2,8 +2,35 @@
     import { onMount } from "svelte";
     import { invoke } from "@tauri-apps/api/core";
 
-    let startDate = $state("");
-    let endDate = $state("");
+    // 日期工具函数
+    function getTodayISO() {
+        const d = new Date();
+        d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+        return d.toISOString().slice(0, 10);
+    }
+
+    function getOneMonthAgoISO() {
+        const d = new Date();
+        d.setMonth(d.getMonth() - 1); // 自动处理跨年问题
+        d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+        return d.toISOString().slice(0, 10);
+    }
+
+    // 新增日期格式化工具函数
+    function formatDate(dateString: string): string {
+        const date = new Date(dateString);
+
+        // 使用UTC时间避免时区问题
+        const year = date.getUTCFullYear();
+        const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+        const day = String(date.getUTCDate()).padStart(2, "0");
+
+        return `${year}-${month}-${day}`;
+    }
+
+    // 初始化状态
+    let startDate = $state(getOneMonthAgoISO());
+    let endDate = $state(getTodayISO());
     let selectedSymbol = $state("AAPL");
     let stockSymbols = $state<
         Array<{ symbol: string; name: string; exchange: string }>
@@ -17,6 +44,23 @@
         name: string;
         exchange: string;
     };
+
+    // 在原有类型定义后添加
+    type HistoricalData = {
+        date: string;
+        open: number;
+        close: number;
+        high: number;
+        low: number;
+        volume: number;
+        change: number;
+        changePercent: number;
+    };
+
+    // 添加历史数据状态
+    let historyData = $state<HistoricalData[]>([]);
+    let isLoading = $state(false);
+    let errorMessage = $state("");
 
     const filteredSymbols = $derived(
         stockSymbols.filter((stock) => {
@@ -34,6 +78,8 @@
         selectedSymbol = stock.symbol;
         searchQuery = `${stock.symbol} - ${stock.name}`; // 显示完整信息
         isDropdownOpen = false;
+        // 选中股票查询历史数据
+        fetchHistory();
     }
 
     // 修改后的 refreshStockSymbols 函数
@@ -95,10 +141,44 @@
         }
     }
 
-    function fetchHistory() {
-        console.log(
-            `Fetching ${selectedSymbol} from ${startDate} to ${endDate}`,
-        );
+    async function fetchHistory() {
+        if (!startDate || !endDate) {
+            errorMessage = "请选择开始日期和结束日期";
+            return;
+        }
+
+        isLoading = true;
+        errorMessage = "";
+
+        try {
+            const data = await invoke<HistoricalData[]>("get_historical_data", {
+                symbol: selectedSymbol,
+                start: startDate,
+                end: endDate,
+            });
+            historyData = data;
+
+            // 预处理涨跌幅数据
+            historyData = data.map((item, index, array) => ({
+                ...item,
+                change:
+                    index < array.length - 1
+                        ? item.close - array[index + 1].close
+                        : 0,
+                changePercent:
+                    index < array.length - 1
+                        ? ((item.close - array[index + 1].close) /
+                              array[index + 1].close) *
+                          100
+                        : 0,
+            }));
+        } catch (error) {
+            console.error("获取历史数据失败:", error);
+            errorMessage = "获取数据失败，请重试";
+            historyData = [];
+        } finally {
+            isLoading = false;
+        }
     }
 </script>
 
@@ -166,14 +246,48 @@
             <div>收盘价</div>
             <div>最高价</div>
             <div>最低价</div>
+            <div>成交量</div>
+            <div>涨跌</div>
+            <div>涨跌幅</div>
         </div>
-        <div class="table-row">
-            <div>2023-12-01</div>
-            <div>$189.50</div>
-            <div>$192.34</div>
-            <div>$193.10</div>
-            <div>$188.90</div>
-        </div>
+
+        {#if isLoading}
+            <div class="loading-indicator">⏳ 数据加载中...</div>
+        {:else if errorMessage}
+            <div class="error-message">
+                ❌ {errorMessage}
+            </div>
+        {:else if historyData.length === 0}
+            <div class="no-data">📭 暂无数据</div>
+        {:else}
+            {#each historyData as data (data.date)}
+                <div class="table-row">
+                    <div>{formatDate(data.date)}</div>
+                    <div>{data.open.toFixed(2)}</div>
+                    <div>{data.close.toFixed(2)}</div>
+                    <div>{data.high.toFixed(2)}</div>
+                    <div>{data.low.toFixed(2)}</div>
+                    <div>{data.volume}</div>
+                    <!-- 涨跌列 -->
+                    <div
+                        class:up={data.change > 0}
+                        class:down={data.change < 0}
+                    >
+                        {data.change === null ? "-" : data.change.toFixed(2)}
+                    </div>
+
+                    <!-- 涨跌幅列 -->
+                    <div
+                        class:up={data.changePercent > 0}
+                        class:down={data.changePercent < 0}
+                    >
+                        {data.changePercent === null
+                            ? "-"
+                            : `${data.changePercent.toFixed(2)}%`}
+                    </div>
+                </div>
+            {/each}
+        {/if}
     </div>
 </div>
 
@@ -337,9 +451,28 @@
     .table-header,
     .table-row {
         display: grid;
-        grid-template-columns: repeat(5, 1fr);
+        grid-template-columns: repeat(8, 1fr);
         gap: 1rem;
         padding: 1rem;
+    }
+
+    /* 修正颜色定义 */
+    .up {
+        color: #ef4444; /* 红色表示上涨 */
+    }
+    .down {
+        color: #10b981; /* 绿色表示下跌 */
+    }
+    /* 添加箭头指示 */
+    .up::before {
+        content: "↑";
+        margin-right: 4px;
+        font-size: 0.9em;
+    }
+    .down::before {
+        content: "↓";
+        margin-right: 4px;
+        font-size: 0.9em;
     }
 
     .table-header {
@@ -365,6 +498,24 @@
         background: #2563eb;
     }
 
+    .loading-indicator,
+    .error-message,
+    .no-data {
+        padding: 2rem;
+        text-align: center;
+        color: #94a3b8;
+    }
+
+    .error-message {
+        color: #ef4444;
+    }
+
+    .table-row div {
+        padding: 0.15rem;
+        display: flex;
+        align-items: center;
+    }
+
     @media (max-width: 768px) {
         .controls {
             flex-wrap: wrap; /* 小屏幕允许换行 */
@@ -382,14 +533,7 @@
 
         .table-header,
         .table-row {
-            grid-template-columns: repeat(3, 1fr);
-        }
-
-        .table-header div:nth-child(4),
-        .table-row div:nth-child(4),
-        .table-header div:nth-child(5),
-        .table-row div:nth-child(5) {
-            display: none;
+            grid-template-columns: repeat(4, 1fr);
         }
     }
 </style>
