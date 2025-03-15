@@ -47,7 +47,7 @@ pub fn run() {
 
 async fn create_optimized_pool() -> Result<Pool<Sqlite>, sqlx::Error> {
     let pool = SqlitePoolOptions::new()
-        .max_connections(4) // 最大连接数
+        .max_connections(5) // 最大连接数
         .min_connections(2) // 最小保持的空闲连接数
         .acquire_timeout(std::time::Duration::from_secs(30)) // 获取连接超时时间
         .connect("sqlite://db/stock_data.db")
