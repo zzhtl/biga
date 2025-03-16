@@ -154,9 +154,9 @@
         return d.toISOString().slice(0, 10);
     }
 
-    function getOneMonthAgoISO() {
+    function getFiveMonthAgoISO() {
         const d = new Date();
-        d.setMonth(d.getMonth() - 1); // 自动处理跨年问题
+        d.setMonth(d.getMonth() - 5); // 自动处理跨年问题
         d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
         return d.toISOString().slice(0, 10);
     }
@@ -174,7 +174,7 @@
     }
 
     // 初始化状态
-    let startDate = $state(getOneMonthAgoISO());
+    let startDate = $state(getFiveMonthAgoISO());
     let endDate = $state(getTodayISO());
     let selectedSymbol = $state("AAPL");
     let stockSymbols = $state<
@@ -281,6 +281,7 @@
     async function refreshHistory() {
         try {
             await invoke("refresh_historical_data", { symbol: selectedSymbol });
+            fetchHistory();
         } catch (error) {
             console.error("Failed to refresh history data:", error);
         }
