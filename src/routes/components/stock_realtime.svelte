@@ -1,9 +1,50 @@
 <script lang="ts">
-    let stocks = $state([
-        { symbol: "AAPL", price: 192.34, change: +1.23, volume: "12.3M" },
-        { symbol: "TSLA", price: 260.54, change: -0.78, volume: "8.9M" },
-        { symbol: "NVDA", price: 467.7, change: +3.15, volume: "15.2M" },
-    ]);
+    import { invoke } from "@tauri-apps/api/core";
+    import { onMount } from "svelte";
+
+    // 定义类型
+    interface RealtimeData {
+        symbol: string;
+        name: string;
+        date: Date;
+        ytd_close: number;
+        close: number;
+        volume: number;
+        change: number;
+        change_percent: number;
+    }
+
+    let stocks = $state<RealtimeData[]>([]);
+    let loading = $state(true);
+    let error = $state<string | null>(null);
+    // 添加日期格式化函数
+    const formatDate = (date: Date) => {
+        return new Intl.DateTimeFormat("zh-CN").format(date);
+    };
+
+    // 添加成交量格式化函数
+    const formatVolume = (volume: number) => {
+        if (volume >= 1_000_000) return `${(volume / 1_000_000).toFixed(1)}M`;
+        if (volume >= 1_000) return `${(volume / 1_000).toFixed(1)}K`;
+        return volume.toString();
+    };
+
+    // 组件挂载时获取数据
+    onMount(async () => {
+        try {
+            const response = await invoke<RealtimeData[]>("get_realtime_data");
+            stocks = response.map((item) => ({
+                ...item,
+                date: new Date(item.date), // 确保日期转换为Date对象
+            }));
+            error = null;
+        } catch (err) {
+            console.error("获取数据失败:", err);
+            error = "无法获取实时数据，请稍后重试";
+        } finally {
+            loading = false;
+        }
+    });
 </script>
 
 <div class="container">
@@ -12,6 +53,9 @@
     <div class="data-grid">
         <div class="header-row">
             <div>股票代码</div>
+            <div>名称</div>
+            <div>日期</div>
+            <div>昨日收盘价</div>
             <div>最新价</div>
             <div>涨跌幅</div>
             <div>成交量</div>
@@ -20,20 +64,41 @@
         {#each stocks as stock}
             <div class="data-row">
                 <div class="symbol">{stock.symbol}</div>
-                <div class="price">${stock.price.toFixed(2)}</div>
+                <div class="name">{stock.name}</div>
+                <div class="date">{formatDate(stock.date)}</div>
+                <div class="price">{stock.ytd_close.toFixed(2)}</div>
+                <div class="price">{stock.close.toFixed(2)}</div>
                 <div
-                    class:positive={stock.change > 0}
-                    class:negative={stock.change < 0}
+                    class:negative={stock.change_percent > 0}
+                    class:positive={stock.change_percent < 0}
                 >
-                    {stock.change > 0 ? "+" : ""}{stock.change.toFixed(2)}%
+                    {stock.change_percent > 0 ? "+" : ""}{(
+                        stock.change_percent * 100
+                    ).toFixed(2)}%
                 </div>
-                <div class="volume">{stock.volume}</div>
+                <div class="volume">{formatVolume(stock.volume)}</div>
             </div>
         {/each}
     </div>
 </div>
 
 <style>
+    /* 添加加载和错误状态样式 */
+    .loading,
+    .error {
+        padding: 2rem;
+        text-align: center;
+        color: #666;
+    }
+
+    .error {
+        color: #ef4444;
+    }
+    .header-row,
+    .data-row {
+        grid-template-columns: repeat(7, 1fr);
+    }
+
     .container {
         max-width: 1200px;
         margin: 0 auto;
@@ -55,7 +120,7 @@
     .header-row,
     .data-row {
         display: grid;
-        grid-template-columns: 1fr 1fr 1fr 1fr;
+        grid-template-columns: 1fr 1fr 1fr 1fr 1fr 1fr 1fr;
         gap: 1rem;
         padding: 1rem;
         align-items: center;
@@ -87,13 +152,17 @@
         font-weight: 500;
     }
 
+    /* 移动端适配 */
     @media (max-width: 768px) {
         .header-row,
         .data-row {
-            grid-template-columns: repeat(2, 1fr);
+            grid-template-columns: repeat(3, 1fr);
         }
 
+        /* 隐藏日期和名称列 */
+        .header-row div:nth-child(2),
         .header-row div:nth-child(3),
+        .data-row div:nth-child(2),
         .data-row div:nth-child(3) {
             display: none;
         }
