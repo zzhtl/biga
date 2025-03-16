@@ -15,7 +15,10 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
-    "echarts": "^5.6.0"
+    "@types/echarts": "^5.0.0",
+    "echarts": "^5.6.0",
+    "lightweight-charts": "^5.0.3",
+    "svelte-echarts": "1.0.0-rc3"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.8",

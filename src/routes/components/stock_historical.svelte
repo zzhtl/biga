@@ -1,6 +1,151 @@
 <script lang="ts">
     import { onMount } from "svelte";
     import { invoke } from "@tauri-apps/api/core";
+    import * as echarts from "echarts";
+
+    type EChartsOption = echarts.EChartsOption;
+
+    // 新增图表实例声明
+    let chart: echarts.ECharts | null = null;
+    let chartContainer: HTMLDivElement;
+
+    // 新增图表初始化
+    $effect(() => {
+        if (typeof window === "undefined") return;
+
+        // 初始化图表
+        chart = echarts.init(chartContainer);
+
+        // 窗口调整时自适应
+        const resizeHandler = () => chart?.resize();
+        window.addEventListener("resize", resizeHandler);
+
+        return () => {
+            window.removeEventListener("resize", resizeHandler);
+            chart?.dispose();
+            chart = null;
+        };
+    });
+
+    // 新增图表更新逻辑
+    $effect(() => {
+        if (!chart || historyData.length === 0) return;
+
+        // 处理数据（按日期正序排列）
+        const sortedData = [...historyData].reverse();
+
+        // 准备图表数据
+        const xData = sortedData.map((d) => formatDate(d.date));
+        const kData = sortedData.map((d) => [d.open, d.close, d.low, d.high]);
+        const volumes = sortedData.map((d) => d.volume);
+        const changes = sortedData.map((d) => d.changePercent);
+
+        // 图表配置
+        const option: EChartsOption = {
+            tooltip: {
+                trigger: "axis",
+                axisPointer: { type: "cross" },
+            },
+            grid: [
+                { left: "5%", right: "5%", top: "5%", height: "70%" }, // K线图区域
+                { left: "5%", right: "5%", top: "79%", height: "15%" }, // 成交量区域
+            ],
+            xAxis: [
+                {
+                    type: "category",
+                    data: xData,
+                    axisLabel: { rotate: 45 },
+                    boundaryGap: false,
+                },
+                {
+                    type: "category",
+                    gridIndex: 1,
+                    show: false,
+                    data: xData,
+                },
+            ],
+            yAxis: [
+                {
+                    scale: true,
+                    splitArea: { show: true },
+                },
+                {
+                    scale: true,
+                    gridIndex: 1,
+                    splitNumber: 2,
+                    axisLabel: { show: false },
+                    axisLine: { show: false },
+                    splitLine: { show: false },
+                },
+            ],
+            dataZoom: [
+                {
+                    type: "inside",
+                    xAxisIndex: [0, 1],
+                    start: 0,
+                    end: 100,
+                },
+                {
+                    type: "slider",
+                    xAxisIndex: [0, 1],
+                    show: true,
+                    top: "95%",
+                    height: 20,
+                    start: 0,
+                    end: 100,
+                },
+            ],
+            series: [
+                {
+                    name: "K线",
+                    type: "candlestick",
+                    data: kData,
+                    itemStyle: {
+                        color: "#ef4444", // 涨颜色改为红色
+                        color0: "#10b981", // 跌颜色改为绿色
+                        borderColor: "#ef4444",
+                        borderColor0: "#10b981",
+                    },
+                    emphasis: {
+                        itemStyle: {
+                            borderWidth: 2,
+                        },
+                    },
+                },
+                {
+                    name: "成交量",
+                    type: "bar",
+                    xAxisIndex: 1,
+                    yAxisIndex: 1,
+                    data: volumes.map((v, i) => ({
+                        value: v,
+                        itemStyle: {
+                            color:
+                                sortedData[i].close > sortedData[i].open
+                                    ? "#ef4444" // 上涨红色
+                                    : "#10b981", // 下跌绿色
+                        },
+                    })),
+                },
+                {
+                    name: "涨跌幅",
+                    type: "line",
+                    smooth: true,
+                    data: changes,
+                    symbol: "none",
+                    lineStyle: { color: "#3b82f6" },
+                    areaStyle: {
+                        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                            { offset: 0, color: "rgba(59, 130, 246, 0.6)" },
+                            { offset: 1, color: "rgba(59, 130, 246, 0.02)" },
+                        ]),
+                    },
+                },
+            ],
+        };
+
+        chart.setOption(option);
+    });
 
     // 日期工具函数
     function getTodayISO() {
@@ -233,9 +378,10 @@
 
     <!-- 图表占位 -->
     <div class="chart-container">
-        <div class="chart-placeholder">
-            📊 历史趋势图表（{selectedSymbol}）
-        </div>
+        <div
+            bind:this={chartContainer}
+            style="width: 100%; height: 500px;"
+        ></div>
     </div>
 
     <!-- 数据表格 -->
@@ -427,20 +573,6 @@
         cursor: pointer;
     }
 
-    .chart-container {
-        margin: 2rem 0;
-    }
-
-    .chart-placeholder {
-        height: 400px;
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 0.5rem;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: #94a3b8;
-    }
-
     .data-table {
         margin-top: 2rem;
         background: rgba(255, 255, 255, 0.05);
@@ -516,6 +648,13 @@
         align-items: center;
     }
 
+    .chart-container {
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        margin: 1rem 0;
+    }
+
     @media (max-width: 768px) {
         .controls {
             flex-wrap: wrap; /* 小屏幕允许换行 */
@@ -534,6 +673,11 @@
         .table-header,
         .table-row {
             grid-template-columns: repeat(4, 1fr);
+        }
+
+        .chart-container {
+            margin: 1rem 0;
+            padding: 0.5rem;
         }
     }
 </style>
