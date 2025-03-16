@@ -18,7 +18,7 @@
     <div class="input-group">
         <input
             type="text"
-            placeholder="输入股票代码（例如：AAPL）"
+            placeholder="输入股票代码（例如：000001）"
             bind:value={stockCode}
             class="search-input"
         />

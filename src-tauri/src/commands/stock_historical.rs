@@ -36,7 +36,7 @@ pub async fn refresh_historical_data(
     let api_data = stock::fetch_historical_data(&symbol).await?;
 
     // 2. 存储到数据库
-    batch_insert_historical_data(&pool, api_data).await?;
+    batch_insert_historical_data(&symbol, &pool, api_data).await?;
 
     Ok(true)
 }

@@ -48,3 +48,18 @@ pub struct HistoricalDataItem {
     #[serde(rename = "v")]
     pub volume: i64,
 }
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct RealtimeData {
+    #[sqlx(rename = "symbol")]
+    pub symbol: String,
+    #[sqlx(rename = "name")]
+    pub name: String,
+    #[sqlx(rename = "date")]
+    pub date: NaiveDate,
+    pub ytd_close: f64,      // 昨天收盘价
+    pub close: f64,          // 今日收盘价
+    pub volume: i64,         // 成交量
+    pub change: f64,         // 涨跌额
+    pub change_percent: f64, // 涨跌幅
+}
