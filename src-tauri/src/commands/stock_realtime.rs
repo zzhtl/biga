@@ -12,11 +12,13 @@ pub async fn get_realtime_data(pool: State<'_, SqlitePool>) -> Result<Vec<Realti
         COALESCE(symbol, '') as symbol,
         COALESCE(name, '') as name,
         COALESCE(date, '') as date,
-        COALESCE(ytd_close, 0.00) as ytd_close,
         COALESCE(close, 0.00) as close,
         COALESCE(volume, 0) as volume,
-        COALESCE(change, 0.00) as change,
-        COALESCE(change_percent, 0.00) as change_percent
+        COALESCE(amount, 0.00) as amount,
+        COALESCE(amplitude, 0.00) as amplitude,
+        COALESCE(turnover_rate, 0.00) as turnover_rate,
+        COALESCE(change_percent, 0.00) as change_percent,
+        COALESCE(change, 0.00) as change
         FROM realtime_data
         "#
     )

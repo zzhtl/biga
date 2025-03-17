@@ -12,5 +12,23 @@ CREATE TABLE IF NOT EXISTS historical_data (
     high REAL NOT NULL,
     low REAL NOT NULL,
     volume INTEGER NOT NULL,
+    amount REAL NOT NULL,
+    amplitude REAL NOT NULL,
+    turnover_rate REAL NOT NULL,
+    change_percent REAL NOT NULL,
+    change REAL NOT NULL,
     PRIMARY KEY (symbol, date)
+);
+
+CREATE TABLE IF NOT EXISTS realtime_data (
+    symbol TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    date DATE NOT NULL,
+    close REAL NOT NULL,
+    volume INTEGER NOT NULL,
+    amount REAL NOT NULL,
+    amplitude REAL NOT NULL,
+    turnover_rate REAL NOT NULL,
+    change_percent REAL NOT NULL,
+    change REAL NOT NULL
 );
