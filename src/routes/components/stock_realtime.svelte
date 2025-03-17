@@ -7,9 +7,11 @@
         symbol: string;
         name: string;
         date: Date;
-        ytd_close: number;
         close: number;
         volume: number;
+        amount: number;
+        amplitude: number;
+        turnover_rate: number;
         change: number;
         change_percent: number;
     }
@@ -55,10 +57,13 @@
             <div>股票代码</div>
             <div>名称</div>
             <div>日期</div>
-            <div>昨日收盘价</div>
             <div>最新价</div>
-            <div>涨跌幅</div>
             <div>成交量</div>
+            <div>成交额</div>
+            <div>振幅</div>
+            <div>换手率</div>
+            <div>涨跌额</div>
+            <div>涨跌幅</div>
         </div>
 
         {#each stocks as stock}
@@ -66,17 +71,23 @@
                 <div class="symbol">{stock.symbol}</div>
                 <div class="name">{stock.name}</div>
                 <div class="date">{formatDate(stock.date)}</div>
-                <div class="price">{stock.ytd_close.toFixed(2)}</div>
-                <div class="price">{stock.close.toFixed(2)}</div>
+                <div class="close">{stock.close}</div>
+                <div class="volume">{stock.volume}手</div>
+                <div class="amount">{stock.amount}</div>
+                <div class="amplitude">{stock.amplitude}&</div>
+                <div class="turnover_rate">{stock.turnover_rate}%</div>
+                <div
+                    class:negative={stock.change > 0}
+                    class:positive={stock.change < 0}
+                >
+                    {stock.change > 0 ? "+" : ""}{stock.change}
+                </div>
                 <div
                     class:negative={stock.change_percent > 0}
                     class:positive={stock.change_percent < 0}
                 >
-                    {stock.change_percent > 0 ? "+" : ""}{(
-                        stock.change_percent * 100
-                    ).toFixed(2)}%
+                    {stock.change_percent > 0 ? "+" : ""}{stock.change_percent}%
                 </div>
-                <div class="volume">{formatVolume(stock.volume)}</div>
             </div>
         {/each}
     </div>
@@ -120,7 +131,7 @@
     .header-row,
     .data-row {
         display: grid;
-        grid-template-columns: 1fr 1fr 1fr 1fr 1fr 1fr 1fr;
+        grid-template-columns: 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr;
         gap: 1rem;
         padding: 1rem;
         align-items: center;

@@ -38,7 +38,7 @@
         const xData = sortedData.map((d) => formatDate(d.date));
         const kData = sortedData.map((d) => [d.open, d.close, d.low, d.high]);
         const volumes = sortedData.map((d) => d.volume);
-        const changes = sortedData.map((d) => d.changePercent);
+        const changes = sortedData.map((d) => d.change_percent);
 
         // 图表配置
         const option: EChartsOption = {
@@ -121,7 +121,7 @@
                         value: v,
                         itemStyle: {
                             color:
-                                sortedData[i].close > sortedData[i].open
+                                sortedData[i].change > 0
                                     ? "#ef4444" // 上涨红色
                                     : "#10b981", // 下跌绿色
                         },
@@ -198,8 +198,11 @@
         high: number;
         low: number;
         volume: number;
+        amount: number;
+        amplitude: number;
+        turnover_rate: number;
         change: number;
-        changePercent: number;
+        change_percent: number;
     };
 
     // 添加历史数据状态
@@ -303,21 +306,6 @@
                 end: endDate,
             });
             historyData = data;
-
-            // 预处理涨跌幅数据
-            historyData = data.map((item, index, array) => ({
-                ...item,
-                change:
-                    index < array.length - 1
-                        ? item.close - array[index + 1].close
-                        : 0,
-                changePercent:
-                    index < array.length - 1
-                        ? ((item.close - array[index + 1].close) /
-                              array[index + 1].close) *
-                          100
-                        : 0,
-            }));
         } catch (error) {
             console.error("获取历史数据失败:", error);
             errorMessage = "获取数据失败，请重试";
@@ -394,7 +382,10 @@
             <div>最高价</div>
             <div>最低价</div>
             <div>成交量</div>
-            <div>涨跌</div>
+            <div>成交额</div>
+            <div>振幅</div>
+            <div>换手率</div>
+            <div>涨跌额</div>
             <div>涨跌幅</div>
         </div>
 
@@ -410,27 +401,29 @@
             {#each historyData as data (data.date)}
                 <div class="table-row">
                     <div>{formatDate(data.date)}</div>
-                    <div>{data.open.toFixed(2)}</div>
-                    <div>{data.close.toFixed(2)}</div>
-                    <div>{data.high.toFixed(2)}</div>
-                    <div>{data.low.toFixed(2)}</div>
-                    <div>{data.volume}</div>
-                    <!-- 涨跌列 -->
+                    <div>{data.open}</div>
+                    <div>{data.close}</div>
+                    <div>{data.high}</div>
+                    <div>{data.low}</div>
+                    <div>{data.volume}手</div>
+                    <div>{data.amount}</div>
+                    <div>{data.amplitude}%</div>
+                    <div>{data.turnover_rate}%</div>
+                    <!-- 涨跌额 -->
                     <div
                         class:up={data.change > 0}
                         class:down={data.change < 0}
                     >
-                        {data.change === null ? "-" : data.change.toFixed(2)}
+                        {data.change === null ? "-" : data.change}
                     </div>
-
-                    <!-- 涨跌幅列 -->
+                    <!-- 涨跌幅 -->
                     <div
-                        class:up={data.changePercent > 0}
-                        class:down={data.changePercent < 0}
+                        class:up={data.change_percent > 0}
+                        class:down={data.change_percent < 0}
                     >
-                        {data.changePercent === null
+                        {data.change_percent === null
                             ? "-"
-                            : `${data.changePercent.toFixed(2)}%`}
+                            : `${data.change_percent}%`}
                     </div>
                 </div>
             {/each}
@@ -584,7 +577,7 @@
     .table-header,
     .table-row {
         display: grid;
-        grid-template-columns: repeat(8, 1fr);
+        grid-template-columns: repeat(11, 1fr);
         gap: 1rem;
         padding: 1rem;
     }

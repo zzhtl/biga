@@ -44,10 +44,16 @@ pub async fn batch_insert_historical_data(
     let mut tx = pool.begin().await?;
 
     // 批量生成占位符（自动处理参数展开）
-    let mut batch_size = 0;
+    let mut batch_size: u64 = 0;
+    let count = data_list.len();
     for chunk in data_list.chunks(constants::BATCH_SIZE) {
+        // 最新一条数据单独保存
+        if batch_size == (count - 1) as u64 {
+            break;
+        }
         let mut query_builder = QueryBuilder::new(
-            "INSERT INTO historical_data (symbol, date, open, close, high, low, volume) ",
+            "INSERT INTO historical_data (symbol, date, open, close, high, low, volume,
+            amount, amplitude, turnover_rate, change, change_percent) ",
         );
         query_builder.push_values(chunk, |mut b, data| {
             b.push_bind(&data.symbol)
@@ -56,32 +62,72 @@ pub async fn batch_insert_historical_data(
                 .push_bind(&data.close)
                 .push_bind(&data.high)
                 .push_bind(&data.low)
-                .push_bind(&data.volume);
+                .push_bind(&data.volume)
+                .push_bind(&data.amount)
+                .push_bind(&data.amplitude)
+                .push_bind(&data.turnover_rate)
+                .push_bind(&data.change)
+                .push_bind(&data.change_percent);
         });
 
         query_builder.push(" ON CONFLICT(symbol, date) DO NOTHING");
         let result = query_builder.build().execute(&mut *tx).await?;
         batch_size += result.rows_affected();
     }
-    // 保存最新的股票涨跌数据
     let last_history = data_list.last().unwrap();
-    let last_two_history = data_list.get(data_list.len() - 2).unwrap_or(last_history);
-    let change = last_history.close - last_two_history.close;
-    let change_percent = change / last_two_history.close;
+    let mut last_builder = QueryBuilder::new(
+        "INSERT INTO historical_data (symbol, date, open, close, high, low, volume,
+        amount, amplitude, turnover_rate, change, change_percent) ",
+    );
+    last_builder.push_values(&[last_history], |mut b, data| {
+        b.push_bind(&data.symbol)
+            .push_bind(&data.date)
+            .push_bind(&data.open)
+            .push_bind(&data.close)
+            .push_bind(&data.high)
+            .push_bind(&data.low)
+            .push_bind(&data.volume)
+            .push_bind(&data.amount)
+            .push_bind(&data.amplitude)
+            .push_bind(&data.turnover_rate)
+            .push_bind(&data.change)
+            .push_bind(&data.change_percent);
+    });
+    last_builder.push(" ON CONFLICT(symbol, date) DO NOTHING");
+    let result = last_builder.build().execute(&mut *tx).await?;
+    batch_size += result.rows_affected();
+
+    // 保存最新的股票涨跌数据
     let mut realtime_builder = QueryBuilder::new(
-        "INSERT INTO realtime_data (symbol, name, date, ytd_close, close, volume, change, change_percent) ",
+        "INSERT INTO realtime_data (symbol, name, date, close, volume, amount, amplitude, turnover_rate, change, change_percent) ",
     );
     let stock_info = get_stock_info(symbol, pool).await?;
     realtime_builder.push_values(&[last_history], |mut b, data| {
         b.push_bind(&data.symbol)
             .push_bind(&stock_info.name)
             .push_bind(&data.date)
-            .push_bind(&last_two_history.close)
             .push_bind(&data.close)
             .push_bind(&data.volume)
-            .push_bind(change)
-            .push_bind(change_percent);
+            .push_bind(&data.amount)
+            .push_bind(&data.amplitude)
+            .push_bind(&data.turnover_rate)
+            .push_bind(&data.change)
+            .push_bind(&data.change_percent);
     });
+    // 添加 ON CONFLICT 更新逻辑
+    realtime_builder.push(
+        r#" ON CONFLICT(symbol) DO UPDATE SET
+            name = EXCLUDED.name,
+            date = EXCLUDED.date,
+            close = EXCLUDED.close,
+            volume = EXCLUDED.volume,
+            amount = EXCLUDED.amount,
+            amplitude = EXCLUDED.amplitude,
+            turnover_rate = EXCLUDED.turnover_rate,
+            change = EXCLUDED.change,
+            change_percent = EXCLUDED.change_percent
+        "#,
+    );
     let result = realtime_builder.build().execute(&mut *tx).await?;
     batch_size += result.rows_affected();
 

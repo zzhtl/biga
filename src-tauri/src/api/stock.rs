@@ -51,6 +51,11 @@ fn parse_historical_data(
                 low: item.low,
                 close: item.close,
                 volume: item.volume,
+                amount: item.amount,
+                amplitude: item.amplitude,
+                turnover_rate: item.turnover_rate,
+                change_percent: item.change_percent,
+                change: item.change,
             })
         })
         .collect()
