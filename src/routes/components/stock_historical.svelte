@@ -2,6 +2,7 @@
     import { onMount } from "svelte";
     import { invoke } from "@tauri-apps/api/core";
     import * as echarts from "echarts";
+    import { formatVolume, formatDate } from "../utils/utils";
 
     type EChartsOption = echarts.EChartsOption;
 
@@ -101,10 +102,12 @@
                     type: "candlestick",
                     data: kData,
                     itemStyle: {
-                        color: "#ef4444", // 涨颜色改为红色
-                        color0: "#10b981", // 跌颜色改为绿色
-                        borderColor: "#ef4444",
-                        borderColor0: "#10b981",
+                        // 上涨颜色配置
+                        color: "#FF0000", // 阳线填充色（默认红色）
+                        borderColor: "#FF0000", // 阳线边框色
+                        // 下跌颜色配置
+                        color0: "#00FF00", // 阴线填充色（默认绿色）
+                        borderColor0: "#00FF00", // 阴线边框色
                     },
                     emphasis: {
                         itemStyle: {
@@ -159,18 +162,6 @@
         d.setMonth(d.getMonth() - 5); // 自动处理跨年问题
         d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
         return d.toISOString().slice(0, 10);
-    }
-
-    // 新增日期格式化工具函数
-    function formatDate(dateString: string): string {
-        const date = new Date(dateString);
-
-        // 使用UTC时间避免时区问题
-        const year = date.getUTCFullYear();
-        const month = String(date.getUTCMonth() + 1).padStart(2, "0");
-        const day = String(date.getUTCDate()).padStart(2, "0");
-
-        return `${year}-${month}-${day}`;
     }
 
     // 初始化状态
@@ -405,8 +396,8 @@
                     <div>{data.close}</div>
                     <div>{data.high}</div>
                     <div>{data.low}</div>
-                    <div>{data.volume}手</div>
-                    <div>{data.amount}</div>
+                    <div>{formatVolume(data.volume)}手</div>
+                    <div>{formatVolume(data.amount)}</div>
                     <div>{data.amplitude}%</div>
                     <div>{data.turnover_rate}%</div>
                     <!-- 涨跌额 -->

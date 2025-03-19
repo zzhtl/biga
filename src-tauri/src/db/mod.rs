@@ -45,12 +45,7 @@ pub async fn batch_insert_historical_data(
 
     // 批量生成占位符（自动处理参数展开）
     let mut batch_size: u64 = 0;
-    let count = data_list.len();
     for chunk in data_list.chunks(constants::BATCH_SIZE) {
-        // 最新一条数据单独保存
-        if batch_size == (count - 1) as u64 {
-            break;
-        }
         let mut query_builder = QueryBuilder::new(
             "INSERT INTO historical_data (symbol, date, open, close, high, low, volume,
             amount, amplitude, turnover_rate, change, change_percent) ",
@@ -75,28 +70,6 @@ pub async fn batch_insert_historical_data(
         batch_size += result.rows_affected();
     }
     let last_history = data_list.last().unwrap();
-    let mut last_builder = QueryBuilder::new(
-        "INSERT INTO historical_data (symbol, date, open, close, high, low, volume,
-        amount, amplitude, turnover_rate, change, change_percent) ",
-    );
-    last_builder.push_values(&[last_history], |mut b, data| {
-        b.push_bind(&data.symbol)
-            .push_bind(&data.date)
-            .push_bind(&data.open)
-            .push_bind(&data.close)
-            .push_bind(&data.high)
-            .push_bind(&data.low)
-            .push_bind(&data.volume)
-            .push_bind(&data.amount)
-            .push_bind(&data.amplitude)
-            .push_bind(&data.turnover_rate)
-            .push_bind(&data.change)
-            .push_bind(&data.change_percent);
-    });
-    last_builder.push(" ON CONFLICT(symbol, date) DO NOTHING");
-    let result = last_builder.build().execute(&mut *tx).await?;
-    batch_size += result.rows_affected();
-
     // 保存最新的股票涨跌数据
     let mut realtime_builder = QueryBuilder::new(
         "INSERT INTO realtime_data (symbol, name, date, close, volume, amount, amplitude, turnover_rate, change, change_percent) ",
