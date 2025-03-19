@@ -1,6 +1,7 @@
 <script lang="ts">
     import { invoke } from "@tauri-apps/api/core";
     import { onMount } from "svelte";
+    import { formatVolume } from "../utils/utils";
 
     // 定义类型
     interface RealtimeData {
@@ -16,139 +17,247 @@
         change_percent: number;
     }
 
-    let stocks = $state<RealtimeData[]>([]);
-    let loading = $state(true);
-    let error = $state<string | null>(null);
-    // 添加日期格式化函数
+    // 状态管理
+    let stocks: RealtimeData[] = [];
+    let loading = true;
+    let error: string | null = null;
+    let searchQuery = "";
+    let searchDebounce: number | null = null;
+    // 排序状态
+    let sortColumn = "change_percent"; // 默认按股票代码排序
+    let sortDirection = "desc"; // 默认升序
+
+    // 日期格式化
     const formatDate = (date: Date) => {
         return new Intl.DateTimeFormat("zh-CN").format(date);
     };
 
-    // 添加成交量格式化函数
-    const formatVolume = (volume: number) => {
-        if (volume >= 1_000_000) return `${(volume / 1_000_000).toFixed(1)}M`;
-        if (volume >= 1_000) return `${(volume / 1_000).toFixed(1)}K`;
-        return volume.toString();
-    };
-
-    // 组件挂载时获取数据
-    onMount(async () => {
+    // 数据获取函数（添加排序参数）
+    async function fetchData(query?: string, sortBy?: string, order?: string) {
         try {
-            const response = await invoke<RealtimeData[]>("get_realtime_data");
-            stocks = response.map((item) => ({
-                ...item,
-                date: new Date(item.date), // 确保日期转换为Date对象
-            }));
+            loading = true;
             error = null;
+            const response = await invoke<RealtimeData[]>("get_realtime_data", {
+                search: query,
+                column: sortBy,
+                sort: order,
+            });
+            stocks = response; // 保持引用（如果允许修改原始数据）
+            for (const item of stocks) {
+                item.date = new Date(item.date);
+            }
         } catch (err) {
             console.error("获取数据失败:", err);
             error = "无法获取实时数据，请稍后重试";
         } finally {
             loading = false;
         }
+    }
+
+    // 初始化加载（传递默认排序参数）
+    onMount(async () => {
+        await fetchData("", sortColumn, sortDirection);
     });
+
+    // 监听搜索输入变化
+    $: if (searchQuery) {
+        if (searchDebounce) clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(() => {
+            // 传递当前排序参数
+            fetchData(searchQuery, sortColumn, sortDirection);
+        }, 300);
+    } else {
+        fetchData("", sortColumn, sortDirection);
+    }
+
+    // 排序函数（触发数据重新获取）
+    function sortData(column: string) {
+        if (column === sortColumn) {
+            sortDirection = sortDirection === "asc" ? "desc" : "asc";
+        } else {
+            sortColumn = column;
+            sortDirection = "desc";
+        }
+
+        // 触发数据重新获取（传递当前排序参数和搜索词）
+        fetchData(searchQuery, sortColumn, sortDirection);
+    }
 </script>
 
+<!-- 页面布局 -->
 <div class="container">
-    <h1>实时股票行情</h1>
+    <!-- 搜索框 -->
+    <div class="search-container">
+        <input
+            bind:value={searchQuery}
+            placeholder="搜索股票代码或名称"
+            class="search-input"
+        />
+    </div>
 
+    <!-- 数据展示 -->
     <div class="data-grid">
         <div class="header-row">
-            <div>股票代码</div>
-            <div>名称</div>
+            <div onclick={() => sortData("symbol")} class="sort-column">
+                股票代码
+                {#if sortColumn === "symbol"}
+                    {sortDirection === "asc" ? "↑" : "↓"}
+                {/if}
+            </div>
+            <div onclick={() => sortData("name")} class="sort-column">
+                名称
+                {#if sortColumn === "name"}
+                    {sortDirection === "asc" ? "↑" : "↓"}
+                {/if}
+            </div>
             <div>日期</div>
             <div>最新价</div>
-            <div>成交量</div>
-            <div>成交额</div>
+            <div onclick={() => sortData("volume")} class="sort-column">
+                成交量
+                {#if sortColumn === "volume"}
+                    {sortDirection === "asc" ? "↑" : "↓"}
+                {/if}
+            </div>
+            <div onclick={() => sortData("amount")} class="sort-column">
+                成交额
+                {#if sortColumn === "amount"}
+                    {sortDirection === "asc" ? "↑" : "↓"}
+                {/if}
+            </div>
             <div>振幅</div>
             <div>换手率</div>
-            <div>涨跌额</div>
-            <div>涨跌幅</div>
+            <div onclick={() => sortData("change")} class="sort-column">
+                涨跌额
+                {#if sortColumn === "change"}
+                    {sortDirection === "asc" ? "↑" : "↓"}
+                {/if}
+            </div>
+            <div onclick={() => sortData("change_percent")} class="sort-column">
+                涨跌幅
+                {#if sortColumn === "change_percent"}
+                    {sortDirection === "asc" ? "↑" : "↓"}
+                {/if}
+            </div>
         </div>
 
-        {#each stocks as stock}
-            <div class="data-row">
-                <div class="symbol">{stock.symbol}</div>
-                <div class="name">{stock.name}</div>
-                <div class="date">{formatDate(stock.date)}</div>
-                <div class="close">{stock.close}</div>
-                <div class="volume">{stock.volume}手</div>
-                <div class="amount">{stock.amount}</div>
-                <div class="amplitude">{stock.amplitude}&</div>
-                <div class="turnover_rate">{stock.turnover_rate}%</div>
-                <div
-                    class:negative={stock.change > 0}
-                    class:positive={stock.change < 0}
-                >
-                    {stock.change > 0 ? "+" : ""}{stock.change}
+        {#if loading}
+            <div class="loading">加载中...</div>
+        {:else if error}
+            <div class="error">{error}</div>
+        {:else}
+            {#each stocks as stock}
+                <div class="data-row">
+                    <div class="symbol">{stock.symbol}</div>
+                    <div class="name">{stock.name}</div>
+                    <div class="date">{formatDate(stock.date)}</div>
+                    <div class="close">{stock.close}</div>
+                    <div class="volume">{formatVolume(stock.volume)}手</div>
+                    <div class="amount">{formatVolume(stock.amount)}</div>
+                    <div class="amplitude">{stock.amplitude}%</div>
+                    <div class="turnover_rate">{stock.turnover_rate}%</div>
+                    <div
+                        class:negative={stock.change > 0}
+                        class:positive={stock.change < 0}
+                    >
+                        {stock.change > 0 ? "+" : ""}{stock.change}
+                    </div>
+                    <div
+                        class:negative={stock.change_percent > 0}
+                        class:positive={stock.change_percent < 0}
+                    >
+                        {stock.change_percent > 0
+                            ? "+"
+                            : ""}{stock.change_percent}%
+                    </div>
                 </div>
-                <div
-                    class:negative={stock.change_percent > 0}
-                    class:positive={stock.change_percent < 0}
-                >
-                    {stock.change_percent > 0 ? "+" : ""}{stock.change_percent}%
-                </div>
-            </div>
-        {/each}
+            {/each}
+        {/if}
     </div>
 </div>
 
 <style>
-    /* 添加加载和错误状态样式 */
-    .loading,
-    .error {
-        padding: 2rem;
-        text-align: center;
-        color: #666;
-    }
-
-    .error {
-        color: #ef4444;
-    }
-    .header-row,
-    .data-row {
-        grid-template-columns: repeat(7, 1fr);
-    }
-
+    /* 主容器 */
     .container {
         max-width: 1200px;
         margin: 0 auto;
         padding: 1rem;
+        background: #1a1a1d;
+        border-radius: 12px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
     }
 
+    /* 标题样式 */
     h1 {
-        font-size: 1.8rem;
-        margin-bottom: 2rem;
-        color: var(--text-primary);
+        color: #ffffff;
+        font-size: 2rem;
+        margin: 1rem 0;
+        text-align: center;
     }
 
+    /* 搜索框样式 */
+    .search-container {
+        margin: 1rem 0;
+        text-align: center;
+    }
+
+    .search-input {
+        padding: 0.8rem 1.5rem;
+        width: 300px;
+        border: 2px solid #3b82f6;
+        border-radius: 24px;
+        background: #2d2d30;
+        color: #ffffff;
+        font-size: 1rem;
+        transition: border-color 0.3s ease;
+    }
+
+    .search-input:focus {
+        outline: none;
+        border-color: #0ea5e9;
+        box-shadow: 0 0 0 2px rgba(14, 182, 129, 0.2);
+    }
+
+    .search-input::placeholder {
+        color: #666666;
+    }
+
+    @media (max-width: 768px) {
+        .search-input {
+            width: 100%;
+            margin: 0 1rem;
+        }
+    }
+
+    /* 数据表格样式 */
     .data-grid {
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 0.5rem;
+        background: #2d2d30;
+        border-radius: 12px;
         overflow: hidden;
+        margin-top: 1rem;
     }
 
     .header-row,
     .data-row {
         display: grid;
-        grid-template-columns: 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr;
+        grid-template-columns: repeat(10, 1fr);
         gap: 1rem;
         padding: 1rem;
         align-items: center;
     }
 
     .header-row {
-        background: rgba(255, 255, 255, 0.1);
+        background: #1a1a1d;
         font-weight: 600;
+        color: #ffffff;
     }
 
     .data-row {
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        border-bottom: 1px solid #3b3b41;
         transition: background 0.2s ease;
     }
 
     .data-row:hover {
-        background: rgba(255, 255, 255, 0.02);
+        background: #3b3b41;
     }
 
     .positive {
@@ -159,23 +268,47 @@
         color: #ef4444;
     }
 
-    .symbol {
-        font-weight: 500;
+    /* 排序样式 */
+    .sort-column {
+        cursor: pointer;
+    }
+
+    .sort-column:active {
+        opacity: 0.8;
+    }
+
+    .sort-column[aria-sort="ascending"] {
+        font-weight: bold;
+        color: #10b981;
+    }
+
+    .sort-column[aria-sort="descending"] {
+        font-weight: bold;
+        color: #ef4444;
     }
 
     /* 移动端适配 */
     @media (max-width: 768px) {
         .header-row,
         .data-row {
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(2, 1fr);
         }
 
-        /* 隐藏日期和名称列 */
-        .header-row div:nth-child(2),
-        .header-row div:nth-child(3),
-        .data-row div:nth-child(2),
-        .data-row div:nth-child(3) {
+        .header-row div:nth-child(n + 3),
+        .data-row div:nth-child(n + 3) {
             display: none;
         }
+    }
+
+    /* 加载/错误状态样式 */
+    .loading,
+    .error {
+        padding: 2rem;
+        text-align: center;
+        color: #ffffff;
+    }
+
+    .error {
+        color: #ef4444;
     }
 </style>
