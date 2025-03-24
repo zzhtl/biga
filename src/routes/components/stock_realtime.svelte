@@ -96,8 +96,8 @@
     </div>
 
     <!-- 数据展示 -->
-    <div class="data-grid">
-        <div class="header-row">
+    <div class="data-table">
+        <div class="table-header">
             <div onclick={() => sortData("symbol")} class="sort-column">
                 股票代码
                 {#if sortColumn === "symbol"}
@@ -146,7 +146,7 @@
             <div class="error">{error}</div>
         {:else}
             {#each stocks as stock}
-                <div class="data-row">
+                <div class="table-row">
                     <div class="symbol">{stock.symbol}</div>
                     <div class="name">{stock.name}</div>
                     <div class="date">{formatDate(stock.date)}</div>
@@ -180,18 +180,6 @@
     .container {
         max-width: 1200px;
         margin: 0 auto;
-        padding: 1rem;
-        background: #1a1a1d;
-        border-radius: 12px;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-    }
-
-    /* 标题样式 */
-    h1 {
-        color: #ffffff;
-        font-size: 2rem;
-        margin: 1rem 0;
-        text-align: center;
     }
 
     /* 搜索框样式 */
@@ -229,35 +217,34 @@
     }
 
     /* 数据表格样式 */
-    .data-grid {
-        background: #2d2d30;
-        border-radius: 12px;
+    .data-table {
+        margin-top: 2rem;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 0.5rem;
         overflow: hidden;
-        margin-top: 1rem;
     }
 
-    .header-row,
-    .data-row {
+    .table-header,
+    .table-row {
         display: grid;
         grid-template-columns: repeat(10, 1fr);
         gap: 1rem;
         padding: 1rem;
-        align-items: center;
     }
 
-    .header-row {
-        background: #1a1a1d;
+    .table-header {
+        background: rgba(255, 255, 255, 0.1);
         font-weight: 600;
-        color: #ffffff;
     }
 
-    .data-row {
-        border-bottom: 1px solid #3b3b41;
-        transition: background 0.2s ease;
+    .table-row {
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     }
 
-    .data-row:hover {
-        background: #3b3b41;
+    .table-row div {
+        padding: 0.15rem;
+        display: flex;
+        align-items: center;
     }
 
     .positive {
@@ -275,16 +262,6 @@
 
     .sort-column:active {
         opacity: 0.8;
-    }
-
-    .sort-column[aria-sort="ascending"] {
-        font-weight: bold;
-        color: #10b981;
-    }
-
-    .sort-column[aria-sort="descending"] {
-        font-weight: bold;
-        color: #ef4444;
     }
 
     /* 移动端适配 */

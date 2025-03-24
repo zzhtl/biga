@@ -3,8 +3,10 @@
     import Settings from "./components/sys_settings.svelte";
     import RealTimeData from "./components/stock_realtime.svelte";
     import HistoricalData from "./components/stock_historical.svelte";
+    import StockList from "./components/stock_list.svelte";
 
-    let activeView: "stock" | "realtime" | "historical" | "settings" = "stock";
+    let activeView: "stock" | "list" | "realtime" | "historical" | "settings" =
+        "stock";
 </script>
 
 <div class="main-container">
@@ -13,25 +15,31 @@
         <ul>
             <li
                 class:active={activeView === "stock"}
-                on:click={() => (activeView = "stock")}
+                onclick={() => (activeView = "stock")}
             >
                 <span>📈 股票预测</span>
             </li>
             <li
                 class:active={activeView === "realtime"}
-                on:click={() => (activeView = "realtime")}
+                onclick={() => (activeView = "realtime")}
             >
                 <span>⌚ 实时行情</span>
             </li>
             <li
                 class:active={activeView === "historical"}
-                on:click={() => (activeView = "historical")}
+                onclick={() => (activeView = "historical")}
             >
                 <span>📅 历史数据</span>
             </li>
             <li
+                class:active={activeView === "list"}
+                onclick={() => (activeView = "list")}
+            >
+                <span>📋 股票列表</span>
+            </li>
+            <li
                 class:active={activeView === "settings"}
-                on:click={() => (activeView = "settings")}
+                onclick={() => (activeView = "settings")}
             >
                 <span>⚙️ 系统设置</span>
             </li>
@@ -41,6 +49,8 @@
     <main class="content">
         {#if activeView === "stock"}
             <StockPrediction />
+        {:else if activeView === "list"}
+            <StockList />
         {:else if activeView === "realtime"}
             <RealTimeData />
         {:else if activeView === "historical"}

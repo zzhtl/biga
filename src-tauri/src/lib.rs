@@ -5,6 +5,7 @@ mod db;
 mod error;
 use commands::stock::{get_stock_infos, refresh_stock_infos};
 use commands::stock_historical::{get_historical_data, refresh_historical_data};
+use commands::stock_list::get_stock_list;
 use commands::stock_realtime::get_realtime_data;
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use std::env;
@@ -26,6 +27,7 @@ pub fn run() {
         )
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            get_stock_list,
             get_stock_infos,
             get_realtime_data,
             refresh_stock_infos,
