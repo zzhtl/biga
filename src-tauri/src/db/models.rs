@@ -21,6 +21,20 @@ pub struct StockInfoItem {
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct Stock {
+    #[sqlx(rename = "symbol")]
+    pub symbol: String, // 股票代码(含市场前缀)
+    pub name: String,         // 股票简称
+    pub area: String,         // 地域
+    pub industry: String,     // 所属行业
+    pub market: String,       // 市场类型:主板、创业板、科创板
+    pub exchange: String,     // 交易所(sh/sz)
+    pub list_date: String,    // 上市日期
+    pub act_name: String,     // 实控人名称
+    pub act_ent_type: String, // 实控人企业性质
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct HistoricalData {
     #[sqlx(rename = "symbol")]
     pub symbol: String,
