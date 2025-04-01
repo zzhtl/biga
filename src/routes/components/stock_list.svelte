@@ -9,7 +9,7 @@
         area: string;
         industry: string;
         market: string;
-        exchange: string;
+        ts_code: string;
         list_date: string;
         act_name: string;
         act_ent_type: string;
@@ -22,7 +22,7 @@
     let searchQuery = "";
     let searchDebounce: number | null = null;
 
-    // 数据获取函数（添加排序参数）
+    // 数据获取函数
     async function fetchData(query?: string) {
         try {
             loading = true;
@@ -48,7 +48,7 @@
     $: if (searchQuery) {
         if (searchDebounce) clearTimeout(searchDebounce);
         searchDebounce = setTimeout(() => {
-            // 传递当前排序参数
+            // 传递当前参数
             fetchData(searchQuery);
         }, 300);
     } else {
@@ -62,7 +62,7 @@
     <div class="search-container">
         <input
             bind:value={searchQuery}
-            placeholder="搜索股票代码或名称"
+            placeholder="搜索股票代码或名称或行业"
             class="search-input"
         />
     </div>
@@ -93,7 +93,7 @@
                     <div class="region">{stock.area}</div>
                     <div class="industry">{stock.industry}</div>
                     <div class="market">{stock.market}</div>
-                    <div class="exchange">{stock.exchange}</div>
+                    <div class="ts_code">{stock.ts_code}</div>
                     <div class="list_date">{stock.list_date}</div>
                     <div class="act_name">{stock.act_name}</div>
                     <div class="act_ent_type">{stock.act_ent_type}</div>

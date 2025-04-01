@@ -1,6 +1,7 @@
 mod api;
 mod commands;
 mod constants;
+mod csv;
 mod db;
 mod error;
 use commands::stock::{get_stock_infos, refresh_stock_infos};

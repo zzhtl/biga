@@ -1,7 +1,7 @@
 pub mod models;
 use crate::constants;
 use crate::error::AppError;
-use models::{HistoricalData, StockInfo};
+use models::{HistoricalData, Stock, StockInfo};
 use sqlx::sqlite::SqlitePool;
 use sqlx::QueryBuilder;
 
@@ -21,6 +21,39 @@ pub async fn batch_insert_stock_info(
             b.push_bind(&data.symbol)
                 .push_bind(&data.name)
                 .push_bind(&data.exchange);
+        });
+        query_builder.push(" ON CONFLICT(symbol) DO NOTHING");
+        let result = query_builder.build().execute(&mut *tx).await?;
+
+        affected_rows += result.rows_affected();
+    }
+    tx.commit().await?;
+
+    Ok(affected_rows)
+}
+
+// 股票详细信息
+pub async fn batch_insert_stock(pool: &SqlitePool, data_list: Vec<Stock>) -> Result<u64, AppError> {
+    if data_list.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    let mut affected_rows = 0;
+    for chunk in data_list.chunks(constants::BATCH_SIZE) {
+        let mut query_builder = QueryBuilder::new(
+            "INSERT INTO stock (symbol, name, area, industry, market, exchange, list_date, act_name, act_ent_type) ",
+        );
+        query_builder.push_values(chunk, |mut b, data| {
+            let exchange = data.exchange.split('.').last().unwrap_or("").to_lowercase();
+            b.push_bind(&data.symbol)
+                .push_bind(&data.name)
+                .push_bind(&data.area)
+                .push_bind(&data.industry)
+                .push_bind(&data.market)
+                .push_bind(exchange)
+                .push_bind(&data.list_date)
+                .push_bind(&data.act_name)
+                .push_bind(&data.act_ent_type);
         });
         query_builder.push(" ON CONFLICT(symbol) DO NOTHING");
         let result = query_builder.build().execute(&mut *tx).await?;
