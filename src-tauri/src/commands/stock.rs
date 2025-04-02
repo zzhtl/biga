@@ -7,15 +7,14 @@ use tauri::State;
 
 #[tauri::command]
 pub async fn get_stock_infos(pool: State<'_, SqlitePool>) -> Result<Vec<StockInfo>, AppError> {
-    let records = sqlx::query_as!(
-        StockInfo,
+    let records = sqlx::query_as::<_, StockInfo>(
         r#"
         SELECT
             COALESCE(symbol, '') as symbol,
             COALESCE(name, '') as name,
             COALESCE(exchange, '') as exchange
         FROM stock_info
-        "#
+        "#,
     )
     .fetch_all(&*pool)
     .await?;

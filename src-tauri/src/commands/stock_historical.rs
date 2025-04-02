@@ -12,15 +12,16 @@ pub async fn get_historical_data(
     pool: State<'_, SqlitePool>, // 从全局状态中提取连接池
 ) -> Result<Vec<HistoricalData>, AppError> {
     // 1. 从数据库查询
-    let records = sqlx::query_as!(
-        HistoricalData,
-        "SELECT * FROM historical_data
+    let records = sqlx::query_as::<_, HistoricalData>(
+        r#"
+        SELECT * FROM historical_data
         WHERE symbol = ? AND date BETWEEN ? AND ?
-        ORDER BY date DESC",
-        symbol,
-        start,
-        end
+        ORDER BY date DESC
+        "#,
     )
+    .bind(symbol)
+    .bind(start)
+    .bind(end)
     .fetch_all(&*pool)
     .await?;
 
