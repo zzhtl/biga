@@ -175,36 +175,6 @@
         align-items: center;
     }
 
-    .positive {
-        color: #10b981;
-    }
-
-    .negative {
-        color: #ef4444;
-    }
-
-    /* 排序样式 */
-    .sort-column {
-        cursor: pointer;
-    }
-
-    .sort-column:active {
-        opacity: 0.8;
-    }
-
-    /* 移动端适配 */
-    @media (max-width: 768px) {
-        .header-row,
-        .data-row {
-            grid-template-columns: repeat(2, 1fr);
-        }
-
-        .header-row div:nth-child(n + 3),
-        .data-row div:nth-child(n + 3) {
-            display: none;
-        }
-    }
-
     /* 加载/错误状态样式 */
     .loading,
     .error {
@@ -215,5 +185,9 @@
 
     .error {
         color: #ef4444;
+    }
+
+    /* 移动端适配 */
+    @media (max-width: 768px) {
     }
 </style>
