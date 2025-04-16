@@ -1,6 +1,7 @@
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use chrono::NaiveDateTime;
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct StockInfo {
@@ -36,7 +37,7 @@ pub struct Stock {
     pub act_ent_type: String, // 实控人企业性质
 }
 
-#[derive(Debug, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 pub struct HistoricalData {
     #[sqlx(rename = "symbol")]
     pub symbol: String,
@@ -95,4 +96,85 @@ pub struct RealtimeData {
     pub turnover_rate: f64,  //换手率（%）
     pub change_percent: f64, // 涨跌幅（%）
     pub change: f64,         // 涨跌额（元）
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct StockPredictionModel {
+    pub id: i64,
+    pub symbol: String,
+    pub model_name: String,
+    pub model_type: String,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+    #[serde(skip_serializing)]
+    pub model_data: Vec<u8>,
+    pub parameters: String,
+    pub metrics: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StockPredictionModelInfo {
+    pub id: i64,
+    pub symbol: String,
+    pub model_name: String,
+    pub model_type: String,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+    pub parameters: String,
+    pub metrics: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+pub struct StockPrediction {
+    pub id: i64,
+    pub symbol: String,
+    pub model_id: i64,
+    pub prediction_date: NaiveDate,
+    pub target_date: NaiveDate,
+    pub predicted_price: f64,
+    pub predicted_change_percent: f64,
+    pub confidence: f64,
+    pub features_used: String,
+    pub created_at: NaiveDateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PredictionRequest {
+    pub symbol: String,
+    pub model_name: Option<String>,
+    pub days_to_predict: i32,
+    pub train_test_split: Option<f64>,
+    pub lookback_days: Option<i32>,
+    pub features: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PredictionModelConfig {
+    pub model_name: String,
+    pub model_type: String,
+    pub parameters: serde_json::Value,
+    pub features: Vec<String>,
+    pub lookback_days: i32,
+    pub train_test_split: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PredictionResult {
+    pub symbol: String,
+    pub target_date: NaiveDate,
+    pub predicted_price: f64,
+    pub predicted_change_percent: f64,
+    pub confidence: f64,
+    pub model_info: StockPredictionModelInfo,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ModelEvaluationMetrics {
+    pub rmse: f64,
+    pub mae: f64,
+    pub r_squared: f64,
+    pub accuracy: f64,
+    pub precision: f64,
+    pub recall: f64,
+    pub f1_score: f64,
 }
