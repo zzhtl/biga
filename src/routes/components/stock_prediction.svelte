@@ -79,28 +79,23 @@
         errorMessage = "";
         
         try {
-            const parameters: Record<string, any> = {};
-            if (modelType === "linear") {
-                parameters.learning_rate = 0.01;
-            } else if (modelType === "decision_tree") {
-                parameters.max_depth = 5;
-            } else if (modelType === "svm") {
-                parameters.c = 1.0;
-            }
-            
-            const config = {
+            // 计算训练日期范围
+            const endDate = new Date().toISOString().slice(0, 10);
+            const startDateObj = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000);
+            const startDate = startDateObj.toISOString().slice(0, 10);
+
+            const trainRequest = {
+                stock_code: stockCode,
                 model_name: newModelName,
-                model_type: modelType,
-                parameters: parameters,
+                start_date: startDate,
+                end_date: endDate,
                 features: features,
-                lookback_days: lookbackDays,
-                train_test_split: trainTestSplit
+                target: "close",
+                prediction_days: daysToPredict,
+                model_type: modelType
             };
-            
-            const result: any = await invoke('train_stock_prediction_model', { 
-                symbol: stockCode,
-                config: config
-            });
+
+            const result: any = await invoke('train_stock_prediction_model', { request: trainRequest });
             
             if (result.success) {
                 await loadModelList();

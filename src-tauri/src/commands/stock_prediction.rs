@@ -139,19 +139,23 @@ pub async fn train_stock_prediction_model(
     request: TrainModelRequest
 ) -> Result<ModelMetadata, String> {
     let pool = get_pool(&app_handle);
-    
-    // 获取历史数据
-    let start_date = NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d")
-        .map_err(|e| format!("无效的开始日期: {}", e))?;
-    let end_date = NaiveDate::parse_from_str(&request.end_date, "%Y-%m-%d")
-        .map_err(|e| format!("无效的结束日期: {}", e))?;
-    
-    // 这里应该有获取历史数据的代码，暂时mock一些数据
-    let historical_data = get_mock_historical_data(&request.stock_code, start_date, end_date);
+
+    // 从数据库获取历史数据
+    let historical_data = sqlx::query_as::<_, crate::db::models::HistoricalData>(
+        r#"SELECT * FROM historical_data
+           WHERE symbol = ? AND date BETWEEN ? AND ?
+           ORDER BY date ASC"#,
+    )
+    .bind(&request.stock_code)
+    .bind(&request.start_date)
+    .bind(&request.end_date)
+    .fetch_all(&*pool)
+    .await
+    .map_err(|e| format!("获取历史数据失败: {}", e))?;
     
     // 检查是否有足够的历史数据
-    if historical_data.len() < 30 {
-        return Err("历史数据不足，无法训练模型。需要至少30天的数据。".to_string());
+    if historical_data.len() < 20 {
+        return Err("历史数据不足，无法训练模型。需要至少20天的数据。".to_string());
     }
     
     // 构建模型配置
@@ -205,10 +209,20 @@ pub async fn predict_stock_price(
     
     // 获取最近的历史数据
     let end_date = Utc::now().naive_utc().date();
-    let start_date = end_date - chrono::Duration::days(30); // 获取最近30天的数据
+    let start_date = end_date - chrono::Duration::days(30);
     
-    // 这里应该有获取历史数据的代码，暂时mock一些数据
-    let historical_data = get_mock_historical_data(&request.stock_code, start_date, end_date);
+    // 从数据库获取历史数据
+    let historical_data = sqlx::query_as::<_, crate::db::models::HistoricalData>(
+        r#"SELECT * FROM historical_data
+           WHERE symbol = ? AND date BETWEEN ? AND ?
+           ORDER BY date ASC"#,
+    )
+    .bind(&request.stock_code)
+    .bind(start_date.to_string())
+    .bind(end_date.to_string())
+    .fetch_all(&*pool)
+    .await
+    .map_err(|e| format!("获取历史数据失败: {}", e))?;
     
     if historical_data.is_empty() {
         return Err("没有足够的历史数据用于预测".to_string());
