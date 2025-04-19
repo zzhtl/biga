@@ -1,6 +1,6 @@
 use crate::db::models::{ModelEvaluationMetrics, StockPredictionModelInfo};
 use crate::prediction::features::FeatureSet;
-use chrono::{Duration, NaiveDate, Local, Datelike};
+use chrono::{NaiveDate, Datelike};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ndarray::ArrayView1;

@@ -1,8 +1,8 @@
 use crate::db::models::HistoricalData;
 use chrono::NaiveDate;
 use std::collections::HashMap;
-use linfa::{self, prelude::*, Dataset};
-use ndarray::{Array2, ArrayView1, Axis, Array1};
+use linfa::{self, Dataset};
+use ndarray::{Array2, ArrayView1, Array1};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

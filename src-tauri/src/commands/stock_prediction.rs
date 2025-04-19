@@ -1,10 +1,8 @@
-use crate::db::{self, prediction};
-use crate::prediction::{model, features};
-use crate::error::AppError;
+use crate::db::{prediction};
+use crate::prediction::model;
 use chrono::{NaiveDate, Utc, Datelike};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
 use tauri::{AppHandle, Manager};
 use sqlx::{Pool, Sqlite};
 
