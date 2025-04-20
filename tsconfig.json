@@ -11,7 +11,7 @@
     "strict": true,
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "types": ["vite/client"]
+    "types": ["vite/client", "@tauri-apps/api"]
   }
   // Path aliases are handled by https://kit.svelte.dev/docs/configuration#alias
   // except $lib which is handled by https://kit.svelte.dev/docs/configuration#files

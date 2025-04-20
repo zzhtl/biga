@@ -5,10 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ndarray::ArrayView1;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModelTrainingConfig {
     pub model_type: String,
-    pub parameters: serde_json::Value,
     pub features: Vec<String>,
     pub lookback_days: usize,
     pub train_test_split: f64,

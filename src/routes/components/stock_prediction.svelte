@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte';
-    import { invoke } from "@tauri-apps/api/core";
+    import { invoke } from '@tauri-apps/api/core';
+    import { confirm } from '@tauri-apps/plugin-dialog';
     
     let stockCode = "";
     let selectedModelName = "";
@@ -12,13 +13,15 @@
     
     // 定义接口
     interface ModelInfo {
-        id: number;
-        model_name: string;
-        model_type: string;
+        id: string;
+        name: string;
+        stock_code: string;
         created_at: number;
-        symbol: string;
-        parameters: string;
-        metrics: string;
+        model_type: string;
+        features: string[];
+        target: string;
+        prediction_days: number;
+        accuracy: number;
     }
     
     interface Prediction {
@@ -54,14 +57,10 @@
         if (!stockCode) return;
         
         try {
-            const result: any = await invoke('list_stock_prediction_models', { symbol: stockCode });
-            if (result.success) {
-                modelList = result.models;
-                if (modelList.length > 0) {
-                    selectedModelName = modelList[0].model_name;
-                }
-            } else {
-                modelList = [];
+            const models: ModelInfo[] = await invoke('list_stock_prediction_models', { symbol: stockCode });
+            modelList = models;
+            if (modelList.length > 0) {
+                selectedModelName = modelList[0].name;
             }
         } catch (error) {
             errorMessage = `加载模型列表失败: ${error}`;
@@ -95,15 +94,10 @@
                 model_type: modelType
             };
 
-            const result: any = await invoke('train_stock_prediction_model', { request: trainRequest });
-            
-            if (result.success) {
-                await loadModelList();
-                useExistingModel = true;
-                alert(`模型训练成功: ${result.message}`);
-            } else {
-                errorMessage = result.message || "训练失败";
-            }
+            const metadata: ModelInfo = await invoke('train_stock_prediction_model', { request: trainRequest });
+            await loadModelList();
+            useExistingModel = true;
+            alert(`模型训练成功: ${metadata.name}`);
         } catch (error) {
             errorMessage = `训练失败: ${error}`;
         } finally {
@@ -127,19 +121,12 @@
         
         try {
             const request = {
-                symbol: stockCode,
+                stock_code: stockCode,
                 model_name: useExistingModel ? selectedModelName : null,
-                days_to_predict: daysToPredict
+                prediction_days: daysToPredict
             };
-            
-            const result: any = await invoke('predict_stock_price', { request });
-            
-            if (result.success) {
-                predictions = result.predictions;
-            } else {
-                errorMessage = result.message || "预测失败";
-                predictions = [];
-            }
+            const preds: Prediction[] = await invoke('predict_stock_price', { request });
+            predictions = preds;
         } catch (error) {
             errorMessage = `预测失败: ${error}`;
             predictions = [];
@@ -152,22 +139,18 @@
         await loadModelList();
     }
     
-    async function deleteModel(modelId: number) {
-        if (confirm("确定要删除此模型吗？")) {
-            try {
-                const result: any = await invoke('delete_stock_prediction_model', { 
-                    modelId: modelId
-                });
-                
-                if (result.success) {
-                    await loadModelList();
-                    alert("模型删除成功");
-                } else {
-                    errorMessage = result.message || "删除失败";
-                }
-            } catch (error) {
-                errorMessage = `删除失败: ${error}`;
-            }
+    async function deleteModel(modelId: string) {
+        // 使用 Tauri 对话框进行确认
+        const confirmed = await confirm('确定要删除此模型吗？', { title: '删除模型' });
+        if (!confirmed) {
+            return;
+        }
+        try {
+            await invoke('delete_stock_prediction_model', { modelId });
+            await loadModelList();
+            alert('模型删除成功');
+        } catch (error) {
+            errorMessage = `删除失败: ${error}`;
         }
     }
 </script>
@@ -208,15 +191,15 @@
             {:else}
                 <div class="model-list">
                     {#each modelList as model}
-                        <div class="model-item" class:selected={selectedModelName === model.model_name}>
-                            <div class="model-info" on:click={() => selectedModelName = model.model_name}>
-                                <h3>{model.model_name}</h3>
+                        <div class="model-item" class:selected={selectedModelName === model.name}>
+                            <div class="model-info" on:click={() => selectedModelName = model.name}>
+                                <h3>{model.name}</h3>
                                 <div class="model-details">
                                     <span>类型：{model.model_type}</span>
                                     <span>创建时间：{new Date(model.created_at).toLocaleString()}</span>
                                 </div>
                             </div>
-                            <button class="delete-btn" on:click={() => deleteModel(model.id)}>删除</button>
+                            <button type="button" class="delete-btn" on:click={() => deleteModel(model.id)}>删除</button>
                         </div>
                     {/each}
                 </div>
