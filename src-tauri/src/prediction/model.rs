@@ -341,19 +341,18 @@ pub async fn predict_stock(
         // 提取最近的 lookback_days 天数据
         let window_start = current_data.len().saturating_sub(config.lookback_days);
         let window = &current_data[window_start..];
-        
-        // 提取特征
+
+        // 提取特征（原始特征用于基线预测）
         let feature_set = extract_single_feature_set(window, &config.features)?;
-        
-        // 标准化特征
-        let normalized_feature_set = normalize_single_feature_set(&feature_set, &config.normalization_params);
-        
-        // 进行预测
+        // 标准化特征（如果后续使用可打开此变量）
+        let _normalized_feature_set = normalize_single_feature_set(&feature_set, &config.normalization_params);
+
+        // 进行预测，基于原始特征集
         let prediction = match config.model_type.as_str() {
-            "linear" => predict_with_linear_regression(&normalized_feature_set, &serialized_model)?,
-            "decision_tree" => predict_with_linear_regression(&normalized_feature_set, &serialized_model)?, // 使用线性回归代替
-            "svm" => predict_with_linear_regression(&normalized_feature_set, &serialized_model)?, // 使用线性回归代替
-            "naive_bayes" => predict_with_linear_regression(&normalized_feature_set, &serialized_model)?, // 使用线性回归代替
+            "linear" => predict_with_linear_regression(&feature_set, &serialized_model)?,
+            "decision_tree" => predict_with_linear_regression(&feature_set, &serialized_model)?, // 使用线性回归代替
+            "svm" => predict_with_linear_regression(&feature_set, &serialized_model)?, // 使用线性回归代替
+            "naive_bayes" => predict_with_linear_regression(&feature_set, &serialized_model)?, // 使用线性回归代替
             _ => return Err(AppError::InvalidInput(format!("不支持的模型类型: {}", config.model_type))),
         };
         
@@ -540,13 +539,41 @@ fn predict_with_linear_regression(
     feature_set: &FeatureSet,
     serialized_model: &SerializedModel,
 ) -> Result<f64, AppError> {
-    // 简化预测：直接使用特征平均值作为预测结果，不反序列化模型
+    // 使用历史涨跌幅加权平均进行预测，并限制范围在 [-10%, 10%]
     if feature_set.features.is_empty() {
         return Ok(0.0);
     }
-    let sum: f64 = feature_set.features.iter().sum();
-    let prediction = sum / feature_set.features.len() as f64;
-    Ok(prediction)
+    let lookback = serialized_model.config.lookback_days as usize;
+    let mut pred = if let Some(idx) = serialized_model
+        .config
+        .features
+        .iter()
+        .position(|f| f == "change_percent")
+    {
+        let start = idx * lookback;
+        let end = start + lookback;
+        if feature_set.features.len() >= end {
+            let slice = &feature_set.features[start..end];
+            // 线性权重：最近一天权重最大
+            let total_weight: f64 = (1..=lookback).map(|w| w as f64).sum();
+            let weighted_sum: f64 = slice
+                .iter()
+                .enumerate()
+                .map(|(i, &val)| val * ((i + 1) as f64))
+                .sum();
+            weighted_sum / total_weight
+        } else {
+            // 回退到简单平均
+            let slice = &feature_set.features[start..];
+            slice.iter().sum::<f64>() / slice.len() as f64
+        }
+    } else {
+        // 默认使用简单平均
+        feature_set.features.iter().sum::<f64>() / feature_set.features.len() as f64
+    };
+    // 限制涨跌幅范围
+    pred = pred.clamp(-10.0, 10.0);
+    Ok(pred)
 }
 
 fn calculate_confidence(metrics: &ModelEvaluationMetrics) -> f64 {
@@ -597,4 +624,80 @@ fn deserialize_linear_model(data: &[u8]) -> Result<LinearRegression, AppError> {
     
     // 由于LinFA API限制，我们创建一个默认的线性回归模型
     Ok(LinearRegression::default())
-} 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    // 辅助函数：构造最简化的 SerializedModel
+    fn make_serialized_model(features: Vec<String>, lookback_days: usize) -> SerializedModel {
+        SerializedModel {
+            config: ModelTrainingConfig {
+                model_type: "linear".into(),
+                features: features.clone(),
+                lookback_days,
+                train_test_split: 0.8,
+                normalization_params: Default::default(),
+            },
+            model_data: Vec::new(),
+            metrics: ModelEvaluationMetrics {
+                rmse: 0.0,
+                mae: 0.0,
+                r_squared: 0.0,
+                accuracy: 0.0,
+                precision: 0.0,
+                recall: 0.0,
+                f1_score: 0.0,
+            },
+        }
+    }
+
+    #[test]
+    fn test_predict_change_percent_average() {
+        let features = vec!["change_percent".to_string()];
+        let sm = make_serialized_model(features.clone(), 3);
+        let fs = FeatureSet {
+            // change_percent 历史数据
+            features: vec![1.0, 2.0, 3.0],
+            target: 0.0,
+            date: NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            symbol: "TEST".into(),
+        };
+        let pred = predict_with_linear_regression(&fs, &sm).unwrap();
+        // 加权平均 (1*1 + 2*2 + 3*3) / (1+2+3) = 14/6
+        assert!((pred - (14.0/6.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_predict_clamp_upper_bound() {
+        let features = vec!["change_percent".to_string()];
+        let sm = make_serialized_model(features.clone(), 2);
+        let fs = FeatureSet {
+            // change_percent 历史数据，权重 [1,2]
+            features: vec![20.0, 30.0],
+            target: 0.0,
+            date: NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            symbol: "TEST".into(),
+        };
+        let pred = predict_with_linear_regression(&fs, &sm).unwrap();
+        assert_eq!(pred, 10.0);
+    }
+
+    #[test]
+    fn test_predict_offset_mapping() {
+        let features = vec!["close".to_string(), "change_percent".to_string()];
+        let sm = make_serialized_model(features.clone(), 2);
+        // 特征向量: [close window1, close window2, change1, change2]
+        let fs = FeatureSet {
+            features: vec![100.0, 200.0, 3.0, 5.0],
+            target: 0.0,
+            date: NaiveDate::from_ymd_opt(2023, 1, 1).unwrap(),
+            symbol: "TEST".into(),
+        };
+        let pred = predict_with_linear_regression(&fs, &sm).unwrap();
+        // 加权平均 (3*1 + 5*2) / 3 = 13/3
+        assert!((pred - (13.0/3.0)).abs() < 1e-6);
+    }
+}
