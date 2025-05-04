@@ -34,13 +34,19 @@
     // 使用类型
     let modelList: ModelInfo[] = [];
     let predictions: Prediction[] = [];
+    let modelAccuracy: number | null = null;
     
     // 模型训练参数
     let newModelName = "模型-" + new Date().toISOString().slice(0, 10);
-    let modelType = "linear"; // linear, decision_tree, svm, naive_bayes
-    let lookbackDays = 30;
+    let modelType = "candle_mlp"; // 默认使用Candle的MLP模型
+    let lookbackDays = 60; // 增加历史窗口
     let trainTestSplit = 0.8;
-    let features = ["close", "volume", "change_percent", "ma5", "ma10", "rsi", "macd"];
+    let features = ["close", "volume", "change_percent", "ma5", "ma10", "ma20", "rsi", "macd", "bollinger", "stochastic_k", "stochastic_d", "momentum"];
+    let epochs = 100; // 训练轮数
+    let batchSize = 32; // 批处理大小
+    let learningRate = 0.001; // 学习率
+    let dropout = 0.2; // Dropout率
+    let advancedOptions = false; // 是否显示高级选项
 
     onMount(async () => {
         try {
@@ -91,13 +97,21 @@
                 features: features,
                 target: "close",
                 prediction_days: daysToPredict,
-                model_type: modelType
+                model_type: modelType,
+                epochs: epochs,
+                batch_size: batchSize,
+                learning_rate: learningRate,
+                dropout: dropout,
+                train_test_split: trainTestSplit
             };
 
-            const metadata: ModelInfo = await invoke('train_stock_prediction_model', { request: trainRequest });
+            const result = await invoke<{metadata: ModelInfo, accuracy: number}>('train_candle_model', { request: trainRequest });
+            const metadata = result.metadata;
+            modelAccuracy = result.accuracy;
+            
             await loadModelList();
             useExistingModel = true;
-            alert(`模型训练成功: ${metadata.name}`);
+            alert(`模型训练成功: ${metadata.name}, 准确率: ${(modelAccuracy * 100).toFixed(2)}%`);
         } catch (error) {
             errorMessage = `训练失败: ${error}`;
         } finally {
@@ -123,9 +137,10 @@
             const request = {
                 stock_code: stockCode,
                 model_name: useExistingModel ? selectedModelName : null,
-                prediction_days: daysToPredict
+                prediction_days: daysToPredict,
+                use_candle: true // 使用Candle进行预测
             };
-            const preds: Prediction[] = await invoke('predict_stock_price', { request });
+            const preds: Prediction[] = await invoke('predict_with_candle', { request });
             predictions = preds;
         } catch (error) {
             errorMessage = `预测失败: ${error}`;
@@ -152,6 +167,45 @@
         } catch (error) {
             errorMessage = `删除失败: ${error}`;
         }
+    }
+    
+    // 用于重新训练选定模型
+    async function retrainModel(modelId: string, modelName: string) {
+        isTraining = true;
+        errorMessage = "";
+        
+        try {
+            await invoke('retrain_candle_model', { 
+                modelId,
+                epochs: epochs,
+                batchSize: batchSize,
+                learningRate: learningRate
+            });
+            alert(`模型 ${modelName} 重新训练成功`);
+            await loadModelList();
+        } catch (error) {
+            errorMessage = `重新训练失败: ${error}`;
+        } finally {
+            isTraining = false;
+        }
+    }
+
+    // 获取模型评估信息
+    async function evaluateModel(modelId: string) {
+        try {
+            const result = await invoke<{accuracy: number, confusion_matrix: any}>('evaluate_candle_model', { modelId });
+            const accuracy = result.accuracy;
+            const confusion_matrix = result.confusion_matrix;
+            
+            alert(`模型评估结果:\n准确率: ${(accuracy * 100).toFixed(2)}%\n混淆矩阵: ${JSON.stringify(confusion_matrix)}`);
+        } catch (error) {
+            errorMessage = `评估失败: ${error}`;
+        }
+    }
+    
+    // 切换高级选项显示
+    function toggleAdvancedOptions() {
+        advancedOptions = !advancedOptions;
     }
 </script>
 
@@ -196,10 +250,15 @@
                                 <h3>{model.name}</h3>
                                 <div class="model-details">
                                     <span>类型：{model.model_type}</span>
+                                    <span>准确率：{(model.accuracy * 100).toFixed(2)}%</span>
                                     <span>创建时间：{new Date(model.created_at).toLocaleString()}</span>
                                 </div>
                             </div>
-                            <button type="button" class="delete-btn" on:click={() => deleteModel(model.id)}>删除</button>
+                            <div class="model-actions">
+                                <button type="button" class="action-btn" on:click={() => evaluateModel(model.id)}>评估</button>
+                                <button type="button" class="action-btn" on:click={() => retrainModel(model.id, model.name)}>重训练</button>
+                                <button type="button" class="delete-btn" on:click={() => deleteModel(model.id)}>删除</button>
+                            </div>
                         </div>
                     {/each}
                 </div>
@@ -226,7 +285,7 @@
         </div>
     {:else}
         <div class="model-section">
-            <h2>训练新模型</h2>
+            <h2>训练新模型 (Candle)</h2>
             
             <div class="training-form">
                 <div class="form-group">
@@ -237,22 +296,53 @@
                 <div class="form-group">
                     <label>模型类型:</label>
                     <select bind:value={modelType}>
+                        <option value="candle_mlp">Candle多层感知机</option>
+                        <option value="candle_lstm">Candle LSTM</option>
+                        <option value="candle_gru">Candle GRU</option>
+                        <option value="candle_transformer">Candle Transformer</option>
                         <option value="linear">线性回归</option>
                         <option value="decision_tree">决策树</option>
                         <option value="svm">支持向量机</option>
-                        <option value="naive_bayes">朴素贝叶斯</option>
                     </select>
                 </div>
                 
                 <div class="form-group">
                     <label>历史窗口天数:</label>
-                    <input type="number" bind:value={lookbackDays} min="5" max="60" />
+                    <input type="number" bind:value={lookbackDays} min="30" max="360" />
                 </div>
                 
                 <div class="form-group">
                     <label>训练/测试集分割比例:</label>
                     <input type="number" bind:value={trainTestSplit} min="0.5" max="0.9" step="0.1" />
                 </div>
+                
+                <button type="button" class="advanced-btn" on:click={toggleAdvancedOptions}>
+                    {advancedOptions ? '隐藏高级选项' : '显示高级选项'}
+                </button>
+                
+                {#if advancedOptions}
+                    <div class="advanced-options">
+                        <div class="form-group">
+                            <label>训练轮数(Epochs):</label>
+                            <input type="number" bind:value={epochs} min="10" max="1000" />
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>批处理大小(Batch Size):</label>
+                            <input type="number" bind:value={batchSize} min="8" max="128" />
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>学习率(Learning Rate):</label>
+                            <input type="number" bind:value={learningRate} min="0.0001" max="0.1" step="0.0001" />
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>Dropout率:</label>
+                            <input type="number" bind:value={dropout} min="0" max="0.5" step="0.1" />
+                        </div>
+                    </div>
+                {/if}
                 
                 <div class="form-group features-list">
                     <label>特征选择:</label>
@@ -298,6 +388,14 @@
                             10日均线
                         </label>
                         <label>
+                            <input type="checkbox" value="ma20" checked={features.includes('ma20')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'ma20'];
+                                else features = features.filter(f => f !== 'ma20');
+                            }} />
+                            20日均线
+                        </label>
+                        <label>
                             <input type="checkbox" value="rsi" checked={features.includes('rsi')} on:change={(e) => {
                                 const target = e.target as HTMLInputElement;
                                 if (target.checked) features = [...features, 'rsi'];
@@ -312,6 +410,38 @@
                                 else features = features.filter(f => f !== 'macd');
                             }} />
                             MACD指标
+                        </label>
+                        <label>
+                            <input type="checkbox" value="bollinger" checked={features.includes('bollinger')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'bollinger'];
+                                else features = features.filter(f => f !== 'bollinger');
+                            }} />
+                            布林带
+                        </label>
+                        <label>
+                            <input type="checkbox" value="stochastic_k" checked={features.includes('stochastic_k')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'stochastic_k'];
+                                else features = features.filter(f => f !== 'stochastic_k');
+                            }} />
+                            随机K值
+                        </label>
+                        <label>
+                            <input type="checkbox" value="stochastic_d" checked={features.includes('stochastic_d')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'stochastic_d'];
+                                else features = features.filter(f => f !== 'stochastic_d');
+                            }} />
+                            随机D值
+                        </label>
+                        <label>
+                            <input type="checkbox" value="momentum" checked={features.includes('momentum')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'momentum'];
+                                else features = features.filter(f => f !== 'momentum');
+                            }} />
+                            动量指标
                         </label>
                     </div>
                 </div>
@@ -509,9 +639,36 @@
         color: rgba(255, 255, 255, 0.7);
     }
     
+    .model-actions {
+        display: flex;
+        gap: 0.5rem;
+    }
+    
+    .action-btn {
+        padding: 0.5rem 1rem;
+        background: #4b5563;
+        font-size: 0.875rem;
+    }
+    
     .delete-btn {
         padding: 0.5rem 1rem;
         background: #ef4444;
+        font-size: 0.875rem;
+    }
+    
+    .advanced-btn {
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        padding: 0.5rem 1rem;
+        font-size: 0.875rem;
+        color: rgba(255, 255, 255, 0.7);
+    }
+    
+    .advanced-options {
+        background: rgba(0, 0, 0, 0.2);
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin-top: 0.5rem;
     }
     
     .prediction-settings {

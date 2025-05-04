@@ -9,7 +9,7 @@ use commands::stock::{get_stock_infos, refresh_stock_infos};
 use commands::stock_historical::{get_historical_data, refresh_historical_data};
 use commands::stock_list::get_stock_list;
 use commands::stock_realtime::get_realtime_data;
-use commands::stock_prediction::{train_stock_prediction_model, predict_stock_price, list_stock_prediction_models, delete_stock_prediction_model};
+use commands::stock_prediction::{train_stock_prediction_model, predict_stock_price};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use std::env;
 use std::error::Error;
@@ -17,6 +17,12 @@ use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind};
 use std::path::Path;
 use std::fs;
+use tauri::{
+    plugin::TauriPlugin, AppHandle, Runtime, State, Window
+};
+
+mod models;
+mod stock_prediction;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -41,8 +47,12 @@ pub fn run() {
             refresh_historical_data,
             train_stock_prediction_model,
             predict_stock_price,
-            list_stock_prediction_models,
-            delete_stock_prediction_model
+            list_models,
+            delete_model,
+            train_candle_model,
+            predict_with_candle,
+            retrain_candle_model,
+            evaluate_candle_model
         ])
         .setup(|app| -> Result<(), Box<dyn Error>> {
             tauri::async_runtime::block_on(async {
@@ -104,4 +114,60 @@ async fn create_optimized_pool() -> Result<Pool<Sqlite>, sqlx::Error> {
         .await?;
 
     Ok(pool)
+}
+
+// 股票预测模型列表
+#[tauri::command]
+async fn list_models(
+    state: State<'_, Pool<Sqlite>>, 
+    symbol: String
+) -> Result<Vec<commands::stock_prediction::ModelMetadata>, String> {
+    commands::stock_prediction::list_prediction_models(state, symbol).await
+}
+
+// 删除股票预测模型
+#[tauri::command]
+async fn delete_model(
+    state: State<'_, Pool<Sqlite>>, 
+    model_id: String
+) -> Result<(), String> {
+    commands::stock_prediction::delete_prediction_model(state, model_id).await
+}
+
+// Candle模型相关命令
+#[tauri::command]
+async fn train_candle_model(request: stock_prediction::TrainingRequest) -> Result<stock_prediction::TrainingResult, String> {
+    stock_prediction::train_candle_model(request).await
+}
+
+#[tauri::command]
+async fn predict_with_candle(request: stock_prediction::PredictionRequest) -> Result<Vec<stock_prediction::Prediction>, String> {
+    stock_prediction::predict_with_candle(request).await
+}
+
+#[tauri::command]
+async fn retrain_candle_model(
+    model_id: String,
+    epochs: u32,
+    batch_size: u32,
+    learning_rate: f64,
+) -> Result<(), String> {
+    stock_prediction::retrain_candle_model(model_id, epochs, batch_size, learning_rate).await
+}
+
+#[tauri::command]
+async fn evaluate_candle_model(model_id: String) -> Result<stock_prediction::EvaluationResult, String> {
+    stock_prediction::evaluate_candle_model(model_id).await
+}
+
+// 创建Tauri插件
+pub fn init<R: Runtime>() -> TauriPlugin<R> {
+    tauri::plugin::Builder::new("biga")
+        .invoke_handler(tauri::generate_handler![
+            train_candle_model,
+            predict_with_candle,
+            retrain_candle_model,
+            evaluate_candle_model
+        ])
+        .build()
 }

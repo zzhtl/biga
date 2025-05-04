@@ -3,7 +3,7 @@ use crate::prediction::model;
 use chrono::{NaiveDate, Utc, Datelike};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 use sqlx::{Pool, Sqlite};
 
 // 简化版StockData结构体
@@ -61,18 +61,13 @@ pub struct PredictionResult {
     pub confidence: f64,
 }
 
-// 从AppHandle获取数据库连接池的函数
-fn get_pool(app_handle: &AppHandle) -> tauri::State<'_, Pool<Sqlite>> {
-    app_handle.state::<Pool<Sqlite>>()
-}
-
 // 列出所有股票预测模型
-#[tauri::command]
-pub async fn list_stock_prediction_models(app_handle: AppHandle, symbol: String) -> Result<Vec<ModelMetadata>, String> {
-    let pool = get_pool(&app_handle);
-    
+pub async fn list_prediction_models(
+    state: State<'_, Pool<Sqlite>>, 
+    symbol: String
+) -> Result<Vec<ModelMetadata>, String> {
     // 获取模型列表，根据股票代码过滤
-    let models = prediction::list_models_for_symbol(&*pool, &symbol)
+    let models = prediction::list_models_for_symbol(&*state, &symbol)
         .await
         .map_err(|e| format!("获取模型列表失败: {}", e))?;
     
@@ -100,16 +95,13 @@ pub async fn list_stock_prediction_models(app_handle: AppHandle, symbol: String)
 }
 
 // 删除股票预测模型
-#[tauri::command]
-pub async fn delete_stock_prediction_model(
-    app_handle: AppHandle, 
+pub async fn delete_prediction_model(
+    state: State<'_, Pool<Sqlite>>, 
     model_id: String
 ) -> Result<(), String> {
-    let pool = get_pool(&app_handle);
-    
     // 删除模型
     prediction::delete_model(
-        &*pool, 
+        &*state, 
         model_id.parse::<i64>().map_err(|e| format!("无效的模型ID: {}", e))?
     )
     .await
@@ -134,11 +126,9 @@ pub async fn delete_stock_prediction_model(
 // 训练股票预测模型
 #[tauri::command]
 pub async fn train_stock_prediction_model(
-    app_handle: AppHandle, 
+    state: State<'_, Pool<Sqlite>>, 
     request: TrainModelRequest
 ) -> Result<ModelMetadata, String> {
-    let pool = get_pool(&app_handle);
-
     // 从数据库获取历史数据
     let historical_data = sqlx::query_as::<_, crate::db::models::HistoricalData>(
         r#"SELECT * FROM historical_data
@@ -148,7 +138,7 @@ pub async fn train_stock_prediction_model(
     .bind(&request.stock_code)
     .bind(&request.start_date)
     .bind(&request.end_date)
-    .fetch_all(&*pool)
+    .fetch_all(&*state)
     .await
     .map_err(|e| format!("获取历史数据失败: {}", e))?;
     
@@ -173,7 +163,7 @@ pub async fn train_stock_prediction_model(
     
     // 训练模型
     let result = model::train_model(
-        &*pool,
+        &*state,
         &request.stock_code,
         &historical_data,
         &model_config
@@ -201,70 +191,123 @@ pub async fn train_stock_prediction_model(
 // 进行股票价格预测
 #[tauri::command]
 pub async fn predict_stock_price(
-    app_handle: AppHandle, 
+    state: State<'_, Pool<Sqlite>>, 
     request: PredictionRequest
 ) -> Result<Vec<PredictionResult>, String> {
-    let pool = get_pool(&app_handle);
-    
     // 获取最近的历史数据
     let end_date = Utc::now().naive_utc().date();
-    let start_date = end_date - chrono::Duration::days(30);
+    let start_date = end_date - chrono::Duration::days(60); // 获取更多历史数据以便进行特征计算
     
-    // 使用模拟历史数据进行简易预测，避免模型反序列化错误
-    let historical_data = get_mock_historical_data(&request.stock_code, start_date, end_date);
+    // 从数据库获取真实历史数据
+    let historical_data = sqlx::query_as::<_, crate::db::models::HistoricalData>(
+        r#"SELECT * FROM historical_data
+           WHERE symbol = ? AND date BETWEEN ? AND ?
+           ORDER BY date ASC"#,
+    )
+    .bind(&request.stock_code)
+    .bind(start_date.format("%Y-%m-%d").to_string())
+    .bind(end_date.format("%Y-%m-%d").to_string())
+    .fetch_all(&*state)
+    .await
+    .map_err(|e| format!("获取历史数据失败: {}", e))?;
+    
+    if historical_data.is_empty() {
+        return Err(format!("未找到股票 {} 的历史数据", request.stock_code));
+    }
+    
+    // 如果提供了模型名称，使用特定模型进行预测
+    if let Some(model_name) = &request.model_name {
+        return predict_with_model(&state, &request.stock_code, model_name, &historical_data, request.prediction_days).await;
+    }
+    
+    // 否则使用简单的时间序列预测
     let mut results = Vec::new();
-    let mut current_close = historical_data.last().map(|d| d.close).unwrap_or(0.0);
+    
+    // 获取最近的收盘价作为基准
+    let latest_price = historical_data.last()
+        .map(|data| data.close)
+        .unwrap_or(0.0) as f64;
+    
+    // 计算过去几天的平均变化率
+    let avg_change_percent = if historical_data.len() >= 5 {
+        let recent_data = &historical_data[historical_data.len() - 5..];
+        let avg = recent_data.iter()
+            .map(|d| d.change_percent)
+            .sum::<f64>() / recent_data.len() as f64;
+        avg
+    } else {
+        0.0 // 数据不足时默认为0
+    };
+    
+    // 生成预测结果
     let mut current_date = end_date;
-    for _ in 1..=request.prediction_days {
-        current_date = current_date + chrono::Duration::days(1);
-        // 简单预测：使用前一日收盘价
+    let mut current_price = latest_price;
+    
+    for day in 1..=request.prediction_days {
+        // 跳过周末
+        current_date = next_trading_day(current_date);
+        
+        // 基于平均变化率预测价格
+        let change_percent = avg_change_percent;
+        let price_change = current_price * (change_percent / 100.0);
+        current_price += price_change;
+        
         results.push(PredictionResult {
             target_date: current_date.format("%Y-%m-%d").to_string(),
-            predicted_price: current_close,
-            predicted_change_percent: 0.0,
-            confidence: 1.0,
+            predicted_price: current_price,
+            predicted_change_percent: change_percent,
+            confidence: 0.7, // 简单模型置信度较低
         });
     }
     
     Ok(results)
 }
 
-// 创建模拟历史数据（实际项目中应该从数据库获取）
-fn get_mock_historical_data(symbol: &str, start_date: NaiveDate, end_date: NaiveDate) -> Vec<crate::db::models::HistoricalData> {
-    let mut data = Vec::new();
-    let mut current_date = start_date;
-    let mut price = 100.0;
+// 使用特定模型预测股票价格
+async fn predict_with_model(
+    pool: &Pool<Sqlite>,
+    symbol: &str,
+    model_name: &str,
+    historical_data: &[crate::db::models::HistoricalData],
+    prediction_days: u32
+) -> Result<Vec<PredictionResult>, String> {
+    // 获取模型
+    let model = prediction::get_model_by_symbol_and_name(pool, symbol, model_name)
+        .await
+        .map_err(|e| format!("获取模型失败: {}", e))?;
     
-    while current_date <= end_date {
-        // 跳过周末
-        let weekday = current_date.weekday().num_days_from_monday();
-        if weekday < 5 { // 0-4 是周一到周五 (Datelike trait中的方法返回0-6)
-            // 模拟每天有少量变化的价格
-            let change = (rand::random::<f64>() - 0.5) * 2.0; // -1.0 到 1.0 的随机变化
-            price += change;
-            
-            let high = price + rand::random::<f64>() * 1.0;
-            let low = price - rand::random::<f64>() * 1.0;
-            let open = low + rand::random::<f64>() * (high - low);
-            
-            data.push(crate::db::models::HistoricalData {
-                symbol: symbol.to_string(),
-                date: current_date,
-                open,
-                close: price,
-                high,
-                low,
-                volume: (1000000.0 * (1.0 + rand::random::<f64>() * 0.2)).round() as i64,
-                amount: price * 1000000.0 * (1.0 + rand::random::<f64>() * 0.2),
-                amplitude: ((high - low) / price * 100.0).round() / 100.0,
-                turnover_rate: (rand::random::<f64>() * 5.0).round() / 100.0,
-                change_percent: (change / (price - change) * 100.0).round() / 100.0,
-                change,
-            });
-        }
-        
-        current_date = current_date.succ_opt().unwrap_or(current_date);
+    // 使用预测模块进行预测
+    let prediction_results = model::predict_stock(
+        pool,
+        symbol,
+        historical_data,
+        Some(model_name.to_string()),
+        prediction_days as i32
+    )
+    .await
+    .map_err(|e| format!("预测失败: {}", e))?;
+    
+    // 转换为API响应格式
+    let results = prediction_results.into_iter()
+        .map(|result| PredictionResult {
+            target_date: result.target_date.format("%Y-%m-%d").to_string(),
+            predicted_price: result.predicted_price,
+            predicted_change_percent: result.predicted_change_percent,
+            confidence: result.confidence,
+        })
+        .collect();
+    
+    Ok(results)
+}
+
+// 获取下一个交易日（简单地跳过周末）
+fn next_trading_day(date: NaiveDate) -> NaiveDate {
+    let mut next_date = date + chrono::Duration::days(1);
+    
+    // 跳过周末 (6=周六, 7=周日)
+    while next_date.weekday().number_from_monday() > 5 {
+        next_date = next_date + chrono::Duration::days(1);
     }
     
-    data
+    next_date
 } 

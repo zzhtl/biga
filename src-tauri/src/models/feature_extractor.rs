@@ -1,4 +1,4 @@
-use crate::db::StockData;
+use crate::db::models::HistoricalData as StockData;
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use ndarray::Array1;
@@ -81,24 +81,24 @@ impl FeatureExtractor {
                     // 移动平均线特征
                     "ma5" => {
                         if i >= 5 {
-                            let ma5 = (0..5).map(|j| sorted_data[i - j].close).sum::<f32>() / 5.0;
-                            feature_vec.push(ma5 as f64);
+                            let ma5 = (0..5).map(|j| sorted_data[i - j].close as f64).sum::<f64>() / 5.0;
+                            feature_vec.push(ma5);
                         } else {
                             feature_vec.push(sorted_data[i].close as f64);
                         }
                     },
                     "ma10" => {
                         if i >= 10 {
-                            let ma10 = (0..10).map(|j| sorted_data[i - j].close).sum::<f32>() / 10.0;
-                            feature_vec.push(ma10 as f64);
+                            let ma10 = (0..10).map(|j| sorted_data[i - j].close as f64).sum::<f64>() / 10.0;
+                            feature_vec.push(ma10);
                         } else {
                             feature_vec.push(sorted_data[i].close as f64);
                         }
                     },
                     "ma20" => {
                         if i >= 20 {
-                            let ma20 = (0..20).map(|j| sorted_data[i - j].close).sum::<f32>() / 20.0;
-                            feature_vec.push(ma20 as f64);
+                            let ma20 = (0..20).map(|j| sorted_data[i - j].close as f64).sum::<f64>() / 20.0;
+                            feature_vec.push(ma20);
                         } else {
                             feature_vec.push(sorted_data[i].close as f64);
                         }
@@ -106,7 +106,7 @@ impl FeatureExtractor {
                     // 相对强弱指标 (RSI)
                     "rsi14" => {
                         if i >= 14 {
-                            feature_vec.push(self.calculate_rsi(&sorted_data[i-14..=i], 14) as f64);
+                            feature_vec.push(self.calculate_rsi(&sorted_data[i-14..=i], 14));
                         } else {
                             feature_vec.push(50.0); // 默认中间值
                         }
@@ -115,7 +115,7 @@ impl FeatureExtractor {
                     "bollinger_upper" => {
                         if i >= 20 {
                             let (upper, _, _) = self.calculate_bollinger_bands(&sorted_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(upper as f64);
+                            feature_vec.push(upper);
                         } else {
                             feature_vec.push(sorted_data[i].close as f64 * 1.1); // 简单估计
                         }
@@ -123,7 +123,7 @@ impl FeatureExtractor {
                     "bollinger_middle" => {
                         if i >= 20 {
                             let (_, middle, _) = self.calculate_bollinger_bands(&sorted_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(middle as f64);
+                            feature_vec.push(middle);
                         } else {
                             feature_vec.push(sorted_data[i].close as f64);
                         }
@@ -131,7 +131,7 @@ impl FeatureExtractor {
                     "bollinger_lower" => {
                         if i >= 20 {
                             let (_, _, lower) = self.calculate_bollinger_bands(&sorted_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(lower as f64);
+                            feature_vec.push(lower);
                         } else {
                             feature_vec.push(sorted_data[i].close as f64 * 0.9); // 简单估计
                         }
@@ -253,24 +253,24 @@ impl FeatureExtractor {
                     // 移动平均线特征
                     "ma5" => {
                         if i >= 5 {
-                            let ma5 = (0..5).map(|j| prediction_data[i - j].close).sum::<f32>() / 5.0;
-                            feature_vec.push(ma5 as f64);
+                            let ma5 = (0..5).map(|j| prediction_data[i - j].close as f64).sum::<f64>() / 5.0;
+                            feature_vec.push(ma5);
                         } else {
                             feature_vec.push(prediction_data[i].close as f64);
                         }
                     },
                     "ma10" => {
                         if i >= 10 {
-                            let ma10 = (0..10).map(|j| prediction_data[i - j].close).sum::<f32>() / 10.0;
-                            feature_vec.push(ma10 as f64);
+                            let ma10 = (0..10).map(|j| prediction_data[i - j].close as f64).sum::<f64>() / 10.0;
+                            feature_vec.push(ma10);
                         } else {
                             feature_vec.push(prediction_data[i].close as f64);
                         }
                     },
                     "ma20" => {
                         if i >= 20 {
-                            let ma20 = (0..20).map(|j| prediction_data[i - j].close).sum::<f32>() / 20.0;
-                            feature_vec.push(ma20 as f64);
+                            let ma20 = (0..20).map(|j| prediction_data[i - j].close as f64).sum::<f64>() / 20.0;
+                            feature_vec.push(ma20);
                         } else {
                             feature_vec.push(prediction_data[i].close as f64);
                         }
@@ -278,7 +278,7 @@ impl FeatureExtractor {
                     // 相对强弱指标 (RSI)
                     "rsi14" => {
                         if i >= 14 {
-                            feature_vec.push(self.calculate_rsi(&prediction_data[i-14..=i], 14) as f64);
+                            feature_vec.push(self.calculate_rsi(&prediction_data[i-14..=i], 14));
                         } else {
                             feature_vec.push(50.0); // 默认中间值
                         }
@@ -287,7 +287,7 @@ impl FeatureExtractor {
                     "bollinger_upper" => {
                         if i >= 20 {
                             let (upper, _, _) = self.calculate_bollinger_bands(&prediction_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(upper as f64);
+                            feature_vec.push(upper);
                         } else {
                             feature_vec.push(prediction_data[i].close as f64 * 1.1); // 简单估计
                         }
@@ -295,7 +295,7 @@ impl FeatureExtractor {
                     "bollinger_middle" => {
                         if i >= 20 {
                             let (_, middle, _) = self.calculate_bollinger_bands(&prediction_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(middle as f64);
+                            feature_vec.push(middle);
                         } else {
                             feature_vec.push(prediction_data[i].close as f64);
                         }
@@ -303,7 +303,7 @@ impl FeatureExtractor {
                     "bollinger_lower" => {
                         if i >= 20 {
                             let (_, _, lower) = self.calculate_bollinger_bands(&prediction_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(lower as f64);
+                            feature_vec.push(lower);
                         } else {
                             feature_vec.push(prediction_data[i].close as f64 * 0.9); // 简单估计
                         }
@@ -338,7 +338,7 @@ impl FeatureExtractor {
     }
     
     /// 计算相对强弱指标 (RSI)
-    fn calculate_rsi(&self, data: &[StockData], period: usize) -> f32 {
+    fn calculate_rsi(&self, data: &[StockData], period: usize) -> f64 {
         if data.len() <= period {
             return 50.0; // 默认中间值
         }
@@ -349,9 +349,9 @@ impl FeatureExtractor {
         for i in 1..=period {
             let change = data[i].close - data[i-1].close;
             if change > 0.0 {
-                gains += change;
+                gains += change as f64;
             } else {
-                losses -= change; // 取绝对值
+                losses -= change as f64; // 取绝对值
             }
         }
         
@@ -366,24 +366,24 @@ impl FeatureExtractor {
     }
     
     /// 计算布林带 (Bollinger Bands)
-    fn calculate_bollinger_bands(&self, data: &[StockData], period: usize, num_std_dev: f32) -> (f32, f32, f32) {
+    fn calculate_bollinger_bands(&self, data: &[StockData], period: usize, num_std_dev: f64) -> (f64, f64, f64) {
         if data.len() <= period {
-            let close = data.last().map(|d| d.close).unwrap_or(0.0);
+            let close = data.last().map(|d| d.close).unwrap_or(0.0) as f64;
             return (close * 1.1, close, close * 0.9);
         }
         
         // 计算移动平均线
         let ma = data[data.len()-period..].iter()
-            .map(|d| d.close)
-            .sum::<f32>() / period as f32;
+            .map(|d| d.close as f64)
+            .sum::<f64>() / period as f64;
         
         // 计算标准差
         let variance = data[data.len()-period..].iter()
             .map(|d| {
-                let diff = d.close - ma;
+                let diff = d.close as f64 - ma;
                 diff * diff
             })
-            .sum::<f32>() / period as f32;
+            .sum::<f64>() / period as f64;
         
         let std_dev = variance.sqrt();
         
