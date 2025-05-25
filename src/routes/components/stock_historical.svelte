@@ -28,6 +28,67 @@
         };
     });
 
+    // 技术指标计算函数
+    function calculateEMA(data: number[], period: number): number[] {
+        const ema: number[] = [];
+        const multiplier = 2 / (period + 1);
+        
+        if (data.length === 0) return ema;
+        
+        // 第一个值作为初始EMA
+        ema[0] = data[0];
+        
+        for (let i = 1; i < data.length; i++) {
+            ema[i] = (data[i] - ema[i - 1]) * multiplier + ema[i - 1];
+        }
+        
+        return ema;
+    }
+
+    function calculateMACD(closes: number[]): { macd: number[], signal: number[], histogram: number[] } {
+        const ema12 = calculateEMA(closes, 12);
+        const ema26 = calculateEMA(closes, 26);
+        
+        const macd = ema12.map((val, i) => val - ema26[i]);
+        const signal = calculateEMA(macd, 9);
+        const histogram = macd.map((val, i) => val - signal[i]);
+        
+        return { macd, signal, histogram };
+    }
+
+    function calculateKDJ(highs: number[], lows: number[], closes: number[], period = 9): { k: number[], d: number[], j: number[] } {
+        const k: number[] = [];
+        const d: number[] = [];
+        const j: number[] = [];
+        
+        let prevK = 50;
+        let prevD = 50;
+        
+        for (let i = 0; i < closes.length; i++) {
+            const start = Math.max(0, i - period + 1);
+            const periodHighs = highs.slice(start, i + 1);
+            const periodLows = lows.slice(start, i + 1);
+            
+            const highest = Math.max(...periodHighs);
+            const lowest = Math.min(...periodLows);
+            
+            const rsv = highest === lowest ? 0 : ((closes[i] - lowest) / (highest - lowest)) * 100;
+            
+            const currentK = (2 * prevK + rsv) / 3;
+            const currentD = (2 * prevD + currentK) / 3;
+            const currentJ = 3 * currentK - 2 * currentD;
+            
+            k.push(currentK);
+            d.push(currentD);
+            j.push(currentJ);
+            
+            prevK = currentK;
+            prevD = currentD;
+        }
+        
+        return { k, d, j };
+    }
+
     // 新增图表更新逻辑
     $effect(() => {
         if (!chart || historyData.length === 0) return;
@@ -40,6 +101,14 @@
         const kData = sortedData.map((d) => [d.open, d.close, d.low, d.high]);
         const volumes = sortedData.map((d) => d.volume);
         const changes = sortedData.map((d) => d.change_percent);
+        
+        // 计算技术指标
+        const closes = sortedData.map(d => d.close);
+        const highs = sortedData.map(d => d.high);
+        const lows = sortedData.map(d => d.low);
+        
+        const macdData = calculateMACD(closes);
+        const kdjData = calculateKDJ(highs, lows, closes);
 
         // 图表配置
         const option: EChartsOption = {
@@ -48,8 +117,10 @@
                 axisPointer: { type: "cross" },
             },
             grid: [
-                { left: "5%", right: "5%", top: "5%", height: "70%" }, // K线图区域
-                { left: "5%", right: "5%", top: "79%", height: "15%" }, // 成交量区域
+                { left: "5%", right: "5%", top: "5%", height: "45%" }, // K线图区域
+                { left: "5%", right: "5%", top: "53%", height: "12%" }, // 成交量区域
+                { left: "5%", right: "5%", top: "68%", height: "12%" }, // MACD区域
+                { left: "5%", right: "5%", top: "83%", height: "12%" }, // KDJ区域
             ],
             xAxis: [
                 {
@@ -62,6 +133,18 @@
                     type: "category",
                     gridIndex: 1,
                     show: false,
+                    data: xData,
+                },
+                {
+                    type: "category",
+                    gridIndex: 2,
+                    show: false,
+                    data: xData,
+                },
+                {
+                    type: "category",
+                    gridIndex: 3,
+                    axisLabel: { rotate: 45, fontSize: 10 },
                     data: xData,
                 },
             ],
@@ -78,19 +161,37 @@
                     axisLine: { show: false },
                     splitLine: { show: false },
                 },
+                {
+                    scale: true,
+                    gridIndex: 2,
+                    splitNumber: 2,
+                    axisLabel: { fontSize: 10 },
+                    axisLine: { show: false },
+                    splitLine: { show: false },
+                },
+                {
+                    scale: true,
+                    gridIndex: 3,
+                    splitNumber: 2,
+                    axisLabel: { fontSize: 10 },
+                    axisLine: { show: false },
+                    splitLine: { show: false },
+                    min: 0,
+                    max: 100,
+                },
             ],
             dataZoom: [
                 {
                     type: "inside",
-                    xAxisIndex: [0, 1],
+                    xAxisIndex: [0, 1, 2, 3],
                     start: 0,
                     end: 100,
                 },
                 {
                     type: "slider",
-                    xAxisIndex: [0, 1],
+                    xAxisIndex: [0, 1, 2, 3],
                     show: true,
-                    top: "95%",
+                    top: "97%",
                     height: 20,
                     start: 0,
                     end: 100,
@@ -143,6 +244,65 @@
                             { offset: 1, color: "rgba(59, 130, 246, 0.02)" },
                         ]),
                     },
+                },
+                // MACD指标
+                {
+                    name: "MACD",
+                    type: "line",
+                    xAxisIndex: 2,
+                    yAxisIndex: 2,
+                    data: macdData.macd,
+                    symbol: "none",
+                    lineStyle: { color: "#FF6B6B", width: 1 },
+                },
+                {
+                    name: "Signal",
+                    type: "line",
+                    xAxisIndex: 2,
+                    yAxisIndex: 2,
+                    data: macdData.signal,
+                    symbol: "none",
+                    lineStyle: { color: "#4ECDC4", width: 1 },
+                },
+                {
+                    name: "Histogram",
+                    type: "bar",
+                    xAxisIndex: 2,
+                    yAxisIndex: 2,
+                    data: macdData.histogram.map(val => ({
+                        value: val,
+                        itemStyle: {
+                            color: val >= 0 ? "#FF4444" : "#00AA00"
+                        }
+                    })),
+                },
+                // KDJ指标
+                {
+                    name: "K",
+                    type: "line",
+                    xAxisIndex: 3,
+                    yAxisIndex: 3,
+                    data: kdjData.k,
+                    symbol: "none",
+                    lineStyle: { color: "#FFE66D", width: 1 },
+                },
+                {
+                    name: "D",
+                    type: "line",
+                    xAxisIndex: 3,
+                    yAxisIndex: 3,
+                    data: kdjData.d,
+                    symbol: "none",
+                    lineStyle: { color: "#FF6B6B", width: 1 },
+                },
+                {
+                    name: "J",
+                    type: "line",
+                    xAxisIndex: 3,
+                    yAxisIndex: 3,
+                    data: kdjData.j,
+                    symbol: "none",
+                    lineStyle: { color: "#4ECDC4", width: 1 },
                 },
             ],
         };
@@ -396,7 +556,7 @@
     <div class="chart-container">
         <div
             bind:this={chartContainer}
-            style="width: 100%; height: 500px;"
+            style="width: 100%; height: 700px;"
         ></div>
     </div>
 
