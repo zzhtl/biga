@@ -5,24 +5,13 @@ mod csv;
 mod db;
 mod error;
 mod prediction;
-use commands::stock::{get_stock_infos, refresh_stock_infos};
-use commands::stock_historical::{get_historical_data, refresh_historical_data};
-use commands::stock_list::get_stock_list;
-use commands::stock_realtime::get_realtime_data;
-use commands::stock_prediction::{train_stock_prediction_model, predict_stock_price};
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
-use std::env;
-use std::error::Error;
-use tauri::Manager;
-use tauri_plugin_log::{Target, TargetKind};
-use std::path::Path;
-use std::fs;
-use tauri::{
-    plugin::TauriPlugin, AppHandle, Runtime, State, Window
-};
-
 mod models;
 mod stock_prediction;
+
+use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+use std::path::Path;
+use std::fs;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -30,45 +19,43 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([
-                    Target::new(TargetKind::Stdout),
-                    Target::new(TargetKind::LogDir { file_name: None }),
-                    Target::new(TargetKind::Webview),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Webview),
                 ])
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            get_stock_list,
-            get_stock_infos,
-            get_realtime_data,
-            refresh_stock_infos,
-            get_historical_data,
-            refresh_historical_data,
-            train_stock_prediction_model,
-            predict_stock_price,
-            list_models,
-            delete_model,
-            train_candle_model,
-            predict_with_candle,
-            retrain_candle_model,
-            evaluate_candle_model
+            crate::commands::stock_list::get_stock_list,
+            crate::commands::stock::get_stock_infos,
+            crate::commands::stock_realtime::get_realtime_data,
+            crate::commands::stock::refresh_stock_infos,
+            crate::commands::stock_historical::get_historical_data,
+            crate::commands::stock_historical::refresh_historical_data,
+            crate::commands::stock_prediction::train_stock_prediction_model,
+            crate::commands::stock_prediction::predict_stock_price,
+            crate::commands::stock_prediction::list_stock_prediction_models,
+            crate::commands::stock_prediction::delete_stock_prediction_model,
+            crate::commands::stock_prediction::train_candle_model,
+            crate::commands::stock_prediction::predict_with_candle,
+            crate::commands::stock_prediction::retrain_candle_model,
+            crate::commands::stock_prediction::evaluate_candle_model
         ])
-        .setup(|app| -> Result<(), Box<dyn Error>> {
+        .setup(|app| {
             tauri::async_runtime::block_on(async {
-                //dotenv().ok(); // 函数会尝试从项目根目录的 .env`` 文件中读取键值对，并将其注入到进程的环境变量中
-                //let db_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-                let pool = create_optimized_pool().await?;
+                let pool = create_optimized_pool().await
+                    .expect("Failed to create database pool");
                 
-                // 确保应用数据目录存在
-                let app_dir = app.path().app_data_dir().unwrap_or_else(|_| {
-                    Path::new("./data").to_path_buf()
-                });
+                // 确保应用数据目录存在 - 简化处理
+                let app_dir = Path::new("./data").to_path_buf();
                 
                 // 确保 migrations 目录存在且存放迁移脚本
                 let migrations_dir = app_dir.join("migrations");
                 if !migrations_dir.exists() {
-                    fs::create_dir_all(&migrations_dir)?;
+                    fs::create_dir_all(&migrations_dir)
+                        .expect("Failed to create migrations directory");
                 }
 
                 // 复制迁移文件
@@ -78,7 +65,8 @@ pub fn run() {
                     if source_path.exists() {
                         let target_path = migrations_dir.join(file);
                         if !target_path.exists() {
-                            fs::copy(&source_path, &target_path)?;
+                            fs::copy(&source_path, &target_path)
+                                .expect("Failed to copy migration file");
                         }
                     }
                 }
@@ -87,87 +75,81 @@ pub fn run() {
                 for file in &migration_files {
                     let path = migrations_dir.join(file);
                     if path.exists() {
-                        let sql = fs::read_to_string(&path)?;
-                        sqlx::query(&sql).execute(&pool).await?;
+                        let sql = fs::read_to_string(&path)
+                            .expect("Failed to read migration file");
+                        sqlx::query(&sql).execute(&pool).await
+                            .expect("Failed to execute migration");
                     }
                 }
                 
                 app.manage(pool);
-                Ok(())
-            })
+            });
+            Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
 async fn create_optimized_pool() -> Result<Pool<Sqlite>, sqlx::Error> {
+    // 获取当前工作目录并构建数据库路径
+    let current_dir = std::env::current_dir()
+        .map_err(|e| sqlx::Error::Io(e))?;
+    
+    // 尝试多个可能的数据库路径
+    let possible_paths = [
+        current_dir.join("db/stock_data.db"),
+        current_dir.join("src-tauri/db/stock_data.db"),
+    ];
+    
+    let mut db_path = None;
+    for path in &possible_paths {
+        println!("检查数据库路径: {}", path.display());
+        if path.exists() {
+            db_path = Some(path);
+            println!("✅ 找到数据库文件: {}", path.display());
+            break;
+        }
+    }
+    
+    // 如果找不到数据库文件，创建一个新的
+    let final_db_path = match db_path {
+        Some(path) => path.clone(),
+        None => {
+            // 优先在项目根目录的db文件夹中创建
+            let preferred_path = if current_dir.join("src-tauri").exists() {
+                // 在项目根目录
+                current_dir.join("db/stock_data.db")
+            } else {
+                // 在src-tauri目录
+                current_dir.join("db/stock_data.db")
+            };
+            
+            // 确保db目录存在
+            if let Some(parent) = preferred_path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| sqlx::Error::Io(e))?;
+            }
+            
+            println!("📁 创建新数据库文件: {}", preferred_path.display());
+            preferred_path
+        }
+    };
+    
+    let connection_string = format!("sqlite://{}", final_db_path.display());
+    println!("🔗 数据库连接字符串: {}", connection_string);
+    
     let pool = SqlitePoolOptions::new()
         .max_connections(5) // 最大连接数
         .min_connections(2) // 最小保持的空闲连接数
         .acquire_timeout(std::time::Duration::from_secs(30)) // 获取连接超时时间
-        .connect("sqlite://db/stock_data.db")
+        .connect(&connection_string)
         .await?;
 
-    // 启用 WAL 模式（类似你提供的 rusqlite 示例）
+    // 启用 WAL 模式
     sqlx::query("PRAGMA journal_mode=WAL;")
         .execute(&pool)
         .await?;
 
+    println!("✅ 数据库连接池创建成功");
     Ok(pool)
-}
-
-// 股票预测模型列表
-#[tauri::command]
-async fn list_models(
-    state: State<'_, Pool<Sqlite>>, 
-    symbol: String
-) -> Result<Vec<commands::stock_prediction::ModelMetadata>, String> {
-    commands::stock_prediction::list_prediction_models(state, symbol).await
-}
-
-// 删除股票预测模型
-#[tauri::command]
-async fn delete_model(
-    state: State<'_, Pool<Sqlite>>, 
-    model_id: String
-) -> Result<(), String> {
-    commands::stock_prediction::delete_prediction_model(state, model_id).await
-}
-
-// Candle模型相关命令
-#[tauri::command]
-async fn train_candle_model(request: stock_prediction::TrainingRequest) -> Result<stock_prediction::TrainingResult, String> {
-    stock_prediction::train_candle_model(request).await
-}
-
-#[tauri::command]
-async fn predict_with_candle(request: stock_prediction::PredictionRequest) -> Result<Vec<stock_prediction::Prediction>, String> {
-    stock_prediction::predict_with_candle(request).await
-}
-
-#[tauri::command]
-async fn retrain_candle_model(
-    model_id: String,
-    epochs: u32,
-    batch_size: u32,
-    learning_rate: f64,
-) -> Result<(), String> {
-    stock_prediction::retrain_candle_model(model_id, epochs, batch_size, learning_rate).await
-}
-
-#[tauri::command]
-async fn evaluate_candle_model(model_id: String) -> Result<stock_prediction::EvaluationResult, String> {
-    stock_prediction::evaluate_candle_model(model_id).await
-}
-
-// 创建Tauri插件
-pub fn init<R: Runtime>() -> TauriPlugin<R> {
-    tauri::plugin::Builder::new("biga")
-        .invoke_handler(tauri::generate_handler![
-            train_candle_model,
-            predict_with_candle,
-            retrain_candle_model,
-            evaluate_candle_model
-        ])
-        .build()
 }

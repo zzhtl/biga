@@ -2,7 +2,7 @@
     import { onMount } from "svelte";
     import { invoke } from "@tauri-apps/api/core";
     import * as echarts from "echarts";
-    import { formatVolume, formatDate } from "../utils/utils";
+    import { formatVolume, formatDate, formatChange, formatChangePercent, formatPrice, formatPercent } from "../utils/utils";
 
     type EChartsOption = echarts.EChartsOption;
 
@@ -167,7 +167,7 @@
     // 初始化状态
     let startDate = $state(getFiveMonthAgoISO());
     let endDate = $state(getTodayISO());
-    let selectedSymbol = $state("AAPL");
+    let selectedSymbol = $state(""); // 改为空字符串，等待加载股票列表后设置
     let stockSymbols = $state<
         Array<{ symbol: string; name: string; exchange: string }>
     >([]);
@@ -223,30 +223,43 @@
 
     // 修改后的 refreshStockSymbols 函数
     async function refreshStockSymbols() {
+        console.log("开始刷新股票信息...");
         try {
-            await invoke("refresh_stock_infos");
+            // 先刷新远程数据
+            console.log("调用 refresh_stock_infos...");
+            const refreshResult = await invoke("refresh_stock_infos");
+            console.log("刷新结果:", refreshResult);
 
-            // 使用泛型指定返回类型
+            // 然后获取本地数据
+            console.log("调用 get_stock_infos...");
             const symbols = await invoke<StockInfo[]>("get_stock_infos");
+            console.log("获取到股票数量:", symbols.length);
 
             stockSymbols = symbols;
         } catch (error) {
-            console.error("Failed to refresh stock symbols:", error);
+            console.error("刷新股票列表失败:", error);
+            errorMessage = `刷新股票列表失败: ${error}`;
         }
     }
 
     // 同时需要修改 onMount 中的调用
     onMount(async () => {
+        console.log("组件挂载，开始加载股票列表...");
         try {
             // 使用泛型指定返回类型
             const symbols = await invoke<StockInfo[]>("get_stock_infos");
+            console.log("初始加载获取到股票数量:", symbols.length);
             stockSymbols = symbols;
 
-            if (stockSymbols.length > 0) {
-                selectedSymbol = stockSymbols[0].symbol;
+            if (stockSymbols.length === 0) {
+                console.log("股票列表为空，尝试刷新...");
+                await refreshStockSymbols();
             }
         } catch (error) {
-            console.error("Failed to fetch stock symbols:", error);
+            console.error("初始加载股票列表失败:", error);
+            errorMessage = `加载股票列表失败: ${error}`;
+            // 如果获取失败，尝试刷新
+            await refreshStockSymbols();
         }
     });
 
@@ -273,19 +286,38 @@
     });
 
     async function refreshHistory() {
+        if (!selectedSymbol) {
+            errorMessage = "请先选择股票";
+            return;
+        }
+        
+        console.log("开始刷新历史数据，股票代码:", selectedSymbol);
         try {
-            await invoke("refresh_historical_data", { symbol: selectedSymbol });
-            fetchHistory();
+            const result = await invoke("refresh_historical_data", { symbol: selectedSymbol });
+            console.log("刷新历史数据结果:", result);
+            await fetchHistory();
         } catch (error) {
-            console.error("Failed to refresh history data:", error);
+            console.error("刷新历史数据失败:", error);
+            errorMessage = `刷新历史数据失败: ${error}`;
         }
     }
 
     async function fetchHistory() {
+        if (!selectedSymbol) {
+            console.log("没有选中的股票，跳过获取历史数据");
+            return;
+        }
+        
         if (!startDate || !endDate) {
             errorMessage = "请选择开始日期和结束日期";
             return;
         }
+
+        console.log("开始获取历史数据:", {
+            symbol: selectedSymbol,
+            start: startDate,
+            end: endDate
+        });
 
         isLoading = true;
         errorMessage = "";
@@ -296,10 +328,15 @@
                 start: startDate,
                 end: endDate,
             });
+            console.log("获取到历史数据条数:", data.length);
             historyData = data;
+            
+            if (data.length === 0) {
+                errorMessage = "没有找到指定时间范围内的数据，请尝试刷新数据或调整时间范围";
+            }
         } catch (error) {
             console.error("获取历史数据失败:", error);
-            errorMessage = "获取数据失败，请重试";
+            errorMessage = `获取数据失败: ${error}`;
             historyData = [];
         } finally {
             isLoading = false;
@@ -330,7 +367,6 @@
                         >
                             <span class="symbol">{stock.symbol}</span>
                             <span class="name">{stock.name}</span>
-                            <span class="exchange">{stock.exchange}</span>
                         </div>
                     {:else}
                         <div class="dropdown-empty">未找到匹配的股票</div>
@@ -375,7 +411,6 @@
             <div>成交量</div>
             <div>成交额</div>
             <div>振幅</div>
-            <div>换手率</div>
             <div>涨跌额</div>
             <div>涨跌幅</div>
         </div>
@@ -392,20 +427,19 @@
             {#each historyData as data (data.date)}
                 <div class="table-row">
                     <div>{formatDate(data.date)}</div>
-                    <div>{data.open}</div>
-                    <div>{data.close}</div>
-                    <div>{data.high}</div>
-                    <div>{data.low}</div>
+                    <div>{formatPrice(data.open)}</div>
+                    <div>{formatPrice(data.close)}</div>
+                    <div>{formatPrice(data.high)}</div>
+                    <div>{formatPrice(data.low)}</div>
                     <div>{formatVolume(data.volume)}手</div>
                     <div>{formatVolume(data.amount)}</div>
-                    <div>{data.amplitude}%</div>
-                    <div>{data.turnover_rate}%</div>
+                    <div>{formatPercent(data.amplitude)}</div>
                     <!-- 涨跌额 -->
                     <div
                         class:up={data.change > 0}
                         class:down={data.change < 0}
                     >
-                        {data.change === null ? "-" : data.change}
+                        {data.change === null ? "-" : formatChange(data.change)}
                     </div>
                     <!-- 涨跌幅 -->
                     <div
@@ -414,7 +448,7 @@
                     >
                         {data.change_percent === null
                             ? "-"
-                            : `${data.change_percent}%`}
+                            : formatChangePercent(data.change_percent)}
                     </div>
                 </div>
             {/each}
@@ -432,17 +466,18 @@
     /* 修改.controls容器样式 */
     .controls {
         display: flex;
-        gap: 1.5rem; /* 增大间距 */
-        align-items: stretch; /* 垂直对齐 */
-        flex-wrap: nowrap; /* 禁止换行 */
+        gap: 1rem; /* 适中间距 */
+        align-items: center; /* 垂直居中对齐 */
+        flex-wrap: wrap; /* 允许换行以适应不同屏幕 */
+        margin-bottom: 2rem;
     }
 
     /* 自定义选择框增加弹性布局 */
     .custom-select {
         position: relative;
-        min-width: 240px; /* 最小宽度减小 */
-        max-width: 400px; /* 增加最大宽度限制 */
-        flex: 1 1 auto; /* 改为自动伸缩 */
+        min-width: 200px; /* 最小宽度减小 */
+        max-width: 320px; /* 减少最大宽度限制 */
+        flex: 0 0 auto; /* 固定尺寸，不伸缩 */
     }
 
     /* 增加过渡动画 */
@@ -455,7 +490,7 @@
 
     /* 调整输入框内部尺寸 */
     .search-input {
-        width: 370px;
+        width: 280px;
         padding: 0.6rem 1rem; /* 减小内边距 */
         font-size: 1rem; /* 适当减小字体 */
     }
@@ -476,7 +511,7 @@
         padding: 1rem;
         cursor: pointer;
         display: grid;
-        grid-template-columns: 100px 1fr 80px;
+        grid-template-columns: 100px 1fr;
         gap: 1rem;
         align-items: center;
         transition: background 0.2s;
@@ -495,9 +530,9 @@
         color: #3b82f6;
     }
 
-    .exchange {
-        font-size: 0.9em;
-        color: #94a3b8;
+    .name {
+        color: #e2e8f0;
+        font-size: 0.95em;
     }
 
     .dropdown-empty {
@@ -568,7 +603,7 @@
     .table-header,
     .table-row {
         display: grid;
-        grid-template-columns: repeat(11, 1fr);
+        grid-template-columns: repeat(10, 1fr);
         gap: 1rem;
         padding: 1rem;
     }

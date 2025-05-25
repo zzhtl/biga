@@ -57,7 +57,7 @@ pub struct HistoricalData {
 
 #[derive(Debug, Deserialize)]
 pub struct HistoricalDataItem {
-    #[serde(rename = "d")]
+    #[serde(rename = "t")]
     pub date: String, // 日期
     #[serde(rename = "o")]
     pub open: f64, // 开盘价
@@ -69,16 +69,12 @@ pub struct HistoricalDataItem {
     pub close: f64, // 收盘价（元）
     #[serde(rename = "v")]
     pub volume: i64, // 成交量（手）
-    #[serde(rename = "e")]
+    #[serde(rename = "a")]
     pub amount: f64, // 成交额（元）
-    #[serde(rename = "zf")]
-    pub amplitude: f64, // 振幅（%）
-    #[serde(rename = "hs")]
-    pub turnover_rate: f64, //换手率（%）
-    #[serde(rename = "zd")]
-    pub change_percent: f64, // 涨跌幅（%）
-    #[serde(rename = "zde")]
-    pub change: f64, // 涨跌额（元）
+    #[serde(rename = "pc")]
+    pub pre_close: f64, // 前收盘价
+    #[serde(rename = "sf")]
+    pub stock_flag: f64, // 股票标识
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]

@@ -125,7 +125,6 @@
                 {/if}
             </div>
             <div>振幅</div>
-            <div>换手率</div>
             <div onclick={() => sortData("change")} class="sort-column">
                 涨跌额
                 {#if sortColumn === "change"}
@@ -154,12 +153,11 @@
                     <div class="volume">{formatVolume(stock.volume)}手</div>
                     <div class="amount">{formatVolume(stock.amount)}</div>
                     <div class="amplitude">{stock.amplitude}%</div>
-                    <div class="turnover_rate">{stock.turnover_rate}%</div>
                     <div
                         class:negative={stock.change > 0}
                         class:positive={stock.change < 0}
                     >
-                        {stock.change > 0 ? "+" : ""}{stock.change}
+                        {stock.change > 0 ? "+" : ""}{stock.change.toFixed(2)}
                     </div>
                     <div
                         class:negative={stock.change_percent > 0}
@@ -227,7 +225,7 @@
     .table-header,
     .table-row {
         display: grid;
-        grid-template-columns: repeat(10, 1fr);
+        grid-template-columns: repeat(9, 1fr);
         gap: 1rem;
         padding: 1rem;
     }

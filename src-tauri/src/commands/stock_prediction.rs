@@ -1,9 +1,9 @@
 use crate::db::{prediction};
 use crate::prediction::model;
+use crate::stock_prediction::{TrainingRequest, PredictionRequest as CandlePredictionRequest, TrainingResult, ModelInfo, Prediction};
 use chrono::{NaiveDate, Utc, Datelike};
 use serde::{Deserialize, Serialize};
-use std::fs;
-use tauri::{AppHandle, Manager, State};
+use tauri::{State};
 use sqlx::{Pool, Sqlite};
 
 // 简化版StockData结构体
@@ -30,9 +30,9 @@ pub struct TrainModelRequest {
     pub model_type: String,
 }
 
-// 预测请求
+// 预测请求 - 重命名以避免与candle_prediction中的冲突
 #[derive(Debug, Deserialize)]
-pub struct PredictionRequest {
+pub struct LocalPredictionRequest {
     pub stock_code: String,
     pub model_name: Option<String>,
     pub prediction_days: u32,
@@ -62,68 +62,52 @@ pub struct PredictionResult {
 }
 
 // 列出所有股票预测模型
-pub async fn list_prediction_models(
-    state: State<'_, Pool<Sqlite>>, 
-    symbol: String
-) -> Result<Vec<ModelMetadata>, String> {
-    // 获取模型列表，根据股票代码过滤
-    let models = prediction::list_models_for_symbol(&*state, &symbol)
-        .await
-        .map_err(|e| format!("获取模型列表失败: {}", e))?;
-    
-    // 将数据库模型转换为API响应格式
-    let result = models.into_iter()
-        .map(|model| {
-            let features: Vec<String> = serde_json::from_str(&model.parameters)
-                .unwrap_or_default();
-            
-            ModelMetadata {
-                id: model.id.to_string(),
-                name: model.model_name,
-                stock_code: model.symbol,
-                created_at: model.created_at.timestamp(),
-                model_type: model.model_type,
-                features,
-                target: "close".to_string(), // 默认使用收盘价
-                prediction_days: 7, // 默认预测7天
-                accuracy: 0.8, // 默认准确率
-            }
-        })
-        .collect();
-    
-    Ok(result)
+#[tauri::command]
+pub async fn list_stock_prediction_models(symbol: String) -> Result<Vec<ModelInfo>, String> {
+    // 使用Candle预测模块来获取模型列表
+    Ok(crate::stock_prediction::list_models(&symbol))
 }
 
 // 删除股票预测模型
-pub async fn delete_prediction_model(
-    state: State<'_, Pool<Sqlite>>, 
-    model_id: String
-) -> Result<(), String> {
-    // 删除模型
-    prediction::delete_model(
-        &*state, 
-        model_id.parse::<i64>().map_err(|e| format!("无效的模型ID: {}", e))?
-    )
-    .await
-    .map_err(|e| format!("删除模型失败: {}", e))?;
-    
-    // 删除模型文件（如果有）
-    // 在tauri 2.0中，路径处理可能需要使用tauri::PathResolver
-    // 这里使用一个相对路径作为后备
-    let app_data_dir = std::env::current_dir()
-        .map_err(|e| format!("获取当前目录失败: {}", e))?
-        .join("data");
-    
-    let model_path = app_data_dir.join("models").join(format!("{}.bin", model_id));
-    if model_path.exists() {
-        fs::remove_file(model_path)
-            .map_err(|e| format!("删除模型文件失败: {}", e))?;
-    }
-    
-    Ok(())
+#[tauri::command]
+pub async fn delete_stock_prediction_model(model_id: String) -> Result<(), String> {
+    // 使用Candle预测模块删除模型
+    crate::stock_prediction::delete_model(&model_id)
+        .map_err(|e| format!("删除模型失败: {}", e))
 }
 
-// 训练股票预测模型
+// 使用Candle训练股票预测模型
+#[tauri::command]
+pub async fn train_candle_model(request: TrainingRequest) -> Result<TrainingResult, String> {
+    // 直接使用Candle模型进行训练
+    crate::stock_prediction::train_candle_model(request).await
+}
+
+// 使用Candle进行股票价格预测
+#[tauri::command]
+pub async fn predict_with_candle(request: CandlePredictionRequest) -> Result<Vec<Prediction>, String> {
+    // 使用Candle模型进行预测
+    crate::stock_prediction::predict_with_candle(request).await
+}
+
+// 重新训练Candle模型
+#[tauri::command]
+pub async fn retrain_candle_model(
+    model_id: String,
+    epochs: u32,
+    batch_size: u32,
+    learning_rate: f64,
+) -> Result<(), String> {
+    crate::stock_prediction::retrain_candle_model(model_id, epochs, batch_size, learning_rate).await
+}
+
+// 评估Candle模型
+#[tauri::command]
+pub async fn evaluate_candle_model(model_id: String) -> Result<crate::stock_prediction::EvaluationResult, String> {
+    crate::stock_prediction::evaluate_candle_model(model_id).await
+}
+
+// 训练股票预测模型 - 旧的API保留向后兼容
 #[tauri::command]
 pub async fn train_stock_prediction_model(
     state: State<'_, Pool<Sqlite>>, 
@@ -188,11 +172,11 @@ pub async fn train_stock_prediction_model(
     Ok(model_metadata)
 }
 
-// 进行股票价格预测
+// 进行股票价格预测 - 旧的API保留向后兼容
 #[tauri::command]
 pub async fn predict_stock_price(
     state: State<'_, Pool<Sqlite>>, 
-    request: PredictionRequest
+    request: LocalPredictionRequest
 ) -> Result<Vec<PredictionResult>, String> {
     // 获取最近的历史数据
     let end_date = Utc::now().naive_utc().date();

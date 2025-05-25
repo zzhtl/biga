@@ -8,6 +8,7 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use rand;
 use chrono;
+use sqlx::Row; // 添加Row trait导入
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -149,231 +150,136 @@ pub fn delete_model(model_id: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-// 股票预测数据准备函数
+// 改进的数据预处理函数
 fn prepare_stock_data(
     request: &TrainingRequest,
 ) -> std::result::Result<(Tensor, Tensor, Tensor, Tensor, Vec<String>), candle_core::Error> {
-    // 这里应该是从数据库或API获取股票数据
-    // 为简化示例，我们将通过简单的模拟数据展示如何进行特征工程
-
-    // 构建特征和标签
+    // 设置设备
     let device = Device::Cpu;
     
-    // 模拟获取历史股票数据
-    // 实际应用中，应该从数据库查询
+    // 从数据库查询历史数据
+    let symbol = &request.stock_code;
+    let start_date = &request.start_date;
+    let end_date = &request.end_date;
+    
+    // 使用sqlx查询数据库获取历史数据
+    let historical_data = match get_historical_data_from_db(symbol, start_date, end_date) {
+        Ok(data) => data,
+        Err(e) => {
+            eprintln!("从数据库获取数据失败: {}", e);
+            return Err(candle_core::Error::Msg(format!("获取历史数据失败: {}", e)));
+        }
+    };
+    
+    if historical_data.is_empty() {
+        return Err(candle_core::Error::Msg("历史数据为空，无法训练模型".to_string()));
+    }
+    
+    // 数据质量检查
+    let valid_data: Vec<_> = historical_data.into_iter()
+        .filter(|data| {
+            data.close > 0.0 && data.volume >= 0 && 
+            data.open > 0.0 && data.high > 0.0 && data.low > 0.0 &&
+            data.high >= data.low && data.high >= data.open && 
+            data.high >= data.close && data.low <= data.open && data.low <= data.close
+        })
+        .collect();
+    
+    if valid_data.len() < 60 {
+        return Err(candle_core::Error::Msg(format!(
+            "有效历史数据不足，当前{}天，需要至少60天数据", 
+            valid_data.len()
+        )));
+    }
+    
+    // 构建特征和标签
     let mut dates = Vec::new();
     let mut prices = Vec::new();
     let mut volumes = Vec::new();
     let mut features_matrix = Vec::new();
     
-    // 模拟180天的历史数据
-    let days = 180;
-    let mut price = 100.0;
-    let base_date = chrono::NaiveDate::from_ymd_opt(2023, 1, 1).unwrap();
+    // 按日期排序（从旧到新）
+    let mut sorted_data = valid_data.clone();
+    sorted_data.sort_by(|a, b| a.date.cmp(&b.date));
     
-    for i in 0..days {
-        // 生成日期
-        let date = base_date + chrono::Duration::days(i);
-        dates.push(date.format("%Y-%m-%d").to_string());
-        
-        // 生成价格(有一定的随机波动和趋势)
-        let trend = ((i as f64 / 30.0).sin() * 10.0) + ((i as f64 / 90.0).cos() * 5.0);
-        let random = (rand::random::<f64>() - 0.5) * 4.0;
-        price = price + trend * 0.01 + random;
-        prices.push(price);
-        
-        // 生成成交量
-        let volume = (1000000.0 * (1.0 + (rand::random::<f64>() - 0.5) * 0.3)) as i64;
-        volumes.push(volume);
-        
-        // 为每天准备一个特征向量
-        if i >= 20 {  // 需要前20天数据计算某些指标
-            let mut feature_vector = Vec::new();
-            
-            // 收集请求中的特征
-            for feature_name in &request.features {
-                match feature_name.as_str() {
-                    "close" => {
-                        // 归一化收盘价
-                        let normalized = (price - 95.0) / 20.0; // 假设价格范围在95-115之间
-                        feature_vector.push(normalized);
-                    },
-                    "volume" => {
-                        // 归一化成交量
-                        let normalized = volume as f64 / 2000000.0;
-                        feature_vector.push(normalized);
-                    },
-                    "change_percent" => {
-                        // 计算价格变化百分比
-                        let prev_price = prices[prices.len() - 2];
-                        let change = (price - prev_price) / prev_price;
-                        feature_vector.push(change);
-                    },
-                    "ma5" => {
-                        // 5日移动平均线
-                        let ma5 = prices[prices.len()-5..].iter().sum::<f64>() / 5.0;
-                        let normalized = (ma5 - price) / price;
-                        feature_vector.push(normalized);
-                    },
-                    "ma10" => {
-                        // 10日移动平均线
-                        let ma10 = prices[prices.len()-10..].iter().sum::<f64>() / 10.0;
-                        let normalized = (ma10 - price) / price;
-                        feature_vector.push(normalized);
-                    },
-                    "ma20" => {
-                        // 20日移动平均线
-                        let ma20 = prices[prices.len()-20..].iter().sum::<f64>() / 20.0;
-                        let normalized = (ma20 - price) / price;
-                        feature_vector.push(normalized);
-                    },
-                    "rsi" => {
-                        // 简化的RSI计算
-                        let gains = prices[prices.len()-15..prices.len()-1]
-                            .iter()
-                            .zip(prices[prices.len()-14..].iter())
-                            .map(|(prev, curr)| {
-                                let diff = curr - prev;
-                                if diff > 0.0 { diff } else { 0.0 }
-                            })
-                            .sum::<f64>() / 14.0;
-                            
-                        let losses = prices[prices.len()-15..prices.len()-1]
-                            .iter()
-                            .zip(prices[prices.len()-14..].iter())
-                            .map(|(prev, curr)| {
-                                let diff = prev - curr;
-                                if diff > 0.0 { diff } else { 0.0 }
-                            })
-                            .sum::<f64>() / 14.0;
-                            
-                        let rsi = if losses == 0.0 { 
-                            100.0 
-                        } else { 
-                            100.0 - (100.0 / (1.0 + (gains / losses))) 
-                        };
-                        
-                        feature_vector.push(rsi / 100.0);
-                    },
-                    "macd" => {
-                        // 简化的MACD计算
-                        let ema12 = prices[prices.len()-12..].iter().sum::<f64>() / 12.0;
-                        let ema26 = prices[prices.len()-26..].iter().sum::<f64>() / 26.0;
-                        let macd = ema12 - ema26;
-                        let normalized = macd / price;
-                        feature_vector.push(normalized);
-                    },
-                    "bollinger" => {
-                        // 布林带计算
-                        let ma20 = prices[prices.len()-20..].iter().sum::<f64>() / 20.0;
-                        let variance = prices[prices.len()-20..]
-                            .iter()
-                            .map(|p| (p - ma20).powi(2))
-                            .sum::<f64>() / 20.0;
-                        let std_dev = variance.sqrt();
-                        let upper_band = ma20 + 2.0 * std_dev;
-                        let lower_band = ma20 - 2.0 * std_dev;
-                        
-                        // 计算价格在布林带中的相对位置 (-1到1)
-                        let position = if upper_band == lower_band {
-                            0.0
-                        } else {
-                            2.0 * (price - lower_band) / (upper_band - lower_band) - 1.0
-                        };
-                        
-                        feature_vector.push(position);
-                    },
-                    "stochastic_k" => {
-                        // K值计算
-                        let highest_high = prices[prices.len()-14..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                        let lowest_low = prices[prices.len()-14..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                        
-                        let k = if highest_high == lowest_low {
-                            0.5
-                        } else {
-                            (price - lowest_low) / (highest_high - lowest_low)
-                        };
-                        
-                        feature_vector.push(k);
-                    },
-                    "stochastic_d" => {
-                        // 简化D值计算(K值的3日移动平均)
-                        let highest_high = prices[prices.len()-14..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                        let lowest_low = prices[prices.len()-14..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                        
-                        let k1 = if highest_high == lowest_low {
-                            0.5
-                        } else {
-                            (price - lowest_low) / (highest_high - lowest_low)
-                        };
-                        
-                        let k2 = if highest_high == lowest_low {
-                            0.5
-                        } else {
-                            (prices[prices.len()-2] - lowest_low) / (highest_high - lowest_low)
-                        };
-                        
-                        let k3 = if highest_high == lowest_low {
-                            0.5
-                        } else {
-                            (prices[prices.len()-3] - lowest_low) / (highest_high - lowest_low)
-                        };
-                        
-                        let d = (k1 + k2 + k3) / 3.0;
-                        feature_vector.push(d);
-                    },
-                    "momentum" => {
-                        // 动量指标(当前价格与n日前价格的比率)
-                        if i >= 30 {
-                            let price_n_days_ago = prices[prices.len()-10];
-                            let momentum = price / price_n_days_ago - 1.0;
-                            feature_vector.push(momentum);
-                        } else {
-                            feature_vector.push(0.0);
-                        }
-                    },
-                    _ => {
-                        // 未知特征，添加0值
-                        feature_vector.push(0.0);
-                    }
-                }
-            }
-            
-            features_matrix.push(feature_vector);
-        }
+    // 首先提取基础数据
+    for data in &sorted_data {
+        dates.push(data.date.clone());
+        prices.push(data.close);
+        volumes.push(data.volume);
     }
     
-    // 移除前20天(因为某些指标需要历史数据计算)
-    dates = dates[20..].to_vec();
-    prices = prices[20..].to_vec();
+    // 数据平滑处理：移除异常值
+    let prices = smooth_price_data(&prices);
+    let volumes = smooth_volume_data(&volumes);
+    
+    // 为每天准备一个特征向量（从第60天开始，确保有足够的历史数据计算指标）
+    let lookback_window = 60.max(request.features.iter()
+        .map(|f| get_feature_required_days(f))
+        .max()
+        .unwrap_or(20));
+    
+    for i in lookback_window..prices.len() {
+        let mut feature_vector = Vec::new();
+        
+        // 提取请求中指定的特征
+        for feature_name in &request.features {
+            let feature_value = calculate_feature_value(
+                feature_name, 
+                &prices, 
+                &volumes, 
+                i, 
+                lookback_window
+            )?;
+            feature_vector.push(feature_value);
+        }
+        
+        features_matrix.push(feature_vector);
+    }
+    
+    // 移除前面的数据，因为没有计算特征
+    dates = dates[lookback_window..].to_vec();
+    let valid_prices = prices[lookback_window..].to_vec();
     
     // 创建目标变量: 使用未来n天的价格变化率
     let pred_days = request.prediction_days;
     let mut targets = Vec::new();
     
     for i in 0..features_matrix.len() - pred_days {
-        let current_price = prices[i];
-        let future_price = prices[i + pred_days];
-        let change_rate = (future_price - current_price) / current_price;
-        targets.push(change_rate);
+        let current_price = valid_prices[i];
+        
+        // 计算未来几天的平均价格，减少噪音
+        let future_prices: Vec<f64> = (1..=pred_days)
+            .map(|day| valid_prices.get(i + day).copied().unwrap_or(current_price))
+            .collect();
+        
+        let future_avg_price = future_prices.iter().sum::<f64>() / future_prices.len() as f64;
+        let change_rate = (future_avg_price - current_price) / current_price;
+        
+        // 限制变化率范围，避免极端值影响训练
+        let clamped_change_rate = change_rate.clamp(-0.5, 0.5);
+        targets.push(clamped_change_rate);
     }
     
     // 截断特征矩阵，使其与目标变量长度匹配
     features_matrix.truncate(targets.len());
     dates.truncate(targets.len());
     
-    // 划分训练集和测试集
+    // 特征标准化
+    let (normalized_features, feature_stats) = normalize_features(&features_matrix)?;
+    
+    // 划分训练集和测试集 - 使用时间序列划分
     let train_size = (targets.len() as f64 * request.train_test_split) as usize;
     
     // 转换为张量
-    let features_len = features_matrix[0].len();
-    let x_train_vec: Vec<f64> = features_matrix[0..train_size].iter()
+    let features_len = normalized_features[0].len();
+    let x_train_vec: Vec<f64> = normalized_features[0..train_size].iter()
         .flat_map(|v| v.iter().copied())
         .collect();
     
     let y_train_vec: Vec<f64> = targets[0..train_size].to_vec();
     
-    let x_test_vec: Vec<f64> = features_matrix[train_size..].iter()
+    let x_test_vec: Vec<f64> = normalized_features[train_size..].iter()
         .flat_map(|v| v.iter().copied())
         .collect();
     
@@ -387,7 +293,361 @@ fn prepare_stock_data(
     let x_test = Tensor::from_slice(&x_test_vec, &[test_size, features_len], &device)?;
     let y_test = Tensor::from_slice(&y_test_vec, &[test_size, 1], &device)?;
     
+    println!("数据预处理完成: 训练集{}样本, 测试集{}样本, 特征维度{}", 
+             train_size, test_size, features_len);
+    
     Ok((x_train, y_train, x_test, y_test, dates))
+}
+
+// 数据平滑处理函数
+fn smooth_price_data(prices: &[f64]) -> Vec<f64> {
+    let mut smoothed = prices.to_vec();
+    
+    // 使用中位数滤波器移除价格异常值
+    for i in 2..smoothed.len()-2 {
+        let window: Vec<f64> = smoothed[i-2..=i+2].to_vec();
+        let mut sorted_window = window.clone();
+        sorted_window.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = sorted_window[2];
+        
+        // 如果当前值与中位数相差超过20%，用中位数替换
+        if (smoothed[i] - median).abs() / median > 0.2 {
+            smoothed[i] = median;
+        }
+    }
+    
+    smoothed
+}
+
+fn smooth_volume_data(volumes: &[i64]) -> Vec<i64> {
+    let mut smoothed = volumes.to_vec();
+    
+    // 移除成交量异常值
+    for i in 2..smoothed.len()-2 {
+        let window: Vec<i64> = smoothed[i-2..=i+2].to_vec();
+        let avg = window.iter().sum::<i64>() as f64 / window.len() as f64;
+        
+        // 如果当前值与平均值相差超过5倍，用平均值替换
+        if (smoothed[i] as f64 - avg).abs() / avg > 5.0 {
+            smoothed[i] = avg as i64;
+        }
+    }
+    
+    smoothed
+}
+
+// 获取特征所需的历史天数
+fn get_feature_required_days(feature_name: &str) -> usize {
+    match feature_name {
+        "close" | "volume" | "change_percent" => 1,
+        "ma5" => 5,
+        "ma10" => 10,
+        "ma20" | "bollinger" => 20,
+        "rsi" | "stochastic_k" | "stochastic_d" => 14,
+        "macd" => 26,
+        "momentum" => 10,
+        _ => 1,
+    }
+}
+
+// 计算单个特征值
+fn calculate_feature_value(
+    feature_name: &str,
+    prices: &[f64],
+    volumes: &[i64],
+    index: usize,
+    _lookback_window: usize,
+) -> Result<f64, candle_core::Error> {
+    match feature_name {
+                "close" => {
+            Ok(prices[index])
+                },
+                "volume" => {
+            Ok(volumes[index] as f64)
+                },
+                "change_percent" => {
+            if index > 0 {
+                let prev_price = prices[index - 1];
+                let change = (prices[index] - prev_price) / prev_price;
+                Ok(change)
+            } else {
+                Ok(0.0)
+            }
+                },
+                "ma5" => {
+            if index >= 4 {
+                let ma5 = prices[index-4..=index].iter().sum::<f64>() / 5.0;
+                Ok(ma5)
+            } else {
+                Ok(prices[index])
+            }
+                },
+                "ma10" => {
+            if index >= 9 {
+                let ma10 = prices[index-9..=index].iter().sum::<f64>() / 10.0;
+                Ok(ma10)
+            } else {
+                Ok(prices[index])
+            }
+                },
+                "ma20" => {
+            if index >= 19 {
+                let ma20 = prices[index-19..=index].iter().sum::<f64>() / 20.0;
+                Ok(ma20)
+            } else {
+                Ok(prices[index])
+            }
+                },
+                "rsi" => {
+            if index >= 14 {
+                Ok(calculate_rsi(&prices[index-14..=index]))
+                    } else { 
+                Ok(50.0) // 默认中性RSI
+            }
+                },
+                "macd" => {
+            if index >= 25 {
+                Ok(calculate_macd(&prices[index-25..=index]))
+            } else {
+                Ok(0.0)
+            }
+                },
+                "bollinger" => {
+            if index >= 19 {
+                Ok(calculate_bollinger_position(&prices[index-19..=index], prices[index]))
+                    } else {
+                Ok(0.0)
+            }
+                },
+                "stochastic_k" => {
+            if index >= 13 {
+                Ok(calculate_stochastic_k(&prices[index-13..=index], prices[index]))
+                    } else {
+                Ok(0.5)
+            }
+                },
+                "stochastic_d" => {
+            if index >= 15 {
+                // 计算前3天的K值的平均值
+                let k_values: Vec<f64> = (0..3)
+                    .map(|i| {
+                        let k_index = index - i;
+                        if k_index >= 13 {
+                            calculate_stochastic_k(&prices[k_index-13..=k_index], prices[k_index])
+                    } else {
+                        0.5
+                        }
+                    })
+                    .collect();
+                Ok(k_values.iter().sum::<f64>() / k_values.len() as f64)
+                    } else {
+                Ok(0.5)
+            }
+                },
+                "momentum" => {
+            if index >= 10 {
+                let momentum = prices[index] / prices[index-10] - 1.0;
+                Ok(momentum)
+                    } else {
+                Ok(0.0)
+                    }
+                },
+                _ => {
+            Ok(0.0)
+        }
+    }
+}
+
+// 特征标准化
+fn normalize_features(features: &[Vec<f64>]) -> Result<(Vec<Vec<f64>>, Vec<(f64, f64)>), candle_core::Error> {
+    if features.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    
+    let feature_count = features[0].len();
+    let mut stats = Vec::with_capacity(feature_count);
+    let mut normalized = vec![vec![0.0; feature_count]; features.len()];
+    
+    // 计算每个特征的均值和标准差
+    for feature_idx in 0..feature_count {
+        let values: Vec<f64> = features.iter().map(|row| row[feature_idx]).collect();
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        let variance = values.iter()
+            .map(|v| (v - mean).powi(2))
+            .sum::<f64>() / values.len() as f64;
+        let std_dev = variance.sqrt().max(1e-8); // 避免除零
+        
+        stats.push((mean, std_dev));
+        
+        // 标准化该特征
+        for (row_idx, row) in features.iter().enumerate() {
+            normalized[row_idx][feature_idx] = (row[feature_idx] - mean) / std_dev;
+        }
+    }
+    
+    Ok((normalized, stats))
+}
+
+// RSI计算函数
+fn calculate_rsi(prices: &[f64]) -> f64 {
+    if prices.len() < 2 {
+        return 50.0;
+    }
+    
+    let mut gains = 0.0;
+    let mut losses = 0.0;
+    
+    for i in 1..prices.len() {
+        let change = prices[i] - prices[i-1];
+        if change > 0.0 {
+            gains += change;
+        } else {
+            losses += -change;
+        }
+    }
+    
+    gains /= (prices.len() - 1) as f64;
+    losses /= (prices.len() - 1) as f64;
+    
+    if losses == 0.0 {
+        100.0
+    } else {
+        100.0 - (100.0 / (1.0 + (gains / losses)))
+    }
+}
+
+// MACD计算函数
+fn calculate_macd(prices: &[f64]) -> f64 {
+    if prices.len() < 26 {
+        return 0.0;
+    }
+    
+    let ema12 = calculate_ema(prices, 12);
+    let ema26 = calculate_ema(prices, 26);
+    ema12 - ema26
+}
+
+// 布林带位置计算
+fn calculate_bollinger_position(prices: &[f64], current_price: f64) -> f64 {
+    if prices.len() < 20 {
+        return 0.0;
+    }
+    
+    let ma = prices.iter().sum::<f64>() / prices.len() as f64;
+    let variance = prices.iter()
+        .map(|p| (p - ma).powi(2))
+        .sum::<f64>() / prices.len() as f64;
+    let std_dev = variance.sqrt();
+    
+    let upper_band = ma + 2.0 * std_dev;
+    let lower_band = ma - 2.0 * std_dev;
+    
+    if upper_band == lower_band {
+        0.0
+    } else {
+        (current_price - lower_band) / (upper_band - lower_band) - 0.5
+    }
+}
+
+// 随机指标K值计算
+fn calculate_stochastic_k(prices: &[f64], current_price: f64) -> f64 {
+    if prices.is_empty() {
+        return 0.5;
+    }
+    
+    let highest = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let lowest = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    
+    if highest == lowest {
+        0.5
+    } else {
+        (current_price - lowest) / (highest - lowest)
+    }
+}
+
+// 从数据库获取历史数据
+fn get_historical_data_from_db(symbol: &str, start_date: &str, end_date: &str) -> Result<Vec<HistoricalDataType>, String> {
+    // 创建一个临时的数据库连接
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+    
+    // 异步操作需要在同步函数中使用阻塞方式执行
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("创建运行时失败: {}", e))?;
+    
+    rt.block_on(async {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite://db/stock_data.db")
+            .await
+            .map_err(|e| format!("连接数据库失败: {}", e))?;
+        
+        let records = sqlx::query_as::<_, HistoricalDataType>(
+            r#"SELECT * FROM historical_data 
+               WHERE symbol = ? AND date BETWEEN ? AND ?
+               ORDER BY date ASC"#
+        )
+        .bind(symbol)
+        .bind(start_date)
+        .bind(end_date)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| format!("查询历史数据失败: {}", e))?;
+        
+        Ok(records)
+    })
+}
+
+// 历史数据结构体
+#[derive(Debug, Clone)]
+struct HistoricalDataType {
+    pub symbol: String,
+    pub date: String,
+    pub open: f64,
+    pub close: f64,
+    pub high: f64,
+    pub low: f64,
+    pub volume: i64,
+    pub amount: f64,
+    pub amplitude: f64,
+    pub turnover_rate: f64,
+    pub change: f64,
+    pub change_percent: f64,
+}
+
+// 实现FromRow特征，使其可以从数据库行转换
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for HistoricalDataType {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            symbol: row.try_get("symbol")?,
+            date: row.try_get("date")?,
+            open: row.try_get("open")?,
+            close: row.try_get("close")?,
+            high: row.try_get("high")?,
+            low: row.try_get("low")?,
+            volume: row.try_get("volume")?,
+            amount: row.try_get("amount")?,
+            amplitude: row.try_get("amplitude")?,
+            turnover_rate: row.try_get("turnover_rate")?,
+            change: row.try_get("change")?,
+            change_percent: row.try_get("change_percent")?,
+        })
+    }
+}
+
+// 计算指数移动平均线
+fn calculate_ema(data: &[f64], period: usize) -> f64 {
+    if data.is_empty() || period == 0 || data.len() < period {
+        return 0.0;
+    }
+    
+    let multiplier = 2.0 / (period as f64 + 1.0);
+    let mut ema = data[0];
+    
+    for i in 1..data.len() {
+        ema = (data[i] - ema) * multiplier + ema;
+    }
+    
+    ema
 }
 
 // 训练模型函数
@@ -550,171 +810,209 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     let model_path = get_model_dir(&metadata.id).join("model.safetensors");
     varmap.load(&model_path).map_err(|e| format!("模型加载失败: {}", e))?;
     
-    // 获取最近的市场数据用于预测
-    // 在实际应用中，应从数据库获取最近的股票数据
-    // 这里使用模拟数据
-
-    // 模拟获取最近股票数据
-    let mut prices = Vec::new();
-    let mut volumes = Vec::new();
-    let mut dates = Vec::new();
-    let mut current_price = 100.0;
-    let today = chrono::Local::now().naive_local().date();
+    // 获取最近的真实市场数据用于预测
+    let (current_price, dates, prices, volumes) = get_recent_market_data(&request.stock_code, 60)
+        .map_err(|e| format!("获取市场数据失败: {}", e))?;
     
-    // 获取过去30天的数据用于计算特征
-    for i in (1..=30).rev() {
-        let date = today - chrono::Duration::days(i);
-        dates.push(date.format("%Y-%m-%d").to_string());
-        
-        // 模拟价格和成交量
-        let random = (rand::random::<f64>() - 0.5) * 2.0;
-        current_price = current_price * (1.0 + random * 0.01);
-        prices.push(current_price);
-        
-        let volume = (1000000.0 * (1.0 + (rand::random::<f64>() - 0.5) * 0.3)) as i64;
-        volumes.push(volume);
+    if prices.len() < 20 {
+        return Err("历史数据不足，无法进行预测，需要至少20天数据".to_string());
     }
     
     // 计算特征向量
     let mut features = Vec::new();
+    let last_idx = prices.len() - 1;
     
+    // 为每个特征计算值
     for feature_name in &metadata.features {
         match feature_name.as_str() {
             "close" => {
                 // 归一化收盘价
-                let normalized = (current_price - 95.0) / 20.0; // 假设价格范围在95-115之间
+                let price_min = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                let price_max = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                let price_range = price_max - price_min;
+                let normalized = if price_range > 0.0 {
+                    (current_price - price_min) / price_range
+                } else {
+                    0.5 // 如果价格没有变化，使用中间值
+                };
                 features.push(normalized);
             },
             "volume" => {
                 // 归一化成交量
-                let latest_volume = volumes.last().unwrap();
-                let normalized = *latest_volume as f64 / 2000000.0;
+                let latest_volume = volumes[last_idx];
+                let vol_min = volumes.iter().fold(i64::MAX, |a, &b| a.min(b));
+                let vol_max = volumes.iter().fold(i64::MIN, |a, &b| a.max(b));
+                let vol_range = (vol_max - vol_min) as f64;
+                let normalized = if vol_range > 0.0 {
+                    (latest_volume - vol_min) as f64 / vol_range
+                } else {
+                    0.5 // 如果成交量没有变化，使用中间值
+                };
                 features.push(normalized);
             },
             "change_percent" => {
                 // 计算价格变化百分比
-                let prev_price = prices[prices.len() - 2];
+                let prev_price = prices[last_idx - 1];
                 let change = (current_price - prev_price) / prev_price;
-                features.push(change);
+                let normalized = (change / 0.1).clamp(-1.0, 1.0); // 假设正常变化率在±10%内
+                features.push(normalized);
             },
             "ma5" => {
                 // 5日移动平均线
-                let ma5 = prices[prices.len()-5..].iter().sum::<f64>() / 5.0;
-                let normalized = (ma5 - current_price) / current_price;
-                features.push(normalized);
+                if prices.len() >= 5 {
+                    let ma5 = prices[prices.len()-5..].iter().sum::<f64>() / 5.0;
+                    let normalized = (ma5 - current_price) / current_price;
+                    features.push(normalized);
+                } else {
+                    features.push(0.0);
+                }
             },
             "ma10" => {
                 // 10日移动平均线
-                let ma10 = prices[prices.len()-10..].iter().sum::<f64>() / 10.0;
-                let normalized = (ma10 - current_price) / current_price;
-                features.push(normalized);
+                if prices.len() >= 10 {
+                    let ma10 = prices[prices.len()-10..].iter().sum::<f64>() / 10.0;
+                    let normalized = (ma10 - current_price) / current_price;
+                    features.push(normalized);
+                } else {
+                    features.push(0.0);
+                }
             },
             "ma20" => {
                 // 20日移动平均线
-                let ma20 = prices[prices.len()-20..].iter().sum::<f64>() / 20.0;
-                let normalized = (ma20 - current_price) / current_price;
-                features.push(normalized);
+                if prices.len() >= 20 {
+                    let ma20 = prices[prices.len()-20..].iter().sum::<f64>() / 20.0;
+                    let normalized = (ma20 - current_price) / current_price;
+                    features.push(normalized);
+                } else {
+                    features.push(0.0);
+                }
             },
             "rsi" => {
-                // 简化的RSI计算
-                let gains = prices[prices.len()-15..prices.len()-1]
-                    .iter()
-                    .zip(prices[prices.len()-14..].iter())
-                    .map(|(prev, curr)| {
-                        let diff = curr - prev;
-                        if diff > 0.0 { diff } else { 0.0 }
-                    })
-                    .sum::<f64>() / 14.0;
+                // RSI计算
+                if prices.len() >= 15 {
+                    let gains = prices[prices.len()-15..prices.len()-1]
+                        .iter()
+                        .zip(prices[prices.len()-14..].iter())
+                        .map(|(prev, curr)| {
+                            let diff = curr - prev;
+                            if diff > 0.0 { diff } else { 0.0 }
+                        })
+                        .sum::<f64>() / 14.0;
+                        
+                    let losses = prices[prices.len()-15..prices.len()-1]
+                        .iter()
+                        .zip(prices[prices.len()-14..].iter())
+                        .map(|(prev, curr)| {
+                            let diff = prev - curr;
+                            if diff > 0.0 { diff } else { 0.0 }
+                        })
+                        .sum::<f64>() / 14.0;
+                        
+                    let rsi = if losses == 0.0 { 
+                        100.0 
+                    } else { 
+                        100.0 - (100.0 / (1.0 + (gains / losses))) 
+                    };
                     
-                let losses = prices[prices.len()-15..prices.len()-1]
-                    .iter()
-                    .zip(prices[prices.len()-14..].iter())
-                    .map(|(prev, curr)| {
-                        let diff = prev - curr;
-                        if diff > 0.0 { diff } else { 0.0 }
-                    })
-                    .sum::<f64>() / 14.0;
-                    
-                let rsi = if losses == 0.0 { 
-                    100.0 
-                } else { 
-                    100.0 - (100.0 / (1.0 + (gains / losses))) 
-                };
-                
-                features.push(rsi / 100.0);
+                    features.push(rsi / 100.0);
+                } else {
+                    features.push(0.5); // 默认中性RSI
+                }
             },
             "macd" => {
-                // 简化的MACD计算
-                let ema12 = prices[prices.len()-12..].iter().sum::<f64>() / 12.0;
-                let ema26 = prices[prices.len()-26..].iter().sum::<f64>() / 26.0;
-                let macd = ema12 - ema26;
-                let normalized = macd / current_price;
-                features.push(normalized);
+                // MACD计算
+                if prices.len() >= 26 {
+                    let ema12 = calculate_ema(&prices[prices.len()-26..], 12);
+                    let ema26 = calculate_ema(&prices[prices.len()-26..], 26);
+                    let macd = ema12 - ema26;
+                    let normalized = macd / current_price;
+                    features.push(normalized);
+                } else {
+                    features.push(0.0);
+                }
             },
             "bollinger" => {
                 // 布林带计算
-                let ma20 = prices[prices.len()-20..].iter().sum::<f64>() / 20.0;
-                let variance = prices[prices.len()-20..]
-                    .iter()
-                    .map(|p| (p - ma20).powi(2))
-                    .sum::<f64>() / 20.0;
-                let std_dev = variance.sqrt();
-                let upper_band = ma20 + 2.0 * std_dev;
-                let lower_band = ma20 - 2.0 * std_dev;
-                
-                // 计算价格在布林带中的相对位置 (-1到1)
-                let position = if upper_band == lower_band {
-                    0.0
+                if prices.len() >= 20 {
+                    let ma20 = prices[prices.len()-20..].iter().sum::<f64>() / 20.0;
+                    let variance = prices[prices.len()-20..]
+                        .iter()
+                        .map(|p| (p - ma20).powi(2))
+                        .sum::<f64>() / 20.0;
+                    let std_dev = variance.sqrt();
+                    let upper_band = ma20 + 2.0 * std_dev;
+                    let lower_band = ma20 - 2.0 * std_dev;
+                    
+                    // 计算价格在布林带中的相对位置 (-1到1)
+                    let position = if upper_band > lower_band {
+                        2.0 * (current_price - lower_band) / (upper_band - lower_band) - 1.0
+                    } else {
+                        0.0
+                    };
+                    
+                    features.push(position);
                 } else {
-                    2.0 * (current_price - lower_band) / (upper_band - lower_band) - 1.0
-                };
-                
-                features.push(position);
+                    features.push(0.0);
+                }
             },
             "stochastic_k" => {
                 // K值计算
-                let highest_high = prices[prices.len()-14..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                let lowest_low = prices[prices.len()-14..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                
-                let k = if highest_high == lowest_low {
-                    0.5
+                if prices.len() >= 14 {
+                    let highest_high = prices[prices.len()-14..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                    let lowest_low = prices[prices.len()-14..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                    
+                    let k = if highest_high > lowest_low {
+                        (current_price - lowest_low) / (highest_high - lowest_low)
+                    } else {
+                        0.5
+                    };
+                    
+                    features.push(k);
                 } else {
-                    (current_price - lowest_low) / (highest_high - lowest_low)
-                };
-                
-                features.push(k);
+                    features.push(0.5);
+                }
             },
             "stochastic_d" => {
-                // 简化D值计算(K值的3日移动平均)
-                let highest_high = prices[prices.len()-14..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                let lowest_low = prices[prices.len()-14..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                
-                let k1 = if highest_high == lowest_low {
-                    0.5
+                // D值计算(K值的3日移动平均)
+                if prices.len() >= 14 {
+                    let highest_high = prices[prices.len()-14..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                    let lowest_low = prices[prices.len()-14..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                    
+                    let k1 = if highest_high > lowest_low {
+                        (current_price - lowest_low) / (highest_high - lowest_low)
+                    } else {
+                        0.5
+                    };
+                    
+                    let k2 = if highest_high > lowest_low && prices.len() > 1 {
+                        (prices[prices.len()-2] - lowest_low) / (highest_high - lowest_low)
+                    } else {
+                        0.5
+                    };
+                    
+                    let k3 = if highest_high > lowest_low && prices.len() > 2 {
+                        (prices[prices.len()-3] - lowest_low) / (highest_high - lowest_low)
+                    } else {
+                        0.5
+                    };
+                    
+                    let d = (k1 + k2 + k3) / 3.0;
+                    features.push(d);
                 } else {
-                    (current_price - lowest_low) / (highest_high - lowest_low)
-                };
-                
-                let k2 = if highest_high == lowest_low {
-                    0.5
-                } else {
-                    (prices[prices.len()-2] - lowest_low) / (highest_high - lowest_low)
-                };
-                
-                let k3 = if highest_high == lowest_low {
-                    0.5
-                } else {
-                    (prices[prices.len()-3] - lowest_low) / (highest_high - lowest_low)
-                };
-                
-                let d = (k1 + k2 + k3) / 3.0;
-                features.push(d);
+                    features.push(0.5);
+                }
             },
             "momentum" => {
                 // 动量指标(当前价格与n日前价格的比率)
-                let price_n_days_ago = prices[prices.len()-10];
-                let momentum = current_price / price_n_days_ago - 1.0;
-                features.push(momentum);
+                let n = 10; // 使用10日动量
+                if prices.len() > n {
+                    let price_n_days_ago = prices[prices.len()-n-1];
+                    let momentum = current_price / price_n_days_ago - 1.0;
+                    let normalized = (momentum / 0.2).clamp(-1.0, 1.0); // 假设正常动量在±20%内
+                    features.push(normalized);
+                } else {
+                    features.push(0.0);
+                }
             },
             _ => {
                 // 未知特征，添加0值
@@ -738,22 +1036,26 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     let mut predictions = Vec::new();
     let mut last_price = current_price;
     
-    // 计算价格波动预测的置信度(基于特征分布)
-    // 实际应用中可以使用更复杂的方法计算置信度
+    // 计算价格波动预测的置信度
     let compute_confidence = |days_ahead: i64| -> f64 {
         // 置信度随预测天数增加而降低
-        let base_confidence = 0.95;
-        let decay_rate = 0.03;
+        let base_confidence = metadata.accuracy;
+        let decay_rate = 0.05;
         (base_confidence * (1.0 - decay_rate * days_ahead as f64)).max(0.5)
     };
     
+    // 获取最后一个日期，用于计算预测日期
+    let last_date = chrono::NaiveDate::parse_from_str(&dates.last().unwrap_or(&"2023-01-01".to_string()), "%Y-%m-%d")
+        .unwrap_or_else(|_| chrono::Local::now().naive_local().date());
+    
     for day in 1..=request.prediction_days {
         // 创建目标日期
-        let target_date = today + chrono::Duration::days(day as i64);
+        let target_date = last_date + chrono::Duration::days(day as i64);
         let date_str = target_date.format("%Y-%m-%d").to_string();
         
         // 每天的变化率在上一次预测的基础上微调
-        let day_change_rate = change_rate * (1.0 + (rand::random::<f64>() - 0.5) * 0.2);
+        let volatility_factor = 0.2; // 波动因子
+        let day_change_rate = change_rate * (1.0 + (day as f64 - 1.0) * 0.1) * (1.0 + (rand::random::<f64>() - 0.5) * volatility_factor);
         
         // 计算预测价格
         let predicted_price = last_price * (1.0 + day_change_rate);
@@ -777,6 +1079,61 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     }
     
     Ok(predictions)
+}
+
+// 从数据库获取最近的市场数据
+fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, Vec<String>, Vec<f64>, Vec<i64>), String> {
+    // 创建临时数据库连接
+    use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
+    use chrono::Local;
+    
+    // 计算开始日期（默认获取过去180天数据，确保有足够的历史数据计算指标）
+    let end_date = Local::now().naive_local().date();
+    let start_date = end_date - chrono::Duration::days(180);
+    
+    // 创建运行时
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("创建运行时失败: {}", e))?;
+    
+    rt.block_on(async {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite://db/stock_data.db")
+            .await
+            .map_err(|e| format!("连接数据库失败: {}", e))?;
+        
+        let records = sqlx::query_as::<_, HistoricalDataType>(
+            r#"SELECT * FROM historical_data 
+               WHERE symbol = ? AND date BETWEEN ? AND ?
+               ORDER BY date DESC
+               LIMIT ?"#
+        )
+        .bind(symbol)
+        .bind(start_date.format("%Y-%m-%d").to_string())
+        .bind(end_date.format("%Y-%m-%d").to_string())
+        .bind(days as i32)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| format!("查询历史数据失败: {}", e))?;
+        
+        if records.is_empty() {
+            return Err(format!("未找到股票代码 {} 的历史数据", symbol));
+        }
+        
+        // 反向排序以获取时间顺序（从旧到新）
+        let mut sorted_records = records;
+        sorted_records.reverse();
+        
+        // 提取数据
+        let dates: Vec<String> = sorted_records.iter().map(|r| r.date.clone()).collect();
+        let prices: Vec<f64> = sorted_records.iter().map(|r| r.close).collect();
+        let volumes: Vec<i64> = sorted_records.iter().map(|r| r.volume).collect();
+        
+        // 获取最新价格
+        let current_price = prices.last().copied().unwrap_or(0.0);
+        
+        Ok((current_price, dates, prices, volumes))
+    })
 }
 
 // 重新训练模型
