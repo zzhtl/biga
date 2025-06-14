@@ -66,7 +66,7 @@
     // 模型训练参数
     let newModelName = "模型-" + new Date().toISOString().slice(0, 10);
     let modelType = "candle_mlp"; // 默认使用Candle的MLP模型
-    let lookbackDays = 60; // 增加历史窗口
+    let lookbackDays = 180; // 修改为180天历史数据
     let trainTestSplit = 0.8;
     let features = ["close", "volume", "change_percent", "ma5", "ma10", "ma20", "rsi", "macd", "bollinger", "stochastic_k", "stochastic_d", "momentum"];
     let epochs = 100; // 训练轮数
@@ -142,10 +142,14 @@
         const progressInterval = await simulateTrainingProgress();
         
         try {
-            // 计算训练日期范围
+            // 计算训练日期范围 - 考虑A股节假日因素
             const endDate = new Date().toISOString().slice(0, 10);
-            const startDateObj = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000);
+            // 使用180天训练数据 + 30天节假日缓冲期 = 210天总范围
+            const totalDays = lookbackDays + 30; // 180 + 30 = 210天
+            const startDateObj = new Date(Date.now() - totalDays * 24 * 60 * 60 * 1000);
             const startDate = startDateObj.toISOString().slice(0, 10);
+
+            console.log(`📅 训练数据范围: ${startDate} 到 ${endDate} (${totalDays}天，含节假日缓冲)`);
 
             const trainRequest = {
                 stock_code: stockCode,
@@ -463,8 +467,11 @@
                 </div>
                 
                 <div class="form-group">
-                    <label>历史窗口天数:</label>
-                    <input type="number" bind:value={lookbackDays} min="30" max="360" />
+                    <label>历史窗口天数 (实际查询范围+30天节假日缓冲):</label>
+                    <input type="number" bind:value={lookbackDays} min="60" max="365" step="30" />
+                    <small style="color: rgba(255,255,255,0.6); font-size: 0.8rem;">
+                        推荐: 180天 (约6个月交易数据)，实际查询 {lookbackDays + 30} 天
+                    </small>
                 </div>
                 
                 <div class="form-group">

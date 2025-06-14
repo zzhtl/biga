@@ -197,40 +197,47 @@ async fn prepare_stock_data(
     // 设置设备
     let device = Device::Cpu;
     
-    // 扩展数据获取范围以提高模型准确率
     let symbol = &request.stock_code;
     
-    // 自动计算更长的时间范围，确保有足够的训练数据
+    // 解析前端传来的日期范围
     let end_date = chrono::Local::now().naive_local().date();
-    let extended_start_date = end_date - chrono::Duration::days(500); // 扩展到约1.5年
+    let user_start_date = chrono::NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d")
+        .unwrap_or_else(|_| end_date - chrono::Duration::days(210)); // 默认210天
+    let user_end_date = chrono::NaiveDate::parse_from_str(&request.end_date, "%Y-%m-%d")
+        .unwrap_or(end_date);
     
-    // 优先使用扩展的时间范围，如果用户指定的范围更大则使用用户指定的
-    let actual_start_date = if let Ok(user_start) = chrono::NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d") {
-        if user_start < extended_start_date {
-            user_start
-        } else {
-            extended_start_date
-        }
+    // 计算用户请求的天数范围
+    let requested_days = (user_end_date - user_start_date).num_days();
+    
+    // 为A股节假日增加额外缓冲期
+    // 如果用户已经包含了缓冲期（如180+30=210天），我们再增加一些以确保数据充足
+    let additional_buffer = if requested_days >= 200 { 
+        60  // 用户已有缓冲，再加60天
+    } else { 
+        90  // 用户没有缓冲，加90天
+    };
+    
+    let extended_start_date = user_start_date - chrono::Duration::days(additional_buffer);
+    
+    // 确保不会查询过于久远的数据（最多2年）
+    let max_start_date = end_date - chrono::Duration::days(730);
+    let actual_start_date = if extended_start_date < max_start_date {
+        max_start_date
     } else {
         extended_start_date
     };
     
-    let actual_end_date = if let Ok(user_end) = chrono::NaiveDate::parse_from_str(&request.end_date, "%Y-%m-%d") {
-        if user_end > end_date {
-            end_date
-        } else {
-            user_end
-        }
-    } else {
-        end_date
-    };
-    
     let start_date_str = actual_start_date.format("%Y-%m-%d").to_string();
-    let end_date_str = actual_end_date.format("%Y-%m-%d").to_string();
+    let end_date_str = user_end_date.format("%Y-%m-%d").to_string();
     
-    println!("🚀 使用扩展训练数据范围: {} 到 {} (约{}天)", 
+    println!("📅 A股数据获取策略:");
+    println!("   用户请求范围: {} 到 {} ({} 天)", 
+             user_start_date.format("%Y-%m-%d"), 
+             user_end_date.format("%Y-%m-%d"), 
+             requested_days);
+    println!("   实际查询范围: {} 到 {} ({} 天，含节假日缓冲)", 
              start_date_str, end_date_str, 
-             (actual_end_date - actual_start_date).num_days());
+             (user_end_date - actual_start_date).num_days());
     
     // 使用sqlx查询数据库获取历史数据
     let historical_data = match get_historical_data_from_db(symbol, &start_date_str, &end_date_str).await {
@@ -247,25 +254,31 @@ async fn prepare_stock_data(
     
     println!("✅ 获取到{}条历史数据", historical_data.len());
     
-    // 数据质量检查
+    // 数据质量检查 - 针对A股特点优化
     let valid_data: Vec<_> = historical_data.into_iter()
         .filter(|data| {
+            // A股基本数据验证
             data.close > 0.0 && data.volume >= 0 && 
             data.open > 0.0 && data.high > 0.0 && data.low > 0.0 &&
             data.high >= data.low && data.high >= data.open && 
-            data.high >= data.close && data.low <= data.open && data.low <= data.close
+            data.high >= data.close && data.low <= data.open && data.low <= data.close &&
+            // A股涨跌幅限制检查（ST股票20%，普通股票10%）
+            data.change_percent.abs() <= 25.0 && // 允许一些数据误差
+            // 成交量合理性检查
+            data.volume < 1_000_000_000_000 // 避免异常大的成交量
         })
         .collect();
     
     println!("✅ 过滤后有效数据{}条", valid_data.len());
     
-    // 降低最小数据要求，但建议使用更多数据
-    let min_required_days = 60; // 最少60天
-    let recommended_days = 200; // 推荐200天以上
+    // A股交易日数量估算：一年约250个交易日
+    let min_required_days = 120; // 最少约半年交易数据
+    let recommended_days = 180; // 推荐约9个月交易数据
+    let optimal_days = 250; // 最佳约1年交易数据
     
     if valid_data.len() < min_required_days {
         return Err(candle_core::Error::Msg(format!(
-            "有效历史数据不足，当前{}天，需要至少{}天数据", 
+            "A股有效交易数据不足，当前{}天，需要至少{}天数据（约半年交易日）", 
             valid_data.len(), min_required_days
         )));
     }
@@ -273,6 +286,9 @@ async fn prepare_stock_data(
     if valid_data.len() < recommended_days {
         println!("⚠️  警告: 当前数据量{}天少于推荐的{}天，可能影响模型准确率", 
                  valid_data.len(), recommended_days);
+    } else if valid_data.len() >= optimal_days {
+        println!("✅ 数据量充足: {}天 >= {}天，有利于提高模型准确率", 
+                 valid_data.len(), optimal_days);
     }
     
     // 构建特征和标签
