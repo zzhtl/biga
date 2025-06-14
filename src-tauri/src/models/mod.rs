@@ -76,7 +76,7 @@ impl ModelManager {
     
     // 从股票数据中提取特征用于训练
     pub fn prepare_stock_data(
-        &self,
+        &mut self,
         stock_data: &[StockData],
         features: &[String],
         target: &str,
@@ -99,7 +99,7 @@ impl ModelManager {
     
     // 准备预测数据
     pub fn prepare_prediction_data(
-        &self,
+        &mut self,
         stock_data: &[StockData],
         features: &[String],
         prediction_days: u32
@@ -115,7 +115,7 @@ impl ModelManager {
         self.feature_extractor.normalize_features(&mut features_data)?;
         
         // 计算目标的归一化参数（用于后期反归一化）
-        let mut targets = stock_data.iter()
+        let targets = stock_data.iter()
             .map(|data| data.close as f64)
             .collect::<Vec<f64>>();
         
@@ -197,7 +197,7 @@ impl ModelManager {
     
     // 使用股票数据进行预测
     pub fn predict_with_stock_data(
-        &self,
+        &mut self,
         model: &Model,
         stock_data: &[StockData],
         features: &[String],
@@ -527,7 +527,7 @@ impl ModelManager {
             
             // 添加时间因子调整
             let time_factor = lstm_weights.last().unwrap_or(&0.01) * days_ahead as f64;
-            prediction *= (1.0 + time_factor * 0.01);
+            prediction *= 1.0 + time_factor * 0.01;
             
             Ok(prediction)
         } else {
@@ -629,4 +629,5 @@ impl ModelManager {
 
 pub mod candle_models;
 
-pub use candle_models::*; 
+// 导出candle模型相关的公共API
+pub use candle_models::{ModelConfig, create_model, save_model}; 

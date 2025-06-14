@@ -13,6 +13,9 @@ pub struct MLP {
     dropout: f64,
 }
 
+unsafe impl Send for MLP {}
+unsafe impl Sync for MLP {}
+
 impl MLP {
     pub fn new(
         in_dim: usize, 
@@ -46,6 +49,9 @@ struct LSTMCell {
     hidden_size: usize,
 }
 
+unsafe impl Send for LSTMCell {}
+unsafe impl Sync for LSTMCell {}
+
 impl LSTMCell {
     fn new(input_size: usize, hidden_size: usize, vb: VarBuilder) -> Result<Self> {
         let wx = candle_nn::linear(input_size, 4 * hidden_size, vb.pp("wx"))?;
@@ -78,6 +84,9 @@ pub struct LSTM {
     output_layer: Linear,
     dropout: f64,
 }
+
+unsafe impl Send for LSTM {}
+unsafe impl Sync for LSTM {}
 
 impl LSTM {
     pub fn new(
@@ -122,6 +131,9 @@ struct GRUCell {
     w_h: Linear, // 输出激活权重
 }
 
+unsafe impl Send for GRUCell {}
+unsafe impl Sync for GRUCell {}
+
 impl GRUCell {
     fn new(input_size: usize, hidden_size: usize, vb: VarBuilder) -> Result<Self> {
         let w_z = candle_nn::linear(input_size + hidden_size, hidden_size, vb.pp("w_z"))?;
@@ -160,6 +172,9 @@ pub struct GRU {
     output_layer: Linear,
     dropout: f64,
 }
+
+unsafe impl Send for GRU {}
+unsafe impl Sync for GRU {}
 
 impl GRU {
     pub fn new(
@@ -200,6 +215,9 @@ struct SelfAttention {
     head_dim: usize,
     n_heads: usize,
 }
+
+unsafe impl Send for SelfAttention {}
+unsafe impl Sync for SelfAttention {}
 
 impl SelfAttention {
     fn new(hidden_dim: usize, n_heads: usize, vb: VarBuilder) -> Result<Self> {
@@ -261,6 +279,9 @@ struct FeedForward {
     dropout: f64,
 }
 
+unsafe impl Send for FeedForward {}
+unsafe impl Sync for FeedForward {}
+
 impl FeedForward {
     fn new(hidden_dim: usize, ff_dim: usize, dropout: f64, vb: VarBuilder) -> Result<Self> {
         let fc1 = candle_nn::linear(hidden_dim, ff_dim, vb.pp("fc1"))?;
@@ -284,6 +305,9 @@ struct TransformerEncoderLayer {
     norm2: candle_nn::LayerNorm,
     dropout: f64,
 }
+
+unsafe impl Send for TransformerEncoderLayer {}
+unsafe impl Sync for TransformerEncoderLayer {}
 
 impl TransformerEncoderLayer {
     fn new(hidden_dim: usize, n_heads: usize, ff_dim: usize, dropout: f64, vb: VarBuilder) -> Result<Self> {
@@ -324,6 +348,9 @@ pub struct Transformer {
     seq_len: usize,
     dropout: f64,
 }
+
+unsafe impl Send for Transformer {}
+unsafe impl Sync for Transformer {}
 
 impl Transformer {
     pub fn new(
@@ -452,11 +479,11 @@ pub fn save_model(varmap: &VarMap, path: &Path) -> Result<()> {
 pub fn create_model(
     config: &ModelConfig, 
     device: &Device
-) -> Result<(VarMap, Box<dyn Module>)> {
+) -> Result<(VarMap, Box<dyn Module + Send + Sync>)> {
     let varmap = VarMap::new();
     let vs = VarBuilder::from_varmap(&varmap, DType::F32, device);
     
-    let model: Box<dyn Module> = match config.model_type.as_str() {
+    let model: Box<dyn Module + Send + Sync> = match config.model_type.as_str() {
         "candle_mlp" => {
             let mlp = MLP::new(
                 config.input_size, 
@@ -511,6 +538,9 @@ struct MLPModule {
     inner: MLP,
 }
 
+unsafe impl Send for MLPModule {}
+unsafe impl Sync for MLPModule {}
+
 impl MLPModule {
     fn new(inner: MLP) -> Self {
         Self { inner }
@@ -526,6 +556,9 @@ impl Module for MLPModule {
 struct LSTMModule {
     inner: LSTM,
 }
+
+unsafe impl Send for LSTMModule {}
+unsafe impl Sync for LSTMModule {}
 
 impl LSTMModule {
     fn new(inner: LSTM) -> Self {
@@ -543,6 +576,9 @@ struct GRUModule {
     inner: GRU,
 }
 
+unsafe impl Send for GRUModule {}
+unsafe impl Sync for GRUModule {}
+
 impl GRUModule {
     fn new(inner: GRU) -> Self {
         Self { inner }
@@ -558,6 +594,9 @@ impl Module for GRUModule {
 struct TransformerModule {
     inner: Transformer,
 }
+
+unsafe impl Send for TransformerModule {}
+unsafe impl Sync for TransformerModule {}
 
 impl TransformerModule {
     fn new(inner: Transformer) -> Self {

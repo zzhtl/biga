@@ -1,427 +1,350 @@
-use crate::db::models::HistoricalData as StockData;
-use anyhow::{Context, Result};
-use chrono::NaiveDate;
-use ndarray::Array1;
+use crate::db::models::HistoricalData;
+use anyhow::{Result, Context};
 use std::collections::HashMap;
 
-/// 特征提取器，用于从股票数据生成训练数据
-pub struct FeatureExtractor;
+pub struct FeatureExtractor {
+    // 存储归一化参数
+    normalization_params: HashMap<String, (f64, f64)>, // (min, max)
+}
 
 impl FeatureExtractor {
-    /// 创建新的特征提取器
     pub fn new() -> Self {
-        FeatureExtractor
+        Self {
+            normalization_params: HashMap::new(),
+        }
     }
 
-    /// 根据传入的特征列表，从股票数据中提取特征
-    /// 
-    /// # 参数
-    /// 
-    /// * `data` - 原始股票数据
-    /// * `features` - 要提取的特征列表
-    /// * `target` - 目标特征
-    /// * `prediction_days` - 预测天数，用于计算滞后特征
-    /// 
-    /// # 返回值
-    /// 
-    /// 返回处理后的特征矩阵和目标向量
+    /// 从股票数据中提取特征
     pub fn extract_features(
         &self,
-        data: &[StockData],
+        stock_data: &[HistoricalData],
         features: &[String],
         target: &str,
         prediction_days: u32,
     ) -> Result<(Vec<Vec<f64>>, Vec<f64>)> {
-        if data.is_empty() {
+        if stock_data.is_empty() {
             return Err(anyhow::anyhow!("股票数据为空"));
         }
 
-        // 对数据按日期排序
-        let mut sorted_data = data.to_vec();
-        sorted_data.sort_by(|a, b| a.date.cmp(&b.date));
-        
-        // 提取所有可能的特征
-        let mut feature_vectors: Vec<Vec<f64>> = Vec::new();
-        let mut target_values: Vec<f64> = Vec::new();
-        
-        for i in prediction_days as usize..sorted_data.len() {
-            // 计算当前日期的特征
-            let mut feature_vec = Vec::new();
+        let mut feature_vectors = Vec::new();
+        let mut targets = Vec::new();
+
+        // 确保有足够的数据进行预测
+        let min_data_points = prediction_days as usize + 20; // 最少需要20天历史数据
+        if stock_data.len() < min_data_points {
+            return Err(anyhow::anyhow!("数据不足，需要至少{}天数据", min_data_points));
+        }
+
+        // 为每个数据点提取特征
+        for i in 20..stock_data.len() - prediction_days as usize {
+            let mut feature_vector = Vec::new();
             
-            // 为每个请求的特征提取值
+            // 提取指定的特征
             for feature_name in features {
-                match feature_name.as_str() {
-                    "close" => {
-                        feature_vec.push(sorted_data[i].close as f64);
-                    },
-                    "open" => {
-                        feature_vec.push(sorted_data[i].open as f64);
-                    },
-                    "high" => {
-                        feature_vec.push(sorted_data[i].high as f64);
-                    },
-                    "low" => {
-                        feature_vec.push(sorted_data[i].low as f64);
-                    },
-                    "volume" => {
-                        feature_vec.push(sorted_data[i].volume as f64);
-                    },
-                    "price_change" => {
-                        let change = sorted_data[i].close - sorted_data[i].open;
-                        feature_vec.push(change as f64);
-                    },
-                    "price_change_pct" => {
-                        let change_pct = if sorted_data[i].open > 0.0 {
-                            (sorted_data[i].close - sorted_data[i].open) / sorted_data[i].open
-                        } else {
-                            0.0
-                        };
-                        feature_vec.push(change_pct as f64);
-                    },
-                    // 移动平均线特征
-                    "ma5" => {
-                        if i >= 5 {
-                            let ma5 = (0..5).map(|j| sorted_data[i - j].close as f64).sum::<f64>() / 5.0;
-                            feature_vec.push(ma5);
-                        } else {
-                            feature_vec.push(sorted_data[i].close as f64);
-                        }
-                    },
-                    "ma10" => {
-                        if i >= 10 {
-                            let ma10 = (0..10).map(|j| sorted_data[i - j].close as f64).sum::<f64>() / 10.0;
-                            feature_vec.push(ma10);
-                        } else {
-                            feature_vec.push(sorted_data[i].close as f64);
-                        }
-                    },
-                    "ma20" => {
-                        if i >= 20 {
-                            let ma20 = (0..20).map(|j| sorted_data[i - j].close as f64).sum::<f64>() / 20.0;
-                            feature_vec.push(ma20);
-                        } else {
-                            feature_vec.push(sorted_data[i].close as f64);
-                        }
-                    },
-                    // 相对强弱指标 (RSI)
-                    "rsi14" => {
-                        if i >= 14 {
-                            feature_vec.push(self.calculate_rsi(&sorted_data[i-14..=i], 14));
-                        } else {
-                            feature_vec.push(50.0); // 默认中间值
-                        }
-                    },
-                    // 布林带
-                    "bollinger_upper" => {
-                        if i >= 20 {
-                            let (upper, _, _) = self.calculate_bollinger_bands(&sorted_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(upper);
-                        } else {
-                            feature_vec.push(sorted_data[i].close as f64 * 1.1); // 简单估计
-                        }
-                    },
-                    "bollinger_middle" => {
-                        if i >= 20 {
-                            let (_, middle, _) = self.calculate_bollinger_bands(&sorted_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(middle);
-                        } else {
-                            feature_vec.push(sorted_data[i].close as f64);
-                        }
-                    },
-                    "bollinger_lower" => {
-                        if i >= 20 {
-                            let (_, _, lower) = self.calculate_bollinger_bands(&sorted_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(lower);
-                        } else {
-                            feature_vec.push(sorted_data[i].close as f64 * 0.9); // 简单估计
-                        }
-                    },
-                    // 过去N天的收盘价
-                    _ if feature_name.starts_with("close_lag") => {
-                        if let Some(lag_days) = feature_name[9..].parse::<usize>().ok() {
-                            if i >= lag_days {
-                                feature_vec.push(sorted_data[i - lag_days].close as f64);
-                            } else {
-                                feature_vec.push(sorted_data[0].close as f64);
-                            }
-                        } else {
-                            return Err(anyhow::anyhow!(format!("无效的特征名: {}", feature_name)));
-                        }
-                    },
-                    // 默认情况
-                    _ => {
-                        return Err(anyhow::anyhow!(format!("未知的特征名: {}", feature_name)));
-                    }
-                }
+                let feature_value = self.calculate_feature(&stock_data, i, feature_name)?;
+                feature_vector.push(feature_value);
             }
+
+            // 计算目标值
+            let target_value = self.calculate_target(&stock_data, i, target, prediction_days)?;
             
-            // 提取目标值(未来prediction_days天的价格)
-            if i + prediction_days as usize <= sorted_data.len() - 1 {
-                let future_idx = i + prediction_days as usize;
-                let target_value = match target {
-                    "close" => sorted_data[future_idx].close as f64,
-                    "open" => sorted_data[future_idx].open as f64,
-                    "high" => sorted_data[future_idx].high as f64,
-                    "low" => sorted_data[future_idx].low as f64,
-                    "price_change" => (sorted_data[future_idx].close - sorted_data[future_idx].open) as f64,
-                    "price_change_pct" => {
-                        if sorted_data[future_idx].open > 0.0 {
-                            ((sorted_data[future_idx].close - sorted_data[future_idx].open) / sorted_data[future_idx].open) as f64
-                        } else {
-                            0.0
-                        }
-                    },
-                    _ => {
-                        return Err(anyhow::anyhow!(format!("未知的目标特征: {}", target)));
-                    }
-                };
-                
-                feature_vectors.push(feature_vec);
-                target_values.push(target_value);
-            }
+            feature_vectors.push(feature_vector);
+            targets.push(target_value);
         }
-        
-        if feature_vectors.is_empty() || target_values.is_empty() {
-            return Err(anyhow::anyhow!("无法生成足够的特征或目标数据"));
-        }
-        
-        Ok((feature_vectors, target_values))
+
+        Ok((feature_vectors, targets))
     }
-    
-    /// 用于预测的特征提取，不包括目标值提取
+
+    /// 提取用于预测的特征（不需要目标值）
     pub fn extract_prediction_features(
         &self,
-        data: &[StockData],
+        stock_data: &[HistoricalData],
         features: &[String],
         prediction_days: u32,
     ) -> Result<Vec<Vec<f64>>> {
-        if data.is_empty() {
+        if stock_data.is_empty() {
             return Err(anyhow::anyhow!("股票数据为空"));
         }
 
-        // 对数据按日期排序
-        let mut sorted_data = data.to_vec();
-        sorted_data.sort_by(|a, b| a.date.cmp(&b.date));
+        if stock_data.len() < 20 {
+            return Err(anyhow::anyhow!("数据不足，需要至少20天历史数据"));
+        }
+
+        let mut feature_vectors = Vec::new();
         
-        // 获取最后N天的数据用于预测
-        let required_days = prediction_days as usize + 20; // 确保有足够的数据计算各种指标
-        let start_idx = if sorted_data.len() > required_days {
-            sorted_data.len() - required_days
-        } else {
-            0
-        };
+        // 只为最新的数据点提取特征
+        let latest_index = stock_data.len() - 1;
+        let mut feature_vector = Vec::new();
         
-        let prediction_data = &sorted_data[start_idx..];
-        
-        // 提取特征
-        let mut feature_vectors: Vec<Vec<f64>> = Vec::new();
-        
-        for i in prediction_days as usize..prediction_data.len() {
-            // 计算当前日期的特征
-            let mut feature_vec = Vec::new();
-            
-            // 为每个请求的特征提取值
-            for feature_name in features {
-                match feature_name.as_str() {
-                    "close" => {
-                        feature_vec.push(prediction_data[i].close as f64);
-                    },
-                    "open" => {
-                        feature_vec.push(prediction_data[i].open as f64);
-                    },
-                    "high" => {
-                        feature_vec.push(prediction_data[i].high as f64);
-                    },
-                    "low" => {
-                        feature_vec.push(prediction_data[i].low as f64);
-                    },
-                    "volume" => {
-                        feature_vec.push(prediction_data[i].volume as f64);
-                    },
-                    "price_change" => {
-                        let change = prediction_data[i].close - prediction_data[i].open;
-                        feature_vec.push(change as f64);
-                    },
-                    "price_change_pct" => {
-                        let change_pct = if prediction_data[i].open > 0.0 {
-                            (prediction_data[i].close - prediction_data[i].open) / prediction_data[i].open
-                        } else {
-                            0.0
-                        };
-                        feature_vec.push(change_pct as f64);
-                    },
-                    // 移动平均线特征
-                    "ma5" => {
-                        if i >= 5 {
-                            let ma5 = (0..5).map(|j| prediction_data[i - j].close as f64).sum::<f64>() / 5.0;
-                            feature_vec.push(ma5);
-                        } else {
-                            feature_vec.push(prediction_data[i].close as f64);
-                        }
-                    },
-                    "ma10" => {
-                        if i >= 10 {
-                            let ma10 = (0..10).map(|j| prediction_data[i - j].close as f64).sum::<f64>() / 10.0;
-                            feature_vec.push(ma10);
-                        } else {
-                            feature_vec.push(prediction_data[i].close as f64);
-                        }
-                    },
-                    "ma20" => {
-                        if i >= 20 {
-                            let ma20 = (0..20).map(|j| prediction_data[i - j].close as f64).sum::<f64>() / 20.0;
-                            feature_vec.push(ma20);
-                        } else {
-                            feature_vec.push(prediction_data[i].close as f64);
-                        }
-                    },
-                    // 相对强弱指标 (RSI)
-                    "rsi14" => {
-                        if i >= 14 {
-                            feature_vec.push(self.calculate_rsi(&prediction_data[i-14..=i], 14));
-                        } else {
-                            feature_vec.push(50.0); // 默认中间值
-                        }
-                    },
-                    // 布林带
-                    "bollinger_upper" => {
-                        if i >= 20 {
-                            let (upper, _, _) = self.calculate_bollinger_bands(&prediction_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(upper);
-                        } else {
-                            feature_vec.push(prediction_data[i].close as f64 * 1.1); // 简单估计
-                        }
-                    },
-                    "bollinger_middle" => {
-                        if i >= 20 {
-                            let (_, middle, _) = self.calculate_bollinger_bands(&prediction_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(middle);
-                        } else {
-                            feature_vec.push(prediction_data[i].close as f64);
-                        }
-                    },
-                    "bollinger_lower" => {
-                        if i >= 20 {
-                            let (_, _, lower) = self.calculate_bollinger_bands(&prediction_data[i-20..=i], 20, 2.0);
-                            feature_vec.push(lower);
-                        } else {
-                            feature_vec.push(prediction_data[i].close as f64 * 0.9); // 简单估计
-                        }
-                    },
-                    // 过去N天的收盘价
-                    _ if feature_name.starts_with("close_lag") => {
-                        if let Some(lag_days) = feature_name[9..].parse::<usize>().ok() {
-                            if i >= lag_days {
-                                feature_vec.push(prediction_data[i - lag_days].close as f64);
-                            } else {
-                                feature_vec.push(prediction_data[0].close as f64);
-                            }
-                        } else {
-                            return Err(anyhow::anyhow!(format!("无效的特征名: {}", feature_name)));
-                        }
-                    },
-                    // 默认情况
-                    _ => {
-                        return Err(anyhow::anyhow!(format!("未知的特征名: {}", feature_name)));
-                    }
-                }
-            }
-            
-            feature_vectors.push(feature_vec);
+        for feature_name in features {
+            let feature_value = self.calculate_feature(&stock_data, latest_index, feature_name)?;
+            feature_vector.push(feature_value);
         }
         
-        if feature_vectors.is_empty() {
-            return Err(anyhow::anyhow!("无法生成足够的特征数据"));
-        }
-        
+        feature_vectors.push(feature_vector);
         Ok(feature_vectors)
     }
-    
-    /// 计算相对强弱指标 (RSI)
-    fn calculate_rsi(&self, data: &[StockData], period: usize) -> f64 {
-        if data.len() <= period {
-            return 50.0; // 默认中间值
+
+    /// 计算单个特征值
+    fn calculate_feature(
+        &self,
+        stock_data: &[HistoricalData],
+        index: usize,
+        feature_name: &str,
+    ) -> Result<f64> {
+        match feature_name {
+            "close" => Ok(stock_data[index].close),
+            "open" => Ok(stock_data[index].open),
+            "high" => Ok(stock_data[index].high),
+            "low" => Ok(stock_data[index].low),
+            "volume" => Ok(stock_data[index].volume as f64),
+            "change_percent" => Ok(stock_data[index].change_percent),
+            "ma5" => self.calculate_moving_average(stock_data, index, 5),
+            "ma10" => self.calculate_moving_average(stock_data, index, 10),
+            "ma20" => self.calculate_moving_average(stock_data, index, 20),
+            "rsi" => self.calculate_rsi(stock_data, index, 14),
+            "macd" => self.calculate_macd(stock_data, index),
+            "bollinger" => self.calculate_bollinger_position(stock_data, index, 20),
+            "stochastic_k" => self.calculate_stochastic_k(stock_data, index, 14),
+            "stochastic_d" => self.calculate_stochastic_d(stock_data, index, 14),
+            "momentum" => self.calculate_momentum(stock_data, index, 10),
+            _ => Err(anyhow::anyhow!("未知特征: {}", feature_name)),
+        }
+    }
+
+    /// 计算目标值
+    fn calculate_target(
+        &self,
+        stock_data: &[HistoricalData],
+        index: usize,
+        target: &str,
+        prediction_days: u32,
+    ) -> Result<f64> {
+        let future_index = index + prediction_days as usize;
+        if future_index >= stock_data.len() {
+            return Err(anyhow::anyhow!("未来数据索引超出范围"));
+        }
+
+        match target {
+            "close" => {
+                let current_price = stock_data[index].close;
+                let future_price = stock_data[future_index].close;
+                Ok((future_price - current_price) / current_price) // 返回价格变化率
+            }
+            "change_percent" => Ok(stock_data[future_index].change_percent),
+            _ => Err(anyhow::anyhow!("未知目标: {}", target)),
+        }
+    }
+
+    /// 计算移动平均线
+    fn calculate_moving_average(
+        &self,
+        stock_data: &[HistoricalData],
+        index: usize,
+        period: usize,
+    ) -> Result<f64> {
+        if index < period - 1 {
+            return Ok(stock_data[index].close); // 数据不足时返回当前价格
+        }
+
+        let sum: f64 = stock_data[index + 1 - period..=index]
+            .iter()
+            .map(|d| d.close)
+            .sum();
+        Ok(sum / period as f64)
+    }
+
+    /// 计算RSI
+    fn calculate_rsi(
+        &self,
+        stock_data: &[HistoricalData],
+        index: usize,
+        period: usize,
+    ) -> Result<f64> {
+        if index < period {
+            return Ok(50.0); // 数据不足时返回中性值
         }
         
         let mut gains = 0.0;
         let mut losses = 0.0;
         
-        for i in 1..=period {
-            let change = data[i].close - data[i-1].close;
+        for i in (index + 1 - period)..=index {
+            let change = stock_data[i].change;
             if change > 0.0 {
-                gains += change as f64;
+                gains += change;
             } else {
-                losses -= change as f64; // 取绝对值
+                losses -= change;
             }
         }
+
+        gains /= period as f64;
+        losses /= period as f64;
         
         if losses == 0.0 {
-            return 100.0;
+            Ok(100.0)
+        } else {
+            let rs = gains / losses;
+            Ok(100.0 - (100.0 / (1.0 + rs)))
         }
-        
-        let rs = gains / losses;
-        let rsi = 100.0 - (100.0 / (1.0 + rs));
-        
-        rsi
     }
-    
-    /// 计算布林带 (Bollinger Bands)
-    fn calculate_bollinger_bands(&self, data: &[StockData], period: usize, num_std_dev: f64) -> (f64, f64, f64) {
-        if data.len() <= period {
-            let close = data.last().map(|d| d.close).unwrap_or(0.0) as f64;
-            return (close * 1.1, close, close * 0.9);
+
+    /// 计算MACD
+    fn calculate_macd(
+        &self,
+        stock_data: &[HistoricalData],
+        index: usize,
+    ) -> Result<f64> {
+        if index < 26 {
+            return Ok(0.0);
         }
+
+        let ema12 = self.calculate_ema(stock_data, index, 12)?;
+        let ema26 = self.calculate_ema(stock_data, index, 26)?;
+        Ok(ema12 - ema26)
+    }
+
+    /// 计算EMA
+    fn calculate_ema(
+        &self,
+        stock_data: &[HistoricalData],
+        index: usize,
+        period: usize,
+    ) -> Result<f64> {
+        if index < period - 1 {
+            return Ok(stock_data[index].close);
+        }
+
+        let multiplier = 2.0 / (period as f64 + 1.0);
+        let mut ema = stock_data[index + 1 - period].close;
+
+        for i in (index + 2 - period)..=index {
+            ema = (stock_data[i].close - ema) * multiplier + ema;
+        }
+
+        Ok(ema)
+    }
+
+    /// 计算布林带位置
+    fn calculate_bollinger_position(
+        &self,
+        stock_data: &[HistoricalData],
+        index: usize,
+        period: usize,
+    ) -> Result<f64> {
+        if index < period - 1 {
+            return Ok(0.0);
+        }
+
+        let ma = self.calculate_moving_average(stock_data, index, period)?;
+        let prices: Vec<f64> = stock_data[index + 1 - period..=index]
+            .iter()
+            .map(|d| d.close)
+            .collect();
         
-        // 计算移动平均线
-        let ma = data[data.len()-period..].iter()
-            .map(|d| d.close as f64)
-            .sum::<f64>() / period as f64;
-        
-        // 计算标准差
-        let variance = data[data.len()-period..].iter()
-            .map(|d| {
-                let diff = d.close as f64 - ma;
-                diff * diff
-            })
+        let variance: f64 = prices.iter()
+            .map(|&price| (price - ma).powi(2))
             .sum::<f64>() / period as f64;
         
         let std_dev = variance.sqrt();
-        
-        // 计算布林带上下轨
-        let upper_band = ma + (std_dev * num_std_dev);
-        let lower_band = ma - (std_dev * num_std_dev);
-        
-        (upper_band, ma, lower_band)
-    }
-    
-    /// 标准化数据(Min-Max标准化)
-    pub fn normalize_features(&self, features: &mut Vec<Vec<f64>>) -> Result<()> {
-        if features.is_empty() {
-            return Err(anyhow::anyhow!("特征数据为空"));
+        let upper_band = ma + 2.0 * std_dev;
+        let lower_band = ma - 2.0 * std_dev;
+
+        if upper_band == lower_band {
+            Ok(0.0)
+        } else {
+            Ok((stock_data[index].close - lower_band) / (upper_band - lower_band) - 0.5)
         }
-        
-        let num_features = features[0].len();
-        let num_samples = features.len();
-        
-        // 计算每个特征的最小值和最大值
-        let mut min_values = vec![f64::MAX; num_features];
-        let mut max_values = vec![f64::MIN; num_features];
-        
-        for sample in features.iter() {
-            for (j, &value) in sample.iter().enumerate() {
-                min_values[j] = min_values[j].min(value);
-                max_values[j] = max_values[j].max(value);
+    }
+
+    /// 计算随机指标K值
+    fn calculate_stochastic_k(
+        &self,
+        stock_data: &[HistoricalData],
+        index: usize,
+        period: usize,
+    ) -> Result<f64> {
+        if index < period - 1 {
+            return Ok(0.5);
+        }
+
+        let data_slice = &stock_data[index + 1 - period..=index];
+        let highest_high = data_slice.iter().map(|d| d.high).fold(f64::NEG_INFINITY, f64::max);
+        let lowest_low = data_slice.iter().map(|d| d.low).fold(f64::INFINITY, f64::min);
+
+        if highest_high == lowest_low {
+            Ok(0.5)
+        } else {
+            Ok((stock_data[index].close - lowest_low) / (highest_high - lowest_low))
+        }
+    }
+
+    /// 计算随机指标D值
+    fn calculate_stochastic_d(
+        &self,
+        stock_data: &[HistoricalData],
+        index: usize,
+        period: usize,
+    ) -> Result<f64> {
+        if index < period + 2 {
+            return Ok(0.5);
+        }
+
+        // 计算过去3天的K值并取平均
+        let mut k_values = Vec::new();
+        for i in 0..3 {
+            if index >= i {
+                let k = self.calculate_stochastic_k(stock_data, index - i, period)?;
+                k_values.push(k);
             }
         }
+
+        if k_values.is_empty() {
+            Ok(0.5)
+        } else {
+            Ok(k_values.iter().sum::<f64>() / k_values.len() as f64)
+        }
+    }
+
+    /// 计算动量指标
+    fn calculate_momentum(
+        &self,
+        stock_data: &[HistoricalData],
+        index: usize,
+        period: usize,
+    ) -> Result<f64> {
+        if index < period {
+            return Ok(0.0);
+        }
+
+        let current_price = stock_data[index].close;
+        let past_price = stock_data[index - period].close;
+        Ok(current_price / past_price - 1.0)
+    }
+
+    /// 归一化特征
+    pub fn normalize_features(&mut self, features: &mut Vec<Vec<f64>>) -> Result<()> {
+        if features.is_empty() {
+            return Ok(());
+        }
+
+        let feature_count = features[0].len();
         
-        // 标准化数据
-        for i in 0..num_samples {
-            for j in 0..num_features {
-                let range = max_values[j] - min_values[j];
-                if range > f64::EPSILON {
-                    features[i][j] = (features[i][j] - min_values[j]) / range;
+        for feature_idx in 0..feature_count {
+            let values: Vec<f64> = features.iter().map(|row| row[feature_idx]).collect();
+            let min_val = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            let max_val = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            
+            self.normalization_params.insert(
+                format!("feature_{}", feature_idx),
+                (min_val, max_val)
+            );
+
+            // 归一化到[0, 1]区间
+            for row in features.iter_mut() {
+                if max_val != min_val {
+                    row[feature_idx] = (row[feature_idx] - min_val) / (max_val - min_val);
                 } else {
-                    features[i][j] = 0.5; // 如果范围太小，设为中间值
+                    row[feature_idx] = 0.0;
                 }
             }
         }
@@ -429,36 +352,33 @@ impl FeatureExtractor {
         Ok(())
     }
     
-    /// 标准化目标值
-    pub fn normalize_targets(&self, targets: &mut Vec<f64>) -> Result<(f64, f64)> {
+    /// 归一化目标值
+    pub fn normalize_targets(&mut self, targets: &mut Vec<f64>) -> Result<(f64, f64)> {
         if targets.is_empty() {
-            return Err(anyhow::anyhow!("目标数据为空"));
+            return Ok((0.0, 1.0));
         }
-        
-        let min_value = targets.iter().fold(f64::MAX, |a, &b| a.min(b));
-        let max_value = targets.iter().fold(f64::MIN, |a, &b| a.max(b));
-        
-        let range = max_value - min_value;
-        if range > f64::EPSILON {
-            for i in 0..targets.len() {
-                targets[i] = (targets[i] - min_value) / range;
-            }
-        } else {
-            for i in 0..targets.len() {
-                targets[i] = 0.5;
+
+        let min_val = targets.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max_val = targets.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let range = max_val - min_val;
+
+        if range != 0.0 {
+            for target in targets.iter_mut() {
+                *target = (*target - min_val) / range;
             }
         }
-        
-        // 返回最小值和范围，以便后续反标准化
-        Ok((min_value, range))
+
+        Ok((min_val, range))
     }
-    
-    /// 反标准化预测值
+
+    /// 反归一化预测结果
     pub fn denormalize_prediction(&self, prediction: f64, min_value: f64, range: f64) -> f64 {
-        if range > f64::EPSILON {
             prediction * range + min_value
-        } else {
-            min_value
+    }
         }
+
+impl Default for FeatureExtractor {
+    fn default() -> Self {
+        Self::new()
     }
 } 

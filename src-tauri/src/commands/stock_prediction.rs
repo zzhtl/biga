@@ -161,7 +161,7 @@ pub async fn train_stock_prediction_model(
         id: model_info.id.to_string(),
         name: model_info.model_name,
         stock_code: model_info.symbol,
-        created_at: model_info.created_at.timestamp(),
+        created_at: model_info.created_at.and_utc().timestamp(),
         model_type: model_info.model_type,
         features: request.features,
         target: request.target,

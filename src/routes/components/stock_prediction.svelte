@@ -204,7 +204,13 @@
                 name: model.name,
                 type: model.model_type,
                 accuracy: model.accuracy * 100,
-                created_at: new Date(model.created_at * 1000).toLocaleDateString()
+                created_at: new Date(model.created_at < 1000000000000 ? model.created_at * 1000 : model.created_at).toLocaleString('zh-CN', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                })
             }));
             showModelComparison = true;
         } catch (error) {
@@ -214,10 +220,18 @@
 
     // 生成预测图表数据
     function generatePredictionChart(predictions: Prediction[]) {
-        if (!predictions || predictions.length === 0) return;
+        if (!predictions || predictions.length === 0) {
+            console.log("没有预测数据，无法生成图表");
+            return;
+        }
+        
+        console.log("生成预测图表，数据量:", predictions.length);
         
         const chartData: ChartData = {
-            labels: predictions.map((p: Prediction) => new Date(p.target_date).toLocaleDateString()),
+            labels: predictions.map((p: Prediction) => {
+                const date = new Date(p.target_date);
+                return `${date.getMonth() + 1}/${date.getDate()}`;
+            }),
             datasets: [{
                 label: '预测价格',
                 data: predictions.map((p: Prediction) => p.predicted_price),
@@ -226,7 +240,7 @@
                 fill: true,
                 tension: 0.4
             }, {
-                label: '置信度',
+                label: '置信度 (%)',
                 data: predictions.map((p: Prediction) => p.confidence * 100),
                 borderColor: 'rgb(34, 197, 94)',
                 backgroundColor: 'rgba(34, 197, 94, 0.1)',
@@ -236,6 +250,7 @@
         };
         
         predictionChart = chartData;
+        console.log("预测图表数据已生成:", predictionChart);
     }
 
     async function predictStock() {
@@ -251,6 +266,7 @@
         
         isPredicting = true;
         errorMessage = "";
+        predictionChart = null; // 重置图表数据
         
         try {
             const request = {
@@ -259,13 +275,23 @@
                 prediction_days: daysToPredict,
                 use_candle: true
             };
+            
+            console.log("发送预测请求:", request);
             const preds: Prediction[] = await invoke('predict_with_candle', { request });
+            console.log("收到预测结果:", preds);
+            
             predictions = preds;
             
             // 生成图表数据
-            generatePredictionChart(preds);
+            if (preds && preds.length > 0) {
+                generatePredictionChart(preds);
+                console.log("图表数据生成完成:", predictionChart);
+            } else {
+                console.warn("预测结果为空，无法生成图表");
+            }
             
         } catch (error) {
+            console.error("预测失败:", error);
             errorMessage = `预测失败: ${error}`;
             predictions = [];
             predictionChart = null;
@@ -375,7 +401,13 @@
                                 <div class="model-details">
                                     <span>类型：{model.model_type}</span>
                                     <span>准确率：{(model.accuracy * 100).toFixed(2)}%</span>
-                                    <span>创建时间：{new Date(model.created_at).toLocaleString()}</span>
+                                    <span>创建时间：{new Date(model.created_at < 1000000000000 ? model.created_at * 1000 : model.created_at).toLocaleString('zh-CN', {
+                                        year: 'numeric',
+                                        month: '2-digit',
+                                        day: '2-digit',
+                                        hour: '2-digit',
+                                        minute: '2-digit'
+                                    })}</span>
                                 </div>
                             </div>
                             <div class="model-actions">
@@ -663,38 +695,112 @@
                 <div class="prediction-chart">
                     <h3>预测趋势图</h3>
                     <div class="chart-container">
-                        <canvas id="predictionCanvas" width="800" height="400"></canvas>
-                        <!-- 简化的图表显示 -->
-                        <div class="simple-chart">
-                            <div class="chart-legend">
-                                <div class="legend-item">
-                                    <div class="legend-color" style="background-color: rgb(79, 70, 229);"></div>
-                                    <span>预测价格</span>
-                                </div>
-                                <div class="legend-item">
-                                    <div class="legend-color" style="background-color: rgb(34, 197, 94);"></div>
-                                    <span>置信度</span>
-                                </div>
+                        <!-- 图表图例 -->
+                        <div class="chart-legend">
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: rgb(79, 70, 229);"></div>
+                                <span>预测价格</span>
                             </div>
-                            <div class="chart-grid">
+                            <div class="legend-item">
+                                <div class="legend-color" style="background-color: rgb(34, 197, 94);"></div>
+                                <span>置信度</span>
+                            </div>
+                        </div>
+                        
+                        <!-- SVG图表 -->
+                        <div class="svg-chart-container">
+                            <svg width="100%" height="300" viewBox="0 0 800 300" style="border: 1px solid rgba(255,255,255,0.2); border-radius: 0.5rem; background: rgba(0,0,0,0.1);">
+                                {#if predictionChart && predictionChart.datasets[0].data.length > 0}
+                                    {@const priceData = predictionChart.datasets[0].data}
+                                    {@const confidenceData = predictionChart.datasets[1].data}
+                                    {@const minPrice = Math.min(...priceData)}
+                                    {@const maxPrice = Math.max(...priceData)}
+                                    {@const priceRange = maxPrice - minPrice || 1}
+                                    
+                                    <!-- 网格线 -->
+                                    {#each [0, 1, 2, 3, 4] as i}
+                                        <line x1="60" y1={50 + i * 40} x2="750" y2={50 + i * 40} stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
+                                    {/each}
+                                    {#each predictionChart.labels as label, i}
+                                        {@const x = 60 + (i / (predictionChart.labels.length - 1)) * 690}
+                                        <line x1={x} y1="50" x2={x} y2="250" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
+                                    {/each}
+                                    
+                                    <!-- 价格曲线 -->
+                                    {@const pathD = priceData.map((price, i) => {
+                                        const x = 60 + (i / (priceData.length - 1)) * 690;
+                                        const y = 250 - ((price - minPrice) / priceRange) * 180;
+                                        return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
+                                    }).join(' ')}
+                                    <path d={pathD} fill="none" stroke="rgb(79, 70, 229)" stroke-width="3"/>
+                                    
+                                    <!-- 置信度柱状图 -->
+                                    {#each confidenceData as confidence, i}
+                                        {@const x = 60 + (i / (confidenceData.length - 1)) * 690}
+                                        {@const height = (confidence / 100) * 60}
+                                        <rect x={x - 8} y={250 - height} width="16" height={height} fill="rgba(34, 197, 94, 0.6)" rx="2"/>
+                                    {/each}
+                                    
+                                    <!-- 数据点 -->
+                                    {#each priceData as price, i}
+                                        {@const x = 60 + (i / (priceData.length - 1)) * 690}
+                                        {@const y = 250 - ((price - minPrice) / priceRange) * 180}
+                                        <circle cx={x} cy={y} r="5" fill="rgb(79, 70, 229)" stroke="white" stroke-width="2"/>
+                                        <text x={x} y={y - 15} text-anchor="middle" fill="white" font-size="11" font-weight="bold">{price.toFixed(1)}</text>
+                                    {/each}
+                                    
+                                    <!-- 日期标签 -->
+                                    {#each predictionChart.labels as label, i}
+                                        {@const x = 60 + (i / (predictionChart.labels.length - 1)) * 690}
+                                        <text x={x} y={275} text-anchor="middle" fill="rgba(255,255,255,0.8)" font-size="12">{label}</text>
+                                    {/each}
+                                    
+                                    <!-- Y轴价格标签 -->
+                                    {#each [0, 1, 2, 3, 4] as i}
+                                        {@const price = minPrice + (priceRange * (4 - i) / 4)}
+                                        <text x="50" y={55 + i * 40} text-anchor="end" fill="rgba(255,255,255,0.8)" font-size="11">{price.toFixed(1)}</text>
+                                    {/each}
+                                    
+                                    <!-- 坐标轴标题 -->
+                                    <text x="400" y="295" text-anchor="middle" fill="rgba(255,255,255,0.8)" font-size="12" font-weight="bold">预测日期</text>
+                                    <text x="25" y="150" text-anchor="middle" fill="rgba(255,255,255,0.8)" font-size="12" font-weight="bold" transform="rotate(-90 25 150)">价格 (元)</text>
+                                {/if}
+                            </svg>
+                        </div>
+                        
+                        <!-- 备用简单图表 -->
+                        <div class="simple-chart-backup" style="margin-top: 1rem;">
+                            <div class="chart-bars">
                                 {#each predictions as prediction, index}
-                                    <div class="chart-bar" style="grid-column: {index + 1};">
-                                        <div 
-                                            class="price-bar" 
-                                            style="height: {(prediction.predicted_price / Math.max(...predictions.map(p => p.predicted_price))) * 100}%; background-color: rgb(79, 70, 229);"
-                                            title="预测价格: {prediction.predicted_price.toFixed(2)}"
-                                        ></div>
-                                        <div 
-                                            class="confidence-bar" 
-                                            style="height: {prediction.confidence * 100}%; background-color: rgb(34, 197, 94);"
-                                            title="置信度: {(prediction.confidence * 100).toFixed(2)}%"
-                                        ></div>
-                                        <div class="chart-label">{new Date(prediction.target_date).toLocaleDateString().slice(5)}</div>
+                                    <div class="chart-bar-item">
+                                        <div class="bar-container">
+                                            <div 
+                                                class="price-bar" 
+                                                style="height: {(prediction.predicted_price / Math.max(...predictions.map(p => p.predicted_price))) * 100}px; background-color: rgb(79, 70, 229);"
+                                                title="预测价格: {prediction.predicted_price.toFixed(2)}"
+                                            ></div>
+                                            <div 
+                                                class="confidence-bar" 
+                                                style="height: {prediction.confidence * 80}px; background-color: rgb(34, 197, 94); margin-left: 5px;"
+                                                title="置信度: {(prediction.confidence * 100).toFixed(2)}%"
+                                            ></div>
+                                        </div>
+                                        <div class="bar-label">{new Date(prediction.target_date).toLocaleDateString().slice(5)}</div>
                                     </div>
                                 {/each}
                             </div>
                         </div>
                     </div>
+                </div>
+            {:else}
+                <!-- 调试信息：显示为什么图表没有生成 -->
+                <div class="debug-info" style="background: rgba(255,0,0,0.1); padding: 1rem; border-radius: 0.5rem; margin: 1rem 0;">
+                    <h4>图表调试信息</h4>
+                    <p>预测数据长度: {predictions ? predictions.length : 0}</p>
+                    <p>图表数据状态: {predictionChart ? '已生成' : '未生成'}</p>
+                    {#if predictions && predictions.length > 0}
+                        <p>第一个预测: {JSON.stringify(predictions[0])}</p>
+                    {/if}
                 </div>
             {/if}
             
@@ -989,6 +1095,16 @@
         color: inherit;
     }
     
+    .training-form select {
+        color: #000000;
+        background: rgba(255, 255, 255, 0.9);
+    }
+    
+    .training-form select option {
+        color: #000000;
+        background: #ffffff;
+    }
+    
     .features-list {
         margin-bottom: 1rem;
     }
@@ -1067,6 +1183,7 @@
         padding: 1rem;
         background-color: #f3f4f6;
         border-radius: 0.5rem;
+        color: #000000;
     }
     
     .logs-container {
@@ -1080,12 +1197,12 @@
     
     .log-time {
         font-size: 0.875rem;
-        color: #6b7280;
+        color: #000000;
     }
     
     .log-content {
         font-size: 0.875rem;
-        color: #111827;
+        color: #000000;
     }
     
     .model-comparison {
@@ -1093,6 +1210,7 @@
         padding: 1rem;
         background-color: #f3f4f6;
         border-radius: 0.5rem;
+        color: #000000;
     }
     
     .comparison-chart {
@@ -1102,18 +1220,21 @@
     .comparison-table {
         width: 100%;
         border-collapse: collapse;
+        color: #000000;
     }
     
     .comparison-table th,
     .comparison-table td {
         padding: 0.75rem 1rem;
         text-align: left;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+        color: #000000;
     }
     
     .comparison-table th {
-        background-color: rgba(255, 255, 255, 0.05);
+        background-color: rgba(0, 0, 0, 0.05);
         font-weight: 600;
+        color: #000000;
     }
     
     .performance-bar {
@@ -1136,21 +1257,19 @@
     }
     
     .chart-container {
-        position: relative;
+        width: 100%;
     }
     
-    .simple-chart {
-        position: absolute;
-        top: 0;
-        left: 0;
+    .svg-chart-container {
         width: 100%;
-        height: 100%;
+        margin: 1rem 0;
     }
     
     .chart-legend {
         display: flex;
-        justify-content: space-between;
+        justify-content: center;
         align-items: center;
+        gap: 2rem;
         margin-bottom: 1rem;
     }
     
@@ -1166,42 +1285,53 @@
         border-radius: 0.25rem;
     }
     
-    .chart-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(20px, 1fr));
+    .simple-chart-backup {
+        background: rgba(0, 0, 0, 0.1);
+        padding: 1rem;
+        border-radius: 0.5rem;
+    }
+    
+    .chart-bars {
+        display: flex;
+        justify-content: space-around;
+        align-items: flex-end;
+        gap: 0.5rem;
+        height: 120px;
+    }
+    
+    .chart-bar-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
         gap: 0.5rem;
     }
     
-    .chart-bar {
-        position: relative;
-        height: 100%;
+    .bar-container {
+        display: flex;
+        align-items: flex-end;
+        height: 100px;
     }
     
     .price-bar,
     .confidence-bar {
-        position: absolute;
-        bottom: 0;
-        left: 0;
-        width: 100%;
-        height: 0;
+        width: 12px;
+        border-radius: 2px 2px 0 0;
     }
     
-    .price-bar {
-        background-color: rgb(79, 70, 229);
-    }
-    
-    .confidence-bar {
-        background-color: rgb(34, 197, 94);
-    }
-    
-    .chart-label {
-        position: absolute;
-        bottom: 0;
-        left: 0;
-        width: 100%;
-        text-align: center;
-        font-size: 0.875rem;
+    .bar-label {
+        font-size: 0.75rem;
         color: rgba(255, 255, 255, 0.7);
+        text-align: center;
+    }
+    
+    .debug-info {
+        font-size: 0.875rem;
+        color: rgba(255, 255, 255, 0.8);
+    }
+    
+    .debug-info h4 {
+        margin: 0 0 0.5rem 0;
+        color: #ef4444;
     }
     
     .prediction-stats {
