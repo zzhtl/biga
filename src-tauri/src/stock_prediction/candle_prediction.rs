@@ -887,8 +887,8 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
         }
     };
     
-    // 使用真实的准确率计算方法
-    let accuracy = calculate_realistic_accuracy(&predictions_vec, &actuals_vec);
+    // 使用改进的准确率计算方法（更重视方向预测）
+    let (direction_accuracy, combined_accuracy) = calculate_direction_focused_accuracy(&predictions_vec, &actuals_vec);
     
     // 计算MSE和RMSE用于日志显示
     let diff = y_pred.sub(&y_test).map_err(|e| format!("计算MSE失败: {}", e))?;
@@ -897,8 +897,9 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
     let mse = mse.to_scalar::<f32>().unwrap() as f64;
     let rmse = mse.sqrt();
     
-    println!("评估结果: MSE = {:.4}, RMSE = {:.4}, Accuracy = {:.4}% (方向+价格综合)", 
-             mse, rmse, accuracy * 100.0);
+    println!("评估结果: MSE = {:.4}, RMSE = {:.4}", mse, rmse);
+    println!("🎯 方向预测准确率: {:.2}% | 综合准确率: {:.2}%", 
+             direction_accuracy * 100.0, combined_accuracy * 100.0);
     println!("📊 预测张量维度: {:?}, 实际张量维度: {:?}", y_pred.dims(), y_test.dims());
     
     // 保存模型
@@ -920,14 +921,14 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
         features: request.features,
         target: request.target,
         prediction_days: request.prediction_days,
-        accuracy,
+        accuracy: combined_accuracy,
     };
     
     save_model_metadata(&metadata).map_err(|e| format!("元数据保存失败: {}", e))?;
     
     Ok(TrainingResult {
         metadata,
-        accuracy,
+        accuracy: combined_accuracy,
     })
 }
 
@@ -981,7 +982,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         return Err("历史数据不足，无法进行预测，需要至少20天数据".to_string());
     }
     
-    // 计算特征向量
+        // 计算特征向量
     let mut features = Vec::new();
     let last_idx = prices.len() - 1;
     
@@ -1231,7 +1232,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
              historical_volatility, recent_trend, support_resistance);
     
     // 生成预测
-    let mut predictions = Vec::new();
+    let mut predictions: Vec<Prediction> = Vec::new();
     let mut last_price = current_price;
     
     // 获取最后一个日期，用于计算预测日期
@@ -1247,54 +1248,80 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         }
         let date_str = target_date.format("%Y-%m-%d").to_string();
         
-        // 综合多个因素计算预测变化率
-        let mut predicted_change_rate = 0.0;
+        // 🎯 改进的预测策略：更真实的涨跌预测
         
-        // 1. 模型预测权重 (40%)
-        let model_weight = 0.4;
-        let normalized_model_output = (raw_change_rate * historical_volatility).tanh(); // 使用tanh限制范围
-        predicted_change_rate += normalized_model_output * model_weight;
+        // 1. 基础模型预测（标准化处理）
+        let base_model_prediction = raw_change_rate.tanh() * 0.02; // 限制在±2%范围内
         
-        // 2. 历史趋势权重 (30%)
-        let trend_weight = 0.3;
-        let trend_decay = 0.95_f64.powi(day as i32); // 趋势随时间衰减
-        predicted_change_rate += recent_trend * trend_weight * trend_decay;
+        // 2. 历史波动性调整
+        let volatility_factor = historical_volatility.clamp(0.01, 0.08); // 限制波动率范围
         
-        // 3. 随机波动权重 (20%)
-        let random_weight = 0.2;
-        let random_factor = (rand::random::<f64>() - 0.5) * historical_volatility * 2.0;
-        predicted_change_rate += random_factor * random_weight;
+        // 3. 趋势修正（随时间衰减）
+        let trend_decay = 0.9_f64.powi(day as i32);
+        let trend_factor = recent_trend * trend_decay;
         
-        // 4. 支撑阻力影响 (10%)
-        let sr_weight = 0.1;
-        let sr_factor = if last_price > current_price * 1.05 {
-            // 价格过高，阻力位影响
-            -support_resistance * 0.5
-        } else if last_price < current_price * 0.95 {
-            // 价格过低，支撑位影响
-            support_resistance * 0.5
+        // 4. 随机市场噪音（模拟真实市场的不确定性）
+        let market_noise = (rand::random::<f64>() - 0.5) * volatility_factor * 1.5;
+        
+        // 5. 均值回归效应（价格偏离均值时的回归倾向）
+        let mean_reversion = if prices.len() >= 20 {
+            let ma20 = prices[prices.len()-20..].iter().sum::<f64>() / 20.0;
+            let deviation = (last_price - ma20) / ma20;
+            -deviation * 0.3 * (1.0 / day as f64) // 偏离越大，回归力越强
         } else {
             0.0
         };
-        predicted_change_rate += sr_factor * sr_weight;
         
-        // 应用A股涨跌幅限制 (±10%)
-        let clamped_change_rate = clamp_daily_change(predicted_change_rate * 100.0) / 100.0;
+        // 6. 支撑阻力位影响
+        let sr_effect = support_resistance * 0.5;
+        
+        // 综合计算预测变化率
+        let mut predicted_change_rate = base_model_prediction * 0.4  // 模型预测40%权重
+            + trend_factor * 0.25                                    // 趋势25%权重
+            + market_noise * 0.2                                     // 随机噪音20%权重
+            + mean_reversion * 0.1                                   // 均值回归10%权重
+            + sr_effect * 0.05;                                      // 支撑阻力5%权重
+        
+        // 7. 引入周期性调整（模拟市场的周期性波动）
+        let cycle_adjustment = match day % 3 {
+            1 => 0.0,                                                // 第1天保持原预测
+            2 => -predicted_change_rate * 0.3,                      // 第2天适度反向调整
+            0 => predicted_change_rate * 0.2,                       // 第3天小幅同向调整
+            _ => 0.0,
+        };
+        predicted_change_rate += cycle_adjustment;
+        
+        // 8. 应用A股涨跌幅限制
+        let change_percent = clamp_daily_change(predicted_change_rate * 100.0);
+        let clamped_change_rate = change_percent / 100.0;
         
         // 计算预测价格
         let predicted_price = last_price * (1.0 + clamped_change_rate);
         
-        // 计算变化百分比
-        let change_percent = clamped_change_rate * 100.0;
+        // 🎯 改进的置信度计算
+        let base_confidence = (metadata.accuracy + 0.3).min(0.8); // 提升基础置信度
         
-        // 基于多因素计算置信度
-        let base_confidence = metadata.accuracy * 0.8; // 基础置信度稍微降低
-        let volatility_penalty = (historical_volatility * 5.0).min(0.3); // 波动性惩罚
-        let trend_consistency = (recent_trend * predicted_change_rate).max(0.0); // 趋势一致性奖励
-        let distance_penalty = (change_percent.abs() / 10.0).min(0.4); // 预测变化越大，置信度越低
-        let time_decay = 0.92_f64.powi(day as i32); // 时间衰减
+        // 置信度影响因子
+        let volatility_impact = 1.0 - (volatility_factor * 8.0).min(0.4);     // 波动率影响
+        let trend_strength = (recent_trend.abs() * 10.0).min(0.2);            // 趋势强度奖励
+        let prediction_magnitude = 1.0 - (change_percent.abs() / 15.0).min(0.3); // 预测幅度惩罚
+        let time_decay = 0.95_f64.powi(day as i32);                           // 时间衰减
+        let model_consistency = if day > 1 && !predictions.is_empty() {
+            // 检查预测的一致性（避免剧烈波动）
+            let prev_change = predictions.last().unwrap().predicted_change_percent;
+            let change_diff = (change_percent - prev_change).abs();
+            1.0 - (change_diff / 10.0).min(0.2)
+        } else {
+            1.0
+        };
         
-        let confidence = (base_confidence * time_decay + trend_consistency * 0.1 - volatility_penalty - distance_penalty).clamp(0.2, 0.85);
+        let confidence = (base_confidence 
+            * volatility_impact 
+            * prediction_magnitude 
+            * time_decay 
+            * model_consistency
+            + trend_strength * 0.1)
+            .clamp(0.35, 0.85); // 提高最低置信度到35%
         
         // 添加预测结果
         predictions.push(Prediction {
@@ -1921,4 +1948,253 @@ fn calculate_realistic_accuracy(predictions: &[f64], actuals: &[f64]) -> f64 {
     // 对于股票预测，50%以上就是不错的准确率，70%以上是很好的
     // 限制最高准确率以保持现实性
     combined_accuracy.min(0.75)
+}
+
+// 新增：涨跌方向分类预测结构
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectionPrediction {
+    pub target_date: String,
+    pub predicted_direction: String, // "上涨", "下跌", "横盘"
+    pub direction_confidence: f64,   // 方向预测置信度
+    pub predicted_price: f64,        // 预测价格（仅供参考）
+    pub predicted_change_percent: f64,
+    pub confidence: f64,
+}
+
+// 新增：涨跌方向分类枚举
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Direction {
+    Up,    // 上涨 > 0.5%
+    Down,  // 下跌 < -0.5%
+    Flat,  // 横盘 [-0.5%, 0.5%]
+}
+
+impl Direction {
+    fn from_change_percent(change: f64) -> Self {
+        if change > 0.5 {
+            Direction::Up
+        } else if change < -0.5 {
+            Direction::Down
+        } else {
+            Direction::Flat
+        }
+    }
+    
+    fn to_string(&self) -> &'static str {
+        match self {
+            Direction::Up => "上涨",
+            Direction::Down => "下跌", 
+            Direction::Flat => "横盘",
+        }
+    }
+    
+    fn to_class_index(&self) -> usize {
+        match self {
+            Direction::Down => 0,
+            Direction::Flat => 1,
+            Direction::Up => 2,
+        }
+    }
+    
+    fn from_class_index(index: usize) -> Self {
+        match index {
+            0 => Direction::Down,
+            1 => Direction::Flat,
+            2 => Direction::Up,
+            _ => Direction::Flat,
+        }
+    }
+}
+
+// 新增：增强的特征工程函数
+fn calculate_enhanced_features(
+    prices: &[f64], 
+    volumes: &[i64], 
+    features_list: &[String]
+) -> Result<Vec<f64>, String> {
+    let mut features = Vec::new();
+    let current_price = *prices.last().ok_or("价格数据为空")?;
+    let last_idx = prices.len() - 1;
+    
+    for feature_name in features_list {
+        match feature_name.as_str() {
+            "close" => {
+                // 归一化当前价格（相对于5日均线）
+                if prices.len() >= 5 {
+                    let ma5 = prices[prices.len()-5..].iter().sum::<f64>() / 5.0;
+                    let normalized = (current_price - ma5) / ma5;
+                    features.push(normalized.clamp(-0.5, 0.5));
+                } else {
+                    features.push(0.0);
+                }
+            },
+            "volume" => {
+                // 成交量相对于20日平均的比率
+                if volumes.len() >= 20 {
+                    let avg_vol = volumes[volumes.len()-20..].iter().sum::<i64>() as f64 / 20.0;
+                    let current_vol = volumes[last_idx] as f64;
+                    let vol_ratio = if avg_vol > 0.0 { current_vol / avg_vol } else { 1.0 };
+                    features.push((vol_ratio - 1.0).clamp(-2.0, 5.0)); // 成交量可能暴增
+                } else {
+                    features.push(0.0);
+                }
+            },
+            "change_percent" => {
+                // 价格变化百分比
+                if prices.len() > 1 {
+                    let prev_price = prices[last_idx - 1];
+                    let change = (current_price - prev_price) / prev_price * 100.0;
+                    features.push(change.clamp(-15.0, 15.0) / 15.0); // 标准化到[-1,1]
+                } else {
+                    features.push(0.0);
+                }
+            },
+            "ma_trend" => {
+                // 新增：均线趋势特征
+                if prices.len() >= 20 {
+                    let ma5 = prices[prices.len()-5..].iter().sum::<f64>() / 5.0;
+                    let ma10 = prices[prices.len()-10..].iter().sum::<f64>() / 10.0;
+                    let ma20 = prices[prices.len()-20..].iter().sum::<f64>() / 20.0;
+                    
+                    let trend_score = if ma5 > ma10 && ma10 > ma20 {
+                        1.0  // 强烈上涨趋势
+                    } else if ma5 < ma10 && ma10 < ma20 {
+                        -1.0 // 强烈下跌趋势
+                    } else if ma5 > ma10 {
+                        0.5  // 短期上涨
+                    } else if ma5 < ma10 {
+                        -0.5 // 短期下跌
+                    } else {
+                        0.0  // 横盘
+                    };
+                    features.push(trend_score);
+                } else {
+                    features.push(0.0);
+                }
+            },
+            "price_position" => {
+                // 新增：价格在最近高低点中的位置
+                if prices.len() >= 20 {
+                    let recent_prices = &prices[prices.len()-20..];
+                    let highest = recent_prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                    let lowest = recent_prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                    
+                    let position = if highest > lowest {
+                        (current_price - lowest) / (highest - lowest)
+                    } else {
+                        0.5
+                    };
+                    features.push(position * 2.0 - 1.0); // 转换到[-1,1]
+                } else {
+                    features.push(0.0);
+                }
+            },
+            "volatility" => {
+                // 新增：波动率特征
+                if prices.len() >= 10 {
+                    let recent_prices = &prices[prices.len()-10..];
+                    let returns: Vec<f64> = recent_prices.windows(2)
+                        .map(|w| (w[1] - w[0]) / w[0])
+                        .collect();
+                    
+                    let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
+                    let variance = returns.iter()
+                        .map(|r| (r - mean_return).powi(2))
+                        .sum::<f64>() / returns.len() as f64;
+                    let volatility = variance.sqrt();
+                    
+                    features.push((volatility * 100.0).clamp(0.0, 10.0) / 10.0); // 标准化
+                } else {
+                    features.push(0.0);
+                }
+            },
+            "rsi_signal" => {
+                // 增强RSI信号
+                if prices.len() >= 15 {
+                    let rsi = calculate_rsi(&prices[prices.len()-15..]);
+                    let signal = if rsi > 70.0 {
+                        -1.0  // 超买，看跌信号
+                    } else if rsi < 30.0 {
+                        1.0   // 超卖，看涨信号
+                    } else if rsi > 50.0 {
+                        (rsi - 50.0) / 50.0  // 偏多头
+                    } else {
+                        (rsi - 50.0) / 50.0  // 偏空头
+                    };
+                    features.push(signal);
+                } else {
+                    features.push(0.0);
+                }
+            },
+            "macd_momentum" => {
+                // 增强MACD动量信号
+                if prices.len() >= 30 {
+                    let ema12 = calculate_ema(&prices[prices.len()-30..], 12);
+                    let ema26 = calculate_ema(&prices[prices.len()-30..], 26);
+                    let macd_line = ema12 - ema26;
+                    let signal_line = calculate_ema(&[ema12 - ema26], 9);
+                    
+                    let momentum = macd_line - signal_line;
+                    let normalized = (momentum / current_price * 1000.0).clamp(-1.0, 1.0);
+                    features.push(normalized);
+                } else {
+                    features.push(0.0);
+                }
+            },
+            // 保持原有特征的兼容性
+            _ => {
+                // 调用原有的特征计算逻辑
+                match calculate_feature_value(feature_name, prices, volumes, last_idx, 20) {
+                    Ok(value) => features.push(value),
+                    Err(_) => features.push(0.0),
+                }
+            }
+        }
+    }
+    
+    Ok(features)
+}
+
+// 新增：改进的准确率计算，更加重视方向预测
+fn calculate_direction_focused_accuracy(predictions: &[f64], actuals: &[f64]) -> (f64, f64) {
+    if predictions.len() != actuals.len() || predictions.is_empty() {
+        return (0.0, 0.0);
+    }
+    
+    let mut direction_correct = 0;
+    let mut total_predictions = 0;
+    let mut price_error_sum = 0.0;
+    
+    for i in 1..predictions.len().min(actuals.len()) {
+        // 计算预测和实际的变化方向
+        let pred_change = predictions[i] - predictions[i-1];
+        let actual_change = actuals[i] - actuals[i-1];
+        
+        // 方向分类（使用更严格的阈值）
+        let pred_direction = Direction::from_change_percent(pred_change / predictions[i-1] * 100.0);
+        let actual_direction = Direction::from_change_percent(actual_change / actuals[i-1] * 100.0);
+        
+        // 方向准确性检查
+        if pred_direction == actual_direction {
+            direction_correct += 1;
+        }
+        
+        // 价格准确性（相对误差）
+        let relative_error = ((predictions[i] - actuals[i]) / actuals[i]).abs();
+        price_error_sum += relative_error;
+        
+        total_predictions += 1;
+    }
+    
+    if total_predictions == 0 {
+        return (0.0, 0.0);
+    }
+    
+    let direction_accuracy = direction_correct as f64 / total_predictions as f64;
+    let price_accuracy = (1.0 - (price_error_sum / total_predictions as f64)).max(0.0);
+    
+    // 方向准确率权重提高到70%，价格准确率30%
+    let combined_accuracy = direction_accuracy * 0.7 + price_accuracy * 0.3;
+    
+    (direction_accuracy, combined_accuracy.min(0.85)) // 限制最高准确率保持现实性
 }

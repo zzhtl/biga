@@ -68,7 +68,7 @@
     let modelType = "candle_mlp"; // 默认使用Candle的MLP模型
     let lookbackDays = 180; // 修改为180天历史数据
     let trainTestSplit = 0.8;
-    let features = ["close", "volume", "change_percent", "ma5", "ma10", "ma20", "rsi", "macd", "bollinger", "stochastic_k", "stochastic_d", "momentum"];
+    let features = ["close", "volume", "change_percent", "ma_trend", "price_position", "volatility", "rsi_signal", "macd_momentum", "ma5", "ma10", "ma20", "rsi", "macd", "bollinger", "stochastic_k", "stochastic_d", "momentum"];
     let epochs = 100; // 训练轮数
     let batchSize = 32; // 批处理大小
     let learningRate = 0.001; // 学习率
@@ -605,6 +605,46 @@
                                 else features = features.filter(f => f !== 'momentum');
                             }} />
                             动量指标
+                        </label>
+                        <label>
+                            <input type="checkbox" value="ma_trend" checked={features.includes('ma_trend')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'ma_trend'];
+                                else features = features.filter(f => f !== 'ma_trend');
+                            }} />
+                            均线趋势
+                        </label>
+                        <label>
+                            <input type="checkbox" value="price_position" checked={features.includes('price_position')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'price_position'];
+                                else features = features.filter(f => f !== 'price_position');
+                            }} />
+                            价格位置
+                        </label>
+                        <label>
+                            <input type="checkbox" value="volatility" checked={features.includes('volatility')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'volatility'];
+                                else features = features.filter(f => f !== 'volatility');
+                            }} />
+                            波动率
+                        </label>
+                        <label>
+                            <input type="checkbox" value="rsi_signal" checked={features.includes('rsi_signal')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'rsi_signal'];
+                                else features = features.filter(f => f !== 'rsi_signal');
+                            }} />
+                            RSI信号
+                        </label>
+                        <label>
+                            <input type="checkbox" value="macd_momentum" checked={features.includes('macd_momentum')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'macd_momentum'];
+                                else features = features.filter(f => f !== 'macd_momentum');
+                            }} />
+                            MACD动量
                         </label>
                     </div>
                 </div>
