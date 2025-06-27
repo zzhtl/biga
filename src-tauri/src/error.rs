@@ -21,20 +21,8 @@ pub enum AppError {
     #[error("无效的输入参数: {0}")]
     InvalidInput(String),
 
-    #[error("模型训练错误: {0}")]
-    ModelTrainingError(String),
-
-    #[error("模型预测错误: {0}")]
-    PredictionError(String),
-
-    #[error("模型序列化错误: {0}")]
-    SerializationError(String),
-
     #[error("模型反序列化错误: {0}")]
     DeserializationError(String),
-
-    #[error("数据库操作错误: {0}")]
-    DbError(String),
 
     #[error("IO 错误: {0}")]
     IoError(#[from] std::io::Error),

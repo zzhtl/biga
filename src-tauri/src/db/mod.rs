@@ -1,5 +1,4 @@
 pub mod models;
-pub mod prediction;
 use crate::constants;
 use crate::error::AppError;
 use models::{HistoricalData, Stock, StockInfo};

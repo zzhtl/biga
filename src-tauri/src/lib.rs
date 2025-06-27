@@ -4,8 +4,6 @@ mod constants;
 mod csv;
 mod db;
 mod error;
-mod prediction;
-mod models;
 mod stock_prediction;
 
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
