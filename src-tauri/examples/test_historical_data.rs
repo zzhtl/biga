@@ -4,7 +4,7 @@ use biga_lib::api::stock;
 async fn main() {
     // 测试获取历史数据
     println!("测试获取股票历史数据...");
-    let symbol = "sh600000"; // 浦发银行
+    let symbol = "603005.SH"; // 晶方科技
     
     match stock::fetch_historical_data(symbol).await {
         Ok(data) => {

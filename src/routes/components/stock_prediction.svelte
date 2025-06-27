@@ -24,6 +24,25 @@
         accuracy: number;
     }
     
+    interface TechnicalIndicatorValues {
+        rsi: number;
+        macd_histogram: number;
+        kdj_j: number;
+        cci: number;
+        obv_trend: number;
+        // 新增MACD和KDJ字段
+        macd_dif: number;
+        macd_dea: number;
+        kdj_k: number;
+        kdj_d: number;
+        macd_golden_cross: boolean;
+        macd_death_cross: boolean;
+        kdj_golden_cross: boolean;
+        kdj_death_cross: boolean;
+        kdj_overbought: boolean;
+        kdj_oversold: boolean;
+    }
+    
     interface Prediction {
         target_date: string;
         predicted_price: number;
@@ -31,13 +50,7 @@
         confidence: number;
         trading_signal?: string;
         signal_strength?: number;
-        technical_indicators?: {
-            rsi: number;
-            macd_histogram: number;
-            kdj_j: number;
-            cci: number;
-            obv_trend: number;
-        };
+        technical_indicators?: TechnicalIndicatorValues;
     }
     
     interface TrainingLog {
@@ -67,10 +80,28 @@
         }>;
     }
     
+    // 新增：最新真实数据接口
+    interface LastRealData {
+        date: string;
+        price: number;
+        change_percent: number;
+    }
+    
+    // 新增：预测结果返回接口
+    interface PredictionResult {
+        predictions: Prediction[];
+        last_real_data?: {
+            date: string;
+            price: number;
+            change_percent: number;
+        };
+    }
+    
     // 使用类型
     let modelList: ModelInfo[] = [];
     let predictions: Prediction[] = [];
     let modelAccuracy: number | null = null;
+    let lastRealData: LastRealData | null = null; // 新增：最新真实数据
     
     // 模型训练参数
     let newModelName = "模型-" + new Date().toISOString().slice(0, 10);
@@ -290,14 +321,33 @@
             };
             
             console.log("发送预测请求:", request);
-            const preds: Prediction[] = await invoke('predict_with_candle', { request });
-            console.log("收到预测结果:", preds);
+            const result = await invoke<Prediction[] | PredictionResult>('predict_with_candle', { request });
+            console.log("收到预测结果:", result);
             
-            predictions = preds;
+            // 处理返回结果，提取预测数据和最新真实数据
+            if (result) {
+                if (Array.isArray(result)) {
+                    // 旧格式，只返回预测数组
+                    predictions = result;
+                } else if ('predictions' in result && Array.isArray(result.predictions)) {
+                    // 新格式，包含预测和最新真实数据
+                    predictions = result.predictions;
+                    if (result.last_real_data) {
+                        lastRealData = {
+                            date: result.last_real_data.date,
+                            price: result.last_real_data.price,
+                            change_percent: result.last_real_data.change_percent
+                        };
+                    }
+                }
+            } else {
+                predictions = [];
+                lastRealData = null;
+            }
             
             // 生成图表数据
-            if (preds && preds.length > 0) {
-                generatePredictionChart(preds);
+            if (predictions && predictions.length > 0) {
+                generatePredictionChart(predictions);
                 console.log("图表数据生成完成:", predictionChart);
             } else {
                 console.warn("预测结果为空，无法生成图表");
@@ -307,6 +357,7 @@
             console.error("预测失败:", error);
             errorMessage = `预测失败: ${error}`;
             predictions = [];
+            lastRealData = null;
             predictionChart = null;
         } finally {
             isPredicting = false;
@@ -834,6 +885,20 @@
         <div class="prediction-results">
             <h2>预测结果</h2>
             
+            <!-- 新增：最新真实数据展示 -->
+            {#if lastRealData}
+                <div class="last-real-data">
+                    <h3>最新真实数据</h3>
+                    <div class="real-data-card">
+                        <div class="real-data-date">{new Date(lastRealData.date).toLocaleDateString()}</div>
+                        <div class="real-data-price">{lastRealData.price.toFixed(2)}</div>
+                        <div class="real-data-change {lastRealData.change_percent >= 0 ? 'price-up' : 'price-down'}">
+                            {lastRealData.change_percent >= 0 ? '+' : ''}{lastRealData.change_percent.toFixed(2)}%
+                        </div>
+                    </div>
+                </div>
+            {/if}
+            
             <!-- 预测图表 -->
             {#if predictionChart}
                 <div class="prediction-chart">
@@ -994,8 +1059,8 @@
                             <tr class:positive={prediction.predicted_change_percent > 0} class:negative={prediction.predicted_change_percent < 0}>
                                 <td>{new Date(prediction.target_date).toLocaleDateString()}</td>
                                 <td>{prediction.predicted_price.toFixed(2)}</td>
-                                <td class:positive={prediction.predicted_change_percent > 0} class:negative={prediction.predicted_change_percent < 0}>
-                                    {prediction.predicted_change_percent.toFixed(2)}%
+                                <td class:price-up={prediction.predicted_change_percent > 0} class:price-down={prediction.predicted_change_percent < 0}>
+                                    {prediction.predicted_change_percent > 0 ? '+' : ''}{prediction.predicted_change_percent.toFixed(2)}%
                                 </td>
                                 <td>
                                     <div class="confidence-indicator">
@@ -1019,9 +1084,52 @@
                                             <span title="RSI: {prediction.technical_indicators.rsi.toFixed(1)}">
                                                 RSI: {prediction.technical_indicators.rsi > 70 ? '超买' : prediction.technical_indicators.rsi < 30 ? '超卖' : '正常'}
                                             </span>
-                                            <span title="KDJ-J: {prediction.technical_indicators.kdj_j.toFixed(1)}">
-                                                KDJ: {prediction.technical_indicators.kdj_j > 80 ? '超买' : prediction.technical_indicators.kdj_j < 20 ? '超卖' : '正常'}
-                                            </span>
+                                            
+                                            <!-- 增强MACD指标展示 -->
+                                            <div class="tech-detail-indicator">
+                                                <span class="tech-label">MACD:</span>
+                                                <div class="tech-values">
+                                                    <span class="tech-value {prediction.technical_indicators.macd_dif > prediction.technical_indicators.macd_dea ? 'positive' : 'negative'}">
+                                                        DIF: {prediction.technical_indicators.macd_dif.toFixed(2)}
+                                                    </span>
+                                                    <span class="tech-value">
+                                                        DEA: {prediction.technical_indicators.macd_dea.toFixed(2)}
+                                                    </span>
+                                                    <span class="tech-value {prediction.technical_indicators.macd_histogram > 0 ? 'positive' : 'negative'}">
+                                                        HIST: {prediction.technical_indicators.macd_histogram.toFixed(2)}
+                                                    </span>
+                                                </div>
+                                                {#if prediction.technical_indicators.macd_golden_cross}
+                                                    <span class="tech-signal buy-signal">金叉</span>
+                                                {:else if prediction.technical_indicators.macd_death_cross}
+                                                    <span class="tech-signal sell-signal">死叉</span>
+                                                {/if}
+                                            </div>
+                                            
+                                            <!-- 增强KDJ指标展示 -->
+                                            <div class="tech-detail-indicator">
+                                                <span class="tech-label">KDJ:</span>
+                                                <div class="tech-values">
+                                                    <span class="tech-value {prediction.technical_indicators.kdj_k > prediction.technical_indicators.kdj_d ? 'positive' : 'negative'}">
+                                                        K: {prediction.technical_indicators.kdj_k.toFixed(1)}
+                                                    </span>
+                                                    <span class="tech-value">
+                                                        D: {prediction.technical_indicators.kdj_d.toFixed(1)}
+                                                    </span>
+                                                    <span class="tech-value {prediction.technical_indicators.kdj_j > 80 ? 'overbought' : prediction.technical_indicators.kdj_j < 20 ? 'oversold' : ''}">
+                                                        J: {prediction.technical_indicators.kdj_j.toFixed(1)}
+                                                    </span>
+                                                </div>
+                                                {#if prediction.technical_indicators.kdj_golden_cross}
+                                                    <span class="tech-signal buy-signal">金叉</span>
+                                                {:else if prediction.technical_indicators.kdj_death_cross}
+                                                    <span class="tech-signal sell-signal">死叉</span>
+                                                {:else if prediction.technical_indicators.kdj_overbought}
+                                                    <span class="tech-signal overbought-signal">超买</span>
+                                                {:else if prediction.technical_indicators.kdj_oversold}
+                                                    <span class="tech-signal oversold-signal">超卖</span>
+                                                {/if}
+                                            </div>
                                         </div>
                                     {/if}
                                 </td>
@@ -1597,7 +1705,7 @@
     .tech-indicators {
         display: flex;
         flex-direction: column;
-        gap: 0.25rem;
+        gap: 0.5rem;
         font-size: 0.75rem;
     }
     
@@ -1606,5 +1714,137 @@
         background: rgba(255, 255, 255, 0.1);
         border-radius: 0.25rem;
         white-space: nowrap;
+    }
+    
+    .tech-detail-indicator {
+        display: flex;
+        flex-direction: column;
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 0.25rem;
+        padding: 0.25rem;
+        gap: 0.25rem;
+    }
+    
+    .tech-label {
+        font-weight: bold;
+        color: rgba(255, 255, 255, 0.9);
+        padding: 0 !important;
+        background: transparent !important;
+    }
+    
+    .tech-values {
+        display: flex;
+        gap: 0.25rem;
+    }
+    
+    .tech-value {
+        padding: 0.125rem 0.25rem;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 0.25rem;
+        font-size: 0.7rem;
+    }
+    
+    .tech-value.positive {
+        color: #10b981;
+    }
+    
+    .tech-value.negative {
+        color: #ef4444;
+    }
+    
+    .tech-value.overbought {
+        color: #ef4444;
+        font-weight: bold;
+    }
+    
+    .tech-value.oversold {
+        color: #10b981;
+        font-weight: bold;
+    }
+    
+    .tech-signal {
+        align-self: flex-start;
+        padding: 0.125rem 0.375rem;
+        border-radius: 0.25rem;
+        font-weight: bold;
+        font-size: 0.7rem;
+    }
+    
+    .buy-signal {
+        background-color: rgba(16, 185, 129, 0.2);
+        color: #10b981;
+        border: 1px solid #10b981;
+    }
+    
+    .sell-signal {
+        background-color: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+        border: 1px solid #ef4444;
+    }
+    
+    .overbought-signal {
+        background-color: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+        border: 1px solid #ef4444;
+    }
+    
+    .oversold-signal {
+        background-color: rgba(16, 185, 129, 0.2);
+        color: #10b981;
+        border: 1px solid #10b981;
+    }
+    
+    /* 新增：中国股市风格的涨跌颜色 */
+    .price-up {
+        color: #ef4444 !important; /* 红色表示上涨 */
+        font-weight: bold;
+    }
+    
+    .price-down {
+        color: #10b981 !important; /* 绿色表示下跌 */
+        font-weight: bold;
+    }
+    
+    /* 新增：最新真实数据样式 */
+    .last-real-data {
+        margin-bottom: 2rem;
+        padding: 1rem;
+        background-color: rgba(0, 0, 0, 0.2);
+        border-radius: 0.5rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    .last-real-data h3 {
+        margin-top: 0;
+        margin-bottom: 1rem;
+        font-size: 1.2rem;
+        color: rgba(255, 255, 255, 0.9);
+    }
+    
+    .real-data-card {
+        display: flex;
+        align-items: center;
+        gap: 2rem;
+        padding: 1rem;
+        background-color: rgba(255, 255, 255, 0.05);
+        border-radius: 0.5rem;
+    }
+    
+    .real-data-date {
+        font-size: 1.1rem;
+        color: rgba(255, 255, 255, 0.8);
+    }
+    
+    .real-data-price {
+        font-size: 1.5rem;
+        font-weight: bold;
+        color: rgba(255, 255, 255, 0.9);
+    }
+    
+    .real-data-change {
+        font-size: 1.3rem;
+        font-weight: bold;
+        padding: 0.25rem 0.75rem;
+        border-radius: 0.25rem;
     }
 </style>

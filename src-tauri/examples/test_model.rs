@@ -8,7 +8,7 @@ async fn main() {
     
     // 创建一个简单的训练请求
     let request = TrainingRequest {
-        stock_code: "sh600000".to_string(),
+        stock_code: "603005.SH".to_string(),
         model_name: "测试模型".to_string(),
         start_date: NaiveDate::from_ymd_opt(2022, 1, 1).unwrap().format("%Y-%m-%d").to_string(),
         end_date: NaiveDate::from_ymd_opt(2023, 1, 1).unwrap().format("%Y-%m-%d").to_string(),

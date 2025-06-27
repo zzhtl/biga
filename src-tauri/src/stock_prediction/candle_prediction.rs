@@ -121,6 +121,17 @@ pub struct TechnicalIndicatorValues {
     pub kdj_j: f64,
     pub cci: f64,
     pub obv_trend: f64, // OBV相对于均值的比例
+    // 新增MACD和KDJ信号字段
+    pub macd_dif: f64,
+    pub macd_dea: f64,
+    pub kdj_k: f64,
+    pub kdj_d: f64,
+    pub macd_golden_cross: bool,  // MACD金叉
+    pub macd_death_cross: bool,   // MACD死叉
+    pub kdj_golden_cross: bool,   // KDJ金叉
+    pub kdj_death_cross: bool,    // KDJ死叉
+    pub kdj_overbought: bool,     // KDJ超买
+    pub kdj_oversold: bool,       // KDJ超卖
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -693,7 +704,7 @@ fn calculate_feature_value(
         "macd_dif" | "macd_dea" | "macd_histogram" => {
             // 完整MACD指标
             if index >= 26 {
-                let (dif, dea, histogram) = calculate_macd_full(&prices[0..=index]);
+                let (dif, dea, histogram) = calculate_macd_full(&prices);
                 let normalized = match feature_name {
                     "macd_dif" => dif / prices[index],
                     "macd_dea" => dea / prices[index],
@@ -1161,7 +1172,44 @@ fn calculate_sar(highs: &[f64], lows: &[f64], af_step: f64, af_max: f64) -> Vec<
     sar_values
 }
 
-// 🎯 新增：综合技术指标分析函数
+// 🎯 新增：技术信号结构体
+#[derive(Debug, Clone)]
+struct TechnicalSignals {
+    pub macd_dif: f64,
+    pub macd_dea: f64,
+    pub macd_histogram: f64,
+    pub kdj_k: f64,
+    pub kdj_d: f64,
+    pub kdj_j: f64,
+    pub rsi: f64,
+    pub cci: f64,
+    pub obv: f64,
+    pub signal: TradingSignal,
+    pub signal_strength: f64,
+    pub buy_signals: i32,
+    pub sell_signals: i32,
+    // 新增：交叉信号标记
+    pub macd_golden_cross: bool,     // MACD金叉（DIF上穿DEA）
+    pub macd_death_cross: bool,      // MACD死叉（DIF下穿DEA）
+    pub kdj_golden_cross: bool,      // KDJ金叉（K上穿D）
+    pub kdj_death_cross: bool,       // KDJ死叉（K下穿D）
+    pub kdj_overbought: bool,        // KDJ超买
+    pub kdj_oversold: bool,          // KDJ超卖
+    pub macd_zero_cross_up: bool,    // MACD上穿零轴
+    pub macd_zero_cross_down: bool,  // MACD下穿零轴
+}
+
+// 🎯 新增：交易信号枚举
+#[derive(Debug, Clone, PartialEq)]
+enum TradingSignal {
+    StrongBuy,
+    Buy,
+    Hold,
+    Sell,
+    StrongSell,
+}
+
+// 🎯 改进：综合技术指标分析函数，加强MACD和KDJ策略
 fn analyze_technical_signals(
     prices: &[f64], 
     highs: &[f64], 
@@ -1170,15 +1218,54 @@ fn analyze_technical_signals(
 ) -> TechnicalSignals {
     let len = prices.len();
     
-    // 计算各种技术指标
+    // MACD计算（包括历史值用于交叉判断）
+    let mut macd_dif_history = Vec::new();
+    let mut macd_dea_history = Vec::new();
+    let mut macd_histogram_history = Vec::new();
+    
+    // 计算最近30天的MACD序列，用于判断金叉死叉
+    let macd_days = 30.min(len);
+    for i in 0..macd_days {
+        let idx = len - macd_days + i;
+        if idx >= 26 {  // MACD需要至少26天数据
+            let (dif, dea, histogram) = calculate_macd_full(&prices[0..=idx]);
+            macd_dif_history.push(dif);
+            macd_dea_history.push(dea);
+            macd_histogram_history.push(histogram);
+        }
+    }
+    
+    // KDJ计算（包括历史值用于交叉判断）
+    let mut kdj_k_history = Vec::new();
+    let mut kdj_d_history = Vec::new();
+    let mut kdj_j_history = Vec::new();
+    
+    // 使用引用而不是移动所有权
+    let highs_ref = &highs;
+    let lows_ref = &lows;
+    
+    // 计算最近20天的KDJ序列，用于判断金叉死叉
+    let kdj_days = 20.min(len);
+    for i in 0..kdj_days {
+        let idx = len - kdj_days + i;
+        if idx >= 9 && highs_ref.len() > idx && lows_ref.len() > idx {  // KDJ需要至少9天数据
+            let start = idx.saturating_sub(8);
+            let (k, d, j) = calculate_kdj(&highs_ref[start..=idx], &lows_ref[start..=idx], &prices[start..=idx], 9);
+            kdj_k_history.push(k);
+            kdj_d_history.push(d);
+            kdj_j_history.push(j);
+        }
+    }
+    
+    // 获取最新的技术指标值
     let (macd_dif, macd_dea, macd_histogram) = if len >= 26 {
         calculate_macd_full(prices)
     } else {
         (0.0, 0.0, 0.0)
     };
     
-    let (kdj_k, kdj_d, kdj_j) = if len >= 14 && highs.len() >= 14 && lows.len() >= 14 {
-        calculate_kdj(highs, lows, prices, 9)
+    let (kdj_k, kdj_d, kdj_j) = if len >= 14 && highs_ref.len() >= 14 && lows_ref.len() >= 14 {
+        calculate_kdj(highs_ref, lows_ref, prices, 9)
     } else {
         (50.0, 50.0, 50.0)
     };
@@ -1189,8 +1276,8 @@ fn analyze_technical_signals(
         50.0
     };
     
-    let cci = if len >= 20 && highs.len() >= 20 && lows.len() >= 20 {
-        calculate_cci(highs, lows, prices, 20)
+    let cci = if len >= 20 && highs_ref.len() >= 20 && lows_ref.len() >= 20 {
+        calculate_cci(highs_ref, lows_ref, prices, 20)
     } else {
         0.0
     };
@@ -1206,25 +1293,196 @@ fn analyze_technical_signals(
         obv
     };
     
-         // 🎯 生成买卖信号
+    // 🎯 增强：改进MACD交叉信号识别
+    // 判断MACD交叉信号 - 增加连续性和强度判断
+    let macd_golden_cross = if macd_dif_history.len() >= 3 && macd_dea_history.len() >= 3 {
+        // 判断DIF是否向上穿过DEA（金叉）
+        // 增强版：要求穿越明显，避免微小波动
+        let cross_condition = macd_dif_history[macd_dif_history.len()-2] < macd_dea_history[macd_dea_history.len()-2] && 
+                             macd_dif_history[macd_dif_history.len()-1] > macd_dea_history[macd_dea_history.len()-1];
+        
+        // 穿越强度检查：DIF上升且DEA平缓或下降时更可靠
+        let strength_condition = macd_dif_history[macd_dif_history.len()-1] > macd_dif_history[macd_dif_history.len()-2] &&
+                               (macd_dea_history[macd_dea_history.len()-1] <= macd_dea_history[macd_dea_history.len()-2] * 1.001);
+        
+        // 趋势确认：之前DIF持续下降，现在开始上升
+        let trend_condition = macd_dif_history.len() >= 4 &&
+                             macd_dif_history[macd_dif_history.len()-3] > macd_dif_history[macd_dif_history.len()-2] &&
+                             macd_dif_history[macd_dif_history.len()-1] > macd_dif_history[macd_dif_history.len()-2];
+        
+        cross_condition && (strength_condition || trend_condition)
+    } else {
+        false
+    };
+    
+    let macd_death_cross = if macd_dif_history.len() >= 3 && macd_dea_history.len() >= 3 {
+        // 判断DIF是否向下穿过DEA（死叉）
+        // 增强版：要求穿越明显，避免微小波动
+        let cross_condition = macd_dif_history[macd_dif_history.len()-2] > macd_dea_history[macd_dea_history.len()-2] && 
+                             macd_dif_history[macd_dif_history.len()-1] < macd_dea_history[macd_dea_history.len()-1];
+        
+        // 穿越强度检查：DIF下降且DEA平缓或上升时更可靠
+        let strength_condition = macd_dif_history[macd_dif_history.len()-1] < macd_dif_history[macd_dif_history.len()-2] &&
+                               (macd_dea_history[macd_dea_history.len()-1] >= macd_dea_history[macd_dea_history.len()-2] * 0.999);
+        
+        // 趋势确认：之前DIF持续上升，现在开始下降
+        let trend_condition = macd_dif_history.len() >= 4 &&
+                             macd_dif_history[macd_dif_history.len()-3] < macd_dif_history[macd_dif_history.len()-2] &&
+                             macd_dif_history[macd_dif_history.len()-1] < macd_dif_history[macd_dif_history.len()-2];
+        
+        cross_condition && (strength_condition || trend_condition)
+    } else {
+        false
+    };
+    
+    // 🎯 增强：改进MACD零轴穿越识别
+    // 判断MACD零轴穿越 - 增加连续性判断
+    let macd_zero_cross_up = if macd_histogram_history.len() >= 3 {
+        // 基本条件：由负变正
+        let cross_condition = macd_histogram_history[macd_histogram_history.len()-2] < 0.0 && 
+                             macd_histogram_history[macd_histogram_history.len()-1] > 0.0;
+        
+        // 增强条件：确认是持续向上突破，而不是临时波动
+        let trend_condition = macd_histogram_history.len() >= 4 &&
+                             macd_histogram_history[macd_histogram_history.len()-1] > macd_histogram_history[macd_histogram_history.len()-2] &&
+                             macd_histogram_history[macd_histogram_history.len()-2] > macd_histogram_history[macd_histogram_history.len()-3];
+        
+        cross_condition && trend_condition
+    } else {
+        false
+    };
+    
+    let macd_zero_cross_down = if macd_histogram_history.len() >= 3 {
+        // 基本条件：由正变负
+        let cross_condition = macd_histogram_history[macd_histogram_history.len()-2] > 0.0 && 
+                             macd_histogram_history[macd_histogram_history.len()-1] < 0.0;
+        
+        // 增强条件：确认是持续向下突破，而不是临时波动
+        let trend_condition = macd_histogram_history.len() >= 4 &&
+                             macd_histogram_history[macd_histogram_history.len()-1] < macd_histogram_history[macd_histogram_history.len()-2] &&
+                             macd_histogram_history[macd_histogram_history.len()-2] < macd_histogram_history[macd_histogram_history.len()-3];
+        
+        cross_condition && trend_condition
+    } else {
+        false
+    };
+    
+    // 🎯 增强：改进KDJ交叉信号识别
+    // 判断KDJ交叉信号 - 增加位置和强度判断
+    let kdj_golden_cross = if kdj_k_history.len() >= 3 && kdj_d_history.len() >= 3 {
+        // 基本条件：K线向上穿过D线（金叉）
+        let cross_condition = kdj_k_history[kdj_k_history.len()-2] < kdj_d_history[kdj_d_history.len()-2] && 
+                             kdj_k_history[kdj_k_history.len()-1] > kdj_d_history[kdj_d_history.len()-1];
+        
+        // 位置条件：低位金叉（K和D都在50以下）更有效
+        let position_condition = kdj_k_history[kdj_k_history.len()-1] < 50.0 && 
+                               kdj_d_history[kdj_d_history.len()-1] < 50.0;
+        
+        // 强度条件：K线上升速度快
+        let strength_condition = kdj_k_history[kdj_k_history.len()-1] - kdj_k_history[kdj_k_history.len()-2] > 3.0;
+        
+        cross_condition && (position_condition || strength_condition)
+    } else {
+        false
+    };
+    
+    let kdj_death_cross = if kdj_k_history.len() >= 3 && kdj_d_history.len() >= 3 {
+        // 基本条件：K线向下穿过D线（死叉）
+        let cross_condition = kdj_k_history[kdj_k_history.len()-2] > kdj_d_history[kdj_d_history.len()-2] && 
+                             kdj_k_history[kdj_k_history.len()-1] < kdj_d_history[kdj_d_history.len()-1];
+        
+        // 位置条件：高位死叉（K和D都在50以上）更有效
+        let position_condition = kdj_k_history[kdj_k_history.len()-1] > 50.0 && 
+                               kdj_d_history[kdj_d_history.len()-1] > 50.0;
+        
+        // 强度条件：K线下降速度快
+        let strength_condition = kdj_k_history[kdj_k_history.len()-2] - kdj_k_history[kdj_k_history.len()-1] > 3.0;
+        
+        cross_condition && (position_condition || strength_condition)
+    } else {
+        false
+    };
+    
+    // 🎯 增强：改进KDJ超买超卖判断
+    // KDJ超买超卖判断 - 增加连续性判断和更严格的条件
+    let kdj_overbought = if kdj_j_history.len() >= 3 {
+        // 更严格的条件：J值超过90且K、D都超过80
+        let basic_condition = kdj_j > 90.0 && kdj_k > 80.0 && kdj_d > 80.0;
+        
+        // 连续性条件：确认是持续高位，而不是临时冲高
+        let continuity_condition = kdj_j_history.len() >= 3 &&
+                                 kdj_j_history[kdj_j_history.len()-2] > 80.0 &&
+                                 kdj_j_history[kdj_j_history.len()-3] > 75.0;
+        
+        basic_condition && continuity_condition
+    } else {
+        kdj_j > 90.0 && kdj_k > 80.0 && kdj_d > 80.0  // 更严格的单点判断
+    };
+    
+    let kdj_oversold = if kdj_j_history.len() >= 3 {
+        // 更严格的条件：J值低于10且K、D都低于20
+        let basic_condition = kdj_j < 10.0 || (kdj_k < 20.0 && kdj_d < 20.0);
+        
+        // 连续性条件：确认是持续低位，而不是临时下探
+        let continuity_condition = kdj_j_history.len() >= 3 &&
+                                 kdj_j_history[kdj_j_history.len()-2] < 20.0 &&
+                                 kdj_j_history[kdj_j_history.len()-3] < 25.0;
+        
+        basic_condition && continuity_condition
+    } else {
+        kdj_j < 10.0 || (kdj_k < 20.0 && kdj_d < 20.0)  // 更严格的单点判断
+    };
+    
+    // 🎯 生成买卖信号
     let mut buy_signals = 0;
     let mut sell_signals = 0;
     let mut signal_strength: f64 = 0.0;
     
-    // MACD信号
-    if macd_dif > macd_dea && macd_histogram > 0.0 {
-        buy_signals += 1;
-        signal_strength += 0.15;
-    } else if macd_dif < macd_dea && macd_histogram < 0.0 {
-        sell_signals += 1;
-        signal_strength -= 0.15;
+    // MACD信号 - 加强权重
+    if macd_golden_cross {
+        // MACD金叉是强烈买入信号
+        buy_signals += 2;
+        signal_strength += 0.25;
+    } else if macd_death_cross {
+        // MACD死叉是强烈卖出信号
+        sell_signals += 2;
+        signal_strength -= 0.25;
+    } else {
+        // 常规MACD判断
+        if macd_dif > macd_dea && macd_histogram > 0.0 {
+            buy_signals += 1;
+            signal_strength += 0.15;
+        } else if macd_dif < macd_dea && macd_histogram < 0.0 {
+            sell_signals += 1;
+            signal_strength -= 0.15;
+        }
     }
     
-    // KDJ信号
-    if kdj_j < 20.0 || (kdj_k < 30.0 && kdj_d < 30.0) {
+    // MACD零轴穿越 - 确认趋势信号
+    if macd_zero_cross_up {
         buy_signals += 1;
         signal_strength += 0.2;
-    } else if kdj_j > 80.0 || (kdj_k > 70.0 && kdj_d > 70.0) {
+    } else if macd_zero_cross_down {
+        sell_signals += 1;
+        signal_strength -= 0.2;
+    }
+    
+    // KDJ信号 - 加强权重
+    if kdj_golden_cross && kdj_j < 50.0 {
+        // KDJ金叉且在低位是强烈买入信号
+        buy_signals += 2;
+        signal_strength += 0.25;
+    } else if kdj_death_cross && kdj_j > 50.0 {
+        // KDJ死叉且在高位是强烈卖出信号
+        sell_signals += 2;
+        signal_strength -= 0.25;
+    }
+    
+    // KDJ超买超卖
+    if kdj_oversold {
+        buy_signals += 1;
+        signal_strength += 0.2;
+    } else if kdj_overbought {
         sell_signals += 1;
         signal_strength -= 0.2;
     }
@@ -1256,6 +1514,38 @@ fn analyze_technical_signals(
         signal_strength -= 0.1;
     }
     
+    // 🎯 增强：MACD和KDJ协同确认 - 这是最强力的信号
+    if macd_golden_cross && kdj_golden_cross {
+        // 双金叉，强烈买入
+        buy_signals += 3;
+        signal_strength += 0.3;
+        
+        // 如果同时出现在低位区域，进一步加强信号
+        if macd_dif < 0.0 && kdj_j < 40.0 {
+            buy_signals += 1;
+            signal_strength += 0.1;
+        }
+    } else if macd_death_cross && kdj_death_cross {
+        // 双死叉，强烈卖出
+        sell_signals += 3;
+        signal_strength -= 0.3;
+        
+        // 如果同时出现在高位区域，进一步加强信号
+        if macd_dif > 0.0 && kdj_j > 60.0 {
+            sell_signals += 1;
+            signal_strength -= 0.1;
+        }
+    }
+    
+    // 🎯 增强：MACD零轴穿越与KDJ交叉结合
+    if macd_zero_cross_up && kdj_golden_cross {
+        buy_signals += 2;
+        signal_strength += 0.25;
+    } else if macd_zero_cross_down && kdj_death_cross {
+        sell_signals += 2;
+        signal_strength -= 0.25;
+    }
+    
     // 价格突破信号
     if len >= 20 {
         let ma20 = prices[len-20..].iter().sum::<f64>() / 20.0;
@@ -1278,16 +1568,21 @@ fn analyze_technical_signals(
         }
     }
     
-    // 计算综合信号
-    let signal = if buy_signals > sell_signals + 2 {
+    // 🎯 增强：计算综合信号 - 更加精细化的信号分级
+    let signal = if buy_signals > sell_signals + 4 {
+        // 极强买入信号：买入信号远超卖出信号
         TradingSignal::StrongBuy
-    } else if buy_signals > sell_signals {
+    } else if buy_signals > sell_signals + 2 {
+        // 强买入信号：买入信号明显超过卖出信号
         TradingSignal::Buy
-    } else if sell_signals > buy_signals + 2 {
+    } else if sell_signals > buy_signals + 4 {
+        // 极强卖出信号：卖出信号远超买入信号
         TradingSignal::StrongSell
-    } else if sell_signals > buy_signals {
+    } else if sell_signals > buy_signals + 2 {
+        // 强卖出信号：卖出信号明显超过买入信号
         TradingSignal::Sell
     } else {
+        // 持有信号：买卖信号相近，市场不明朗
         TradingSignal::Hold
     };
     
@@ -1302,38 +1597,19 @@ fn analyze_technical_signals(
         cci,
         obv,
         signal,
-                 signal_strength: signal_strength.max(-1.0).min(1.0),
+        signal_strength: signal_strength.max(-1.0).min(1.0),
         buy_signals,
         sell_signals,
+        // 交叉信号
+        macd_golden_cross,
+        macd_death_cross,
+        kdj_golden_cross, 
+        kdj_death_cross,
+        kdj_overbought,
+        kdj_oversold,
+        macd_zero_cross_up,
+        macd_zero_cross_down,
     }
-}
-
-// 🎯 新增：技术信号结构体
-#[derive(Debug, Clone)]
-struct TechnicalSignals {
-    pub macd_dif: f64,
-    pub macd_dea: f64,
-    pub macd_histogram: f64,
-    pub kdj_k: f64,
-    pub kdj_d: f64,
-    pub kdj_j: f64,
-    pub rsi: f64,
-    pub cci: f64,
-    pub obv: f64,
-    pub signal: TradingSignal,
-    pub signal_strength: f64,
-    pub buy_signals: i32,
-    pub sell_signals: i32,
-}
-
-// 🎯 新增：交易信号枚举
-#[derive(Debug, Clone, PartialEq)]
-enum TradingSignal {
-    StrongBuy,
-    Buy,
-    Hold,
-    Sell,
-    StrongSell,
 }
 
 // 训练模型函数
@@ -1516,7 +1792,7 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
 }
 
 // 股票预测函数
-pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Result<Vec<Prediction>, String> {
+pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Result<PredictionResponse, String> {
     let model_list = list_models(&request.stock_code);
     
     if model_list.is_empty() {
@@ -1557,8 +1833,8 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     let model_path = get_model_dir(&metadata.id).join("model.safetensors");
     varmap.load(&model_path).map_err(|e| format!("模型加载失败: {}", e))?;
     
-    // 获取最近的真实市场数据用于预测
-    let (current_price, dates, prices, volumes, highs, lows) = get_recent_market_data(&request.stock_code, 60).await
+    // 获取最近的真实市场数据用于预测，包括当前价格和涨跌幅
+    let (current_price, current_change_percent, dates, mut prices, mut volumes, mut highs, mut lows) = get_recent_market_data(&request.stock_code, 60).await
         .map_err(|e| format!("获取市场数据失败: {}", e))?;
     
     if prices.len() < 20 {
@@ -1568,6 +1844,10 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     // 计算特征向量
     let mut features = Vec::new();
     let last_idx = prices.len() - 1;
+    
+    // 为了避免所有权问题，先克隆highs和lows
+    let highs_for_features = highs.clone();
+    let lows_for_features = lows.clone();
     
     // 为每个特征计算值
     for feature_name in &metadata.features {
@@ -1598,10 +1878,8 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
                 features.push(normalized);
             },
             "change_percent" => {
-                // 计算价格变化百分比
-                let prev_price = prices[last_idx - 1];
-                let change = (current_price - prev_price) / prev_price;
-                let normalized = (change / 0.1).clamp(-1.0, 1.0); // 假设正常变化率在±10%内
+                // 使用直接从数据库获取的涨跌幅，更加准确
+                let normalized = (current_change_percent / 10.0).clamp(-1.0, 1.0); // 假设正常变化率在±10%内
                 features.push(normalized);
             },
             "ma5" => {
@@ -1637,45 +1915,57 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             "rsi" => {
                 // RSI计算
                 if prices.len() >= 15 {
-                    let gains = prices[prices.len()-15..prices.len()-1]
-                        .iter()
-                        .zip(prices[prices.len()-14..].iter())
-                        .map(|(prev, curr)| {
-                            let diff = curr - prev;
-                            if diff > 0.0 { diff } else { 0.0 }
-                        })
-                        .sum::<f64>() / 14.0;
-                        
-                    let losses = prices[prices.len()-15..prices.len()-1]
-                        .iter()
-                        .zip(prices[prices.len()-14..].iter())
-                        .map(|(prev, curr)| {
-                            let diff = prev - curr;
-                            if diff > 0.0 { diff } else { 0.0 }
-                        })
-                        .sum::<f64>() / 14.0;
-                        
-                    let rsi = if losses == 0.0 { 
-                        100.0 
-                    } else { 
-                        100.0 - (100.0 / (1.0 + (gains / losses))) 
-                    };
-                    
+                    let rsi = calculate_rsi(&prices[prices.len()-14..]);
                     features.push(rsi / 100.0);
                 } else {
                     features.push(0.5); // 默认中性RSI
                 }
             },
             "macd" => {
-                // MACD计算
+                // MACD计算 - 简化版
                 if prices.len() >= 26 {
-                    let ema12 = prices[prices.len()-26..].iter().sum::<f64>() / 12.0;
-                    let ema26 = prices[prices.len()-26..].iter().sum::<f64>() / 26.0;
+                    let ema12 = calculate_ema(&prices[prices.len()-26..], 12);
+                    let ema26 = calculate_ema(&prices[prices.len()-26..], 26);
                     let macd = ema12 - ema26;
                     let normalized = macd / current_price;
                     features.push(normalized);
                 } else {
                     features.push(0.0);
+                }
+            },
+            "macd_dif" | "macd_dea" | "macd_histogram" => {
+                // 完整MACD指标 - 增强版
+                if prices.len() >= 26 {
+                    let (dif, dea, histogram) = calculate_macd_full(&prices);
+                    // 使用归一化值增强特征与价格的关系
+                    let normalized = match feature_name.as_str() {
+                        "macd_dif" => dif / current_price,
+                        "macd_dea" => dea / current_price,
+                        "macd_histogram" => histogram / current_price,
+                        _ => 0.0
+                    };
+                    features.push(normalized);
+                } else {
+                    features.push(0.0);
+                }
+            },
+            "kdj_k" | "kdj_d" | "kdj_j" => {
+                // KDJ指标 - 增强版
+                if let (Some(_highs_slice), Some(_lows_slice)) = (Some(&highs_for_features[..]), Some(&lows_for_features[..])) {
+                    if prices.len() >= 9 && highs_for_features.len() > last_idx && lows_for_features.len() > last_idx {
+                        let start = last_idx.saturating_sub(8);
+                        let (k, d, j) = calculate_kdj(&highs_for_features[start..=last_idx], &lows_for_features[start..=last_idx], &prices[start..=last_idx], 9);
+                        match feature_name.as_str() {
+                            "kdj_k" => features.push(k / 100.0), // 归一化到0-1
+                            "kdj_d" => features.push(d / 100.0),
+                            "kdj_j" => features.push(j / 100.0),
+                            _ => features.push(0.5)
+                        }
+                    } else {
+                        features.push(0.5); // 默认中性值
+                    }
+                } else {
+                    features.push(0.5);
                 }
             },
             "bollinger" => {
@@ -1786,7 +2076,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         },
         // 如果是2维张量 [batch_size, 1] 或 [batch_size, features]
         [_, n] => {
-            if *n == 1 { // 修复: 解引用 n
+            if *n == 1 {
                 // 如果是 [batch_size, 1]，直接获取第一个元素
                 output.to_vec2::<f32>().map_err(|e| format!("获取预测结果失败: {}", e))?[0][0] as f64
             } else {
@@ -1806,8 +2096,21 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     let recent_trend = calculate_recent_trend(&prices);
     let support_resistance = calculate_support_resistance(&prices, current_price);
     
-    // 🎯 使用综合技术分析
-    let technical_signals = analyze_technical_signals(&prices, &highs, &lows, &volumes);
+    // 直接使用从数据库获取的涨跌幅作为重要参考
+    println!("📊 最新价格: {:.2}, 实际涨跌幅: {:.2}%", current_price, current_change_percent);
+    
+    // 新增：分析历史波动特征
+    let volatility_features = analyze_historical_volatility_pattern(&prices, 30); // 分析最近30天
+    println!("📊 历史波动特征: {} (平均日波动: {:.2}%, 上涨/下跌比: {:.2}, 最大连续上涨: {}天, 最大连续下跌: {}天)", 
+             volatility_features.volatility_pattern,
+             volatility_features.avg_daily_change * 100.0,
+             volatility_features.up_down_ratio,
+             volatility_features.max_consecutive_up,
+             volatility_features.max_consecutive_down);
+    
+    // 🎯 使用增强版的综合技术分析
+    // 使用可变引用
+    let mut technical_signals = analyze_technical_signals(&prices, &highs, &lows, &volumes);
     
     println!("📊 历史波动率: {:.4}, 近期趋势: {:.4}, 支撑阻力: {:.4}", 
              historical_volatility, recent_trend, support_resistance);
@@ -1833,23 +2136,123 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         }
         let date_str = target_date.format("%Y-%m-%d").to_string();
         
-        // 🎯 改进的预测策略：结合技术分析的涨跌预测
+        // 🎯 改进的预测策略：结合增强版技术指标的预测
         
-        // 1. 基础模型预测（标准化处理）
-        let base_model_prediction = raw_change_rate.tanh() * 0.02; // 限制在±2%范围内
+        // 1. 基础模型预测（标准化处理）- 放大预测幅度
+        let base_model_prediction = raw_change_rate * 0.03; // 从0.02提高到0.03，增加预测幅度
         
-        // 2. 历史波动性调整
-        let volatility_factor = historical_volatility.clamp(0.01, 0.08); // 限制波动率范围
+        // 2. 历史波动性调整 - 更合理地利用历史波动率
+        let volatility_factor = historical_volatility.clamp(0.01, 0.08) * 1.2; // 增加1.2倍系数
         
-        // 3. 趋势修正（随时间衰减）
-        let trend_decay = 0.9_f64.powi(day as i32);
-        let trend_factor = recent_trend * trend_decay;
+        // 3. 趋势修正（随时间衰减）- 增加趋势影响
+        let trend_decay = 0.95_f64.powi(day as i32); // 从0.9提高到0.95，减缓衰减
+        let trend_factor = recent_trend * trend_decay * 1.5; // 增加1.5倍系数，强化趋势影响
         
-        // 4. 技术信号影响（A股特色：技术分析权重较高）
-        let technical_impact = technical_signals.signal_strength * 0.03 * (0.95_f64.powi(day as i32));
+        // 4. 增强版技术信号影响
+        // 第1天技术因素影响最大，随后递减
+        let tech_decay = 0.9_f64.powi(day as i32);
+        
+        // MACD和KDJ交叉信号特别重要，给予更高权重
+        let macd_signal = if technical_signals.macd_golden_cross {
+            0.025 * tech_decay  // MACD金叉，看涨信号
+        } else if technical_signals.macd_death_cross {
+            -0.025 * tech_decay // MACD死叉，看跌信号
+        } else if technical_signals.macd_zero_cross_up {
+            0.015 * tech_decay  // MACD上穿零轴，看涨信号
+        } else if technical_signals.macd_zero_cross_down {
+            -0.015 * tech_decay // MACD下穿零轴，看跌信号
+        } else if technical_signals.macd_dif > technical_signals.macd_dea {
+            0.008 * tech_decay  // MACD处于多头排列，轻微看涨
+        } else {
+            -0.008 * tech_decay // MACD处于空头排列，轻微看跌
+        };
+        
+        let kdj_signal = if technical_signals.kdj_golden_cross {
+            0.020 * tech_decay  // KDJ金叉，看涨信号
+        } else if technical_signals.kdj_death_cross {
+            -0.020 * tech_decay // KDJ死叉，看跌信号
+        } else if technical_signals.kdj_oversold {
+            0.015 * tech_decay  // KDJ超卖，看涨信号
+        } else if technical_signals.kdj_overbought {
+            -0.015 * tech_decay // KDJ超买，看跌信号
+        } else if technical_signals.kdj_k > technical_signals.kdj_d {
+            0.005 * tech_decay  // KDJ处于多头排列，轻微看涨
+        } else {
+            -0.005 * tech_decay // KDJ处于空头排列，轻微看跌
+        };
+        
+        // MACD和KDJ协同确认，效果更强
+        let combo_signal = if (technical_signals.macd_golden_cross && technical_signals.kdj_golden_cross) ||
+                           (technical_signals.macd_zero_cross_up && technical_signals.kdj_golden_cross) {
+            0.035 * tech_decay  // 双重金叉，强烈看涨
+        } else if (technical_signals.macd_death_cross && technical_signals.kdj_death_cross) ||
+                 (technical_signals.macd_zero_cross_down && technical_signals.kdj_death_cross) {
+            -0.035 * tech_decay // 双重死叉，强烈看跌
+        } else {
+            0.0
+        };
+        
+        // 合并技术信号影响
+        let technical_impact = macd_signal + kdj_signal + combo_signal + 
+                              (technical_signals.signal_strength * 0.015 * tech_decay);
         
         // 5. 随机市场噪音（模拟真实市场的不确定性，考虑A股波动性）
-        let market_noise = (rand::random::<f64>() - 0.5) * volatility_factor * 1.2;
+        // 增强随机性，使用非对称噪音分布（偏度随技术信号方向变化）
+        let noise_skew = technical_signals.signal_strength.signum() * 0.2; // 偏度系数，技术信号强度决定偏向
+        let market_noise = ((rand::random::<f64>() * 2.0 - 1.0) + noise_skew) * volatility_factor * 1.5;
+        
+        // 新增：市场情绪因子
+        // 根据历史数据计算市场情绪（最近5日涨跌比例）
+        let market_sentiment = if prices.len() >= 6 {
+            let recent_days = 5.min(prices.len() - 1);
+            let up_days = (1..=recent_days).filter(|&i| {
+                prices[prices.len() - i] > prices[prices.len() - i - 1]
+            }).count() as f64;
+            
+            // 计算情绪得分：-1.0(极度悲观)到1.0(极度乐观)
+            (up_days / recent_days as f64) * 2.0 - 1.0
+        } else {
+            0.0 // 数据不足时保持中性
+        };
+        
+        // 市场情绪影响（过热时倾向回调，过冷时倾向反弹）
+        let sentiment_impact = -market_sentiment * 0.01 * (1.0 - (day as f64 * 0.2).min(0.8));
+        
+        if market_sentiment.abs() > 0.6 {
+            println!("🔮 检测到{}市场情绪(得分:{:.2})，预期将发生{}修正",
+                     if market_sentiment > 0.0 { "乐观" } else { "悲观" },
+                     market_sentiment,
+                     if market_sentiment > 0.0 { "回调" } else { "反弹" });
+        }
+        
+        // 新增：极端价格区域的均值回归增强
+        let price_position = if prices.len() >= 30 {
+            let max_price = prices[prices.len()-30..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+            let min_price = prices[prices.len()-30..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+            let range = max_price - min_price;
+            
+            if range > 0.0 {
+                // 计算当前价格在区间中的位置(0-1)
+                let position = (last_price - min_price) / range;
+                
+                // 转换为-1到1的区间，0表示中间位置
+                position * 2.0 - 1.0
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        
+        // 价格位置影响（高位更容易下跌，低位更容易上涨）
+        let position_impact = -price_position * 0.015;
+        
+        if price_position.abs() > 0.8 {
+            println!("📍 价格处于{}区域(位置得分:{:.2})，倾向于{}",
+                     if price_position > 0.0 { "高位" } else { "低位" },
+                     price_position,
+                     if price_position > 0.0 { "回落" } else { "上涨" });
+        }
         
         // 6. 均值回归效应（价格偏离均值时的回归倾向）
         let mean_reversion = if prices.len() >= 20 {
@@ -1863,7 +2266,16 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         // 7. 支撑阻力位影响
         let sr_effect = support_resistance * 0.4;
         
-        // 8. A股特色：追涨杀跌心理（短期动量效应）
+        // 8. 历史涨跌幅影响：历史连续性延续
+        let change_percent_effect = if day == 1 {
+            // 只在第一天使用，利用当日涨跌幅的动能效应
+            // 涨跌幅为正时，短期可能继续上涨；为负时，短期可能继续下跌
+            (current_change_percent / 100.0) * 0.15 // 缩小影响因子为15%
+        } else {
+            0.0
+        };
+        
+        // 9. A股特色：追涨杀跌心理（短期动量效应）
         let momentum_effect = if day <= 2 && technical_signals.buy_signals > technical_signals.sell_signals {
             0.01 // 买入信号多时，短期可能继续上涨
         } else if day <= 2 && technical_signals.sell_signals > technical_signals.buy_signals {
@@ -1872,32 +2284,107 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             0.0
         };
         
-        // 综合计算预测变化率（调整权重，更重视技术分析）
-        let mut predicted_change_rate = base_model_prediction * 0.25  // 模型预测25%权重
-            + technical_impact * 0.30                                 // 技术分析30%权重
-            + trend_factor * 0.20                                    // 趋势20%权重
-            + market_noise * 0.10                                    // 随机噪音10%权重
-            + mean_reversion * 0.08                                  // 均值回归8%权重
-            + sr_effect * 0.05                                       // 支撑阻力5%权重
-            + momentum_effect * 0.02;                                // 动量效应2%权重
+        // 综合计算预测变化率（调整权重，更重视技术分析和趋势）
+        let mut predicted_change_rate = base_model_prediction * 0.15    // 模型预测比重15%
+            + technical_impact * 0.33                                   // 技术分析33%
+            + trend_factor * 0.18                                       // 趋势18%
+            + market_noise * 0.10                                       // 随机噪音10%
+            + mean_reversion * 0.05                                     // 均值回归5%
+            + sr_effect * 0.05                                          // 支撑阻力5%
+            + momentum_effect * 0.02                                    // 动量效应2%
+            + sentiment_impact * 0.04                                   // 市场情绪4%
+            + position_impact * 0.04                                    // 价格位置4%
+            + change_percent_effect * 0.04;                             // 涨跌幅影响4%
         
-        // 7. 引入周期性调整（模拟市场的周期性波动）
+        // 9. 引入周期性调整（模拟市场的周期性波动）
         let cycle_adjustment = match day % 3 {
-            1 => 0.0,                                                // 第1天保持原预测
-            2 => -predicted_change_rate * 0.3,                      // 第2天适度反向调整
-            0 => predicted_change_rate * 0.2,                       // 第3天小幅同向调整
+            1 => 0.0,                                                   // 第1天保持原预测
+            2 => -predicted_change_rate * 0.5,                          // 第2天强力反向调整(50%)
+            0 => predicted_change_rate * 0.3,                           // 第3天小幅同向调整(30%)
             _ => 0.0,
         };
         predicted_change_rate += cycle_adjustment;
         
-        // 8. 应用A股涨跌幅限制
+        // 新增：市场反转概率（避免连续单向走势）
+        // 计算前几天的累计涨跌幅
+        let cumulative_change = if day > 1 && !predictions.is_empty() {
+            predictions.iter().map(|p| p.predicted_change_percent / 100.0).sum::<f64>()
+        } else {
+            0.0
+        };
+        
+        // 如果累计涨幅或跌幅过大，增加反转概率
+        if cumulative_change.abs() > 0.02 * day as f64 { // 平均每天2%的累计变化视为显著
+            let reversal_adjustment = -cumulative_change.signum() * 
+                                     (rand::random::<f64>() * 0.015) * // 随机0-1.5%的反转
+                                     (cumulative_change.abs() / (0.02 * day as f64)).min(2.0); // 累计越大反转越强
+            predicted_change_rate += reversal_adjustment;
+            
+            println!("📉 检测到连续{}走势(累计{:.2}%)，应用市场反转调整: {:.2}%", 
+                     if cumulative_change > 0.0 { "上涨" } else { "下跌" },
+                     cumulative_change * 100.0,
+                     reversal_adjustment * 100.0);
+        }
+        
+        // 新增：基于历史波动模式的随机性
+        // 分析历史数据中的涨跌交替模式
+        if prices.len() > 20 {
+            let recent_changes: Vec<f64> = (1..20).map(|i| {
+                (prices[prices.len() - i] - prices[prices.len() - i - 1]) / prices[prices.len() - i - 1]
+            }).collect();
+            
+            // 计算历史数据中连续同向的最大天数
+            let mut max_consecutive = 1;
+            let mut current_consecutive = 1;
+            let mut prev_direction = recent_changes[0].signum();
+            
+            for i in 1..recent_changes.len() {
+                let current_direction = recent_changes[i].signum();
+                if current_direction == prev_direction {
+                    current_consecutive += 1;
+                } else {
+                    max_consecutive = max_consecutive.max(current_consecutive);
+                    current_consecutive = 1;
+                    prev_direction = current_direction;
+                }
+            }
+            max_consecutive = max_consecutive.max(current_consecutive);
+            
+            // 如果历史上很少有超过3天的连续同向走势，且当前已有连续同向预测
+            if max_consecutive <= 3 && day > 2 && !predictions.is_empty() {
+                let prev_directions: Vec<f64> = predictions.iter()
+                    .map(|p| p.predicted_change_percent.signum())
+                    .collect();
+                
+                if prev_directions.len() >= 2 && 
+                   prev_directions.iter().all(|&d| d == prev_directions[0]) && 
+                   prev_directions[0] * predicted_change_rate.signum() > 0.0 {
+                    // 强制方向反转
+                    let pattern_adjustment = -predicted_change_rate.signum() * 
+                                            (0.005 + rand::random::<f64>() * 0.01); // 0.5%-1.5%的反转
+                    predicted_change_rate = pattern_adjustment;
+                    
+                    println!("📊 基于历史波动模式(最大连续{})，强制方向反转: {:.2}%", 
+                             max_consecutive, pattern_adjustment * 100.0);
+                }
+            }
+        }
+        
+        // 10. 应用A股涨跌幅限制前，先放大预测变化率
+        // 对于小于0.5%的微小变化，适当放大以反映实际市场波动
+        if predicted_change_rate.abs() < 0.005 {
+            predicted_change_rate *= 1.5; // 对微小变化放大1.5倍
+        } else if predicted_change_rate.abs() < 0.01 {
+            predicted_change_rate *= 1.3; // 对小变化放大1.3倍
+        }
+        
         let change_percent = clamp_daily_change(predicted_change_rate * 100.0);
         let clamped_change_rate = change_percent / 100.0;
         
         // 计算预测价格
         let predicted_price = last_price * (1.0 + clamped_change_rate);
         
-        // 🎯 改进的置信度计算（结合技术分析）
+        // 🎯 改进的置信度计算（结合增强版技术分析）
         let base_confidence = (metadata.accuracy + 0.3).min(0.8); // 提升基础置信度
         
         // 置信度影响因子
@@ -1906,7 +2393,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         let prediction_magnitude = 1.0 - (change_percent.abs() / 15.0).min(0.3); // 预测幅度惩罚
         let time_decay = 0.95_f64.powi(day as i32);                           // 时间衰减
         
-        // 技术信号一致性
+        // 增强版技术信号一致性
         let technical_consistency = match technical_signals.signal {
             TradingSignal::StrongBuy | TradingSignal::StrongSell => 1.15, // 强烈信号提升置信度
             TradingSignal::Buy | TradingSignal::Sell => 1.05,             // 一般信号轻微提升
@@ -1919,6 +2406,19 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             (TradingSignal::StrongSell | TradingSignal::Sell, false) => 1.1, // 卖出信号与下跌预测一致
             (TradingSignal::Hold, _) => 1.0,                                // 横盘信号中性
             _ => 0.9,                                                        // 信号与预测不一致
+        };
+        
+        // MACD-KDJ协同确认提高置信度
+        let macd_kdj_alignment = if (technical_signals.macd_golden_cross && technical_signals.kdj_golden_cross) ||
+                                 (technical_signals.macd_death_cross && technical_signals.kdj_death_cross) {
+            1.15  // MACD和KDJ信号一致，大幅提高置信度
+        } else if (technical_signals.macd_golden_cross && !technical_signals.kdj_death_cross) ||
+                  (technical_signals.kdj_golden_cross && !technical_signals.macd_death_cross) ||
+                  (technical_signals.macd_death_cross && !technical_signals.kdj_golden_cross) ||
+                  (technical_signals.kdj_death_cross && !technical_signals.macd_golden_cross) {
+            1.05  // 单一指标有明确信号，适度提高置信度
+        } else {
+            1.0   // 无明确信号，置信度不变
         };
         
         let model_consistency = if day > 1 && !predictions.is_empty() {
@@ -1937,10 +2437,11 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             * model_consistency
             * technical_consistency
             * signal_alignment
+            * macd_kdj_alignment
             + trend_strength * 0.1)
             .clamp(0.40, 0.90); // 调整置信度范围为40%-90%
         
-        // 添加预测结果（包含技术分析信息）
+        // 添加预测结果（包含增强版技术分析信息）
         let trading_signal_str = match &technical_signals.signal {
             TradingSignal::StrongBuy => "强烈买入",
             TradingSignal::Buy => "买入",
@@ -1955,6 +2456,17 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             kdj_j: technical_signals.kdj_j,
             cci: technical_signals.cci,
             obv_trend: if technical_signals.obv > 0.0 { 1.0 } else { -1.0 }, // 简化的OBV趋势
+            // 新增MACD和KDJ信号字段
+            macd_dif: technical_signals.macd_dif,
+            macd_dea: technical_signals.macd_dea,
+            kdj_k: technical_signals.kdj_k,
+            kdj_d: technical_signals.kdj_d,
+            macd_golden_cross: technical_signals.macd_golden_cross,  // MACD金叉
+            macd_death_cross: technical_signals.macd_death_cross,   // MACD死叉
+            kdj_golden_cross: technical_signals.kdj_golden_cross,   // KDJ金叉
+            kdj_death_cross: technical_signals.kdj_death_cross,    // KDJ死叉
+            kdj_overbought: technical_signals.kdj_overbought,       // KDJ超买
+            kdj_oversold: technical_signals.kdj_oversold,           // KDJ超卖
         };
         
         predictions.push(Prediction {
@@ -1973,9 +2485,91 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         // 输出调试信息
         println!("📈 第{}天预测: 价格={:.2}, 变化={:.2}%, 置信度={:.2}%", 
                  day, predicted_price, change_percent, confidence * 100.0);
+        
+        // 输出技术指标信息
+        println!("   MACD: DIF={:.4}, DEA={:.4}, HIST={:.4}, 金叉={}, 死叉={}", 
+                technical_signals.macd_dif, technical_signals.macd_dea, 
+                technical_signals.macd_histogram, 
+                technical_signals.macd_golden_cross, technical_signals.macd_death_cross);
+        println!("   KDJ: K={:.2}, D={:.2}, J={:.2}, 金叉={}, 死叉={}, 超买={}, 超卖={}", 
+                technical_signals.kdj_k, technical_signals.kdj_d, technical_signals.kdj_j,
+                technical_signals.kdj_golden_cross, technical_signals.kdj_death_cross,
+                technical_signals.kdj_overbought, technical_signals.kdj_oversold);
+        
+        // 根据历史波动特征调整预测
+        // 如果历史上很少有连续上涨/下跌，则限制连续同向预测的天数
+        if day > volatility_features.max_consecutive_up && 
+           predictions.iter().all(|p| p.predicted_change_percent > 0.0) && 
+           predicted_change_rate > 0.0 {
+            // 强制下跌调整
+            predicted_change_rate = -volatility_features.avg_down_change * (0.5 + rand::random::<f64>() * 0.5);
+            println!("📉 历史波动特征显示很少有超过{}天连续上涨，强制调整为下跌: {:.2}%", 
+                     volatility_features.max_consecutive_up, predicted_change_rate * 100.0);
+        } else if day > volatility_features.max_consecutive_down && 
+                  predictions.iter().all(|p| p.predicted_change_percent < 0.0) && 
+                  predicted_change_rate < 0.0 {
+            // 强制上涨调整
+            predicted_change_rate = volatility_features.avg_up_change * (0.5 + rand::random::<f64>() * 0.5);
+            println!("📈 历史波动特征显示很少有超过{}天连续下跌，强制调整为上涨: {:.2}%", 
+                     volatility_features.max_consecutive_down, predicted_change_rate * 100.0);
+        }
+        
+        // 调整预测幅度以匹配历史波动特征
+        if predicted_change_rate > 0.0 && predicted_change_rate > volatility_features.avg_up_change * 2.0 {
+            // 如果预测上涨幅度超过历史平均的2倍，适当缩小
+            predicted_change_rate = volatility_features.avg_up_change * (1.0 + rand::random::<f64>());
+            println!("⚖️ 调整过大上涨幅度以符合历史波动特征: {:.2}%", predicted_change_rate * 100.0);
+        } else if predicted_change_rate < 0.0 && predicted_change_rate.abs() > volatility_features.avg_down_change * 2.0 {
+            // 如果预测下跌幅度超过历史平均的2倍，适当缩小
+            predicted_change_rate = -volatility_features.avg_down_change * (1.0 + rand::random::<f64>());
+            println!("⚖️ 调整过大下跌幅度以符合历史波动特征: {:.2}%", predicted_change_rate * 100.0);
+        }
+        
+        // 新增：更新价格序列和技术指标，为下一天预测做准备
+        if day < request.prediction_days {
+            // 更新价格序列
+            prices.push(predicted_price);
+            
+            // 更新高低价序列（简化处理，使用预测价格±0.5%作为高低价）
+            highs.push(predicted_price * 1.005);
+            lows.push(predicted_price * 0.995);
+            
+            // 更新成交量序列（简化处理，使用最后一天成交量加随机波动）
+            if let Some(&last_volume) = volumes.last() {
+                // 随机波动±20%
+                let volume_change = 0.8 + rand::random::<f64>() * 0.4;
+                volumes.push((last_volume as f64 * volume_change) as i64);
+            }
+            
+            // 重新计算技术指标
+            technical_signals = analyze_technical_signals(&prices, &highs, &lows, &volumes);
+            
+            println!("   更新技术指标: RSI={:.2}, MACD={:.4}, KDJ_J={:.2}", 
+                    technical_signals.rsi, technical_signals.macd_histogram, technical_signals.kdj_j);
+        }
     }
     
-    Ok(predictions)
+    // 构建最新真实数据，直接使用从数据库获取的涨跌幅
+    let last_real_data = if !dates.is_empty() {
+        Some(LastRealData {
+            date: dates.last().unwrap().clone(),
+            price: current_price,
+            change_percent: current_change_percent,
+        })
+    } else {
+        None
+    };
+    
+    // 打印最后一条真实数据和第一条预测数据的对比
+    if !predictions.is_empty() {
+        print_last_real_vs_prediction(&dates, &prices, &technical_signals, &predictions[0], current_change_percent);
+    }
+    
+    // 修改返回值，包装预测结果和最新真实数据
+    Ok(PredictionResponse {
+        predictions,
+        last_real_data,
+    })
 }
 
 // 重新训练模型
@@ -2583,7 +3177,7 @@ fn calculate_direction_focused_accuracy(predictions: &[f64], actuals: &[f64]) ->
 }
 
 // 从数据库获取最近的市场数据
-async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, Vec<String>, Vec<f64>, Vec<i64>, Vec<f64>, Vec<f64>), String> {
+async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, f64, Vec<String>, Vec<f64>, Vec<i64>, Vec<f64>, Vec<f64>), String> {
     // 创建临时数据库连接
     use sqlx::sqlite::SqlitePoolOptions;
     use chrono::Local;
@@ -2640,10 +3234,204 @@ async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, Vec<S
     // 获取最新价格
     let current_price = prices.last().copied().unwrap_or(0.0);
     
+    // 计算最新的涨跌幅
+    let current_change_percent = if prices.len() >= 2 {
+        let previous_price = prices[prices.len() - 2];
+        if previous_price > 0.0 {
+            (current_price - previous_price) / previous_price * 100.0
+        } else {
+            0.0
+        }
+    } else {
+        // 如果没有足够的数据计算涨跌幅，则默认为0
+        0.0
+    };
+    
     println!("📊 获取到{}条历史数据用于预测，时间范围: {} 到 {}", 
              sorted_records.len(),
              sorted_records.first().map(|r| &r.date).unwrap_or(&"未知".to_string()),
              sorted_records.last().map(|r| &r.date).unwrap_or(&"未知".to_string()));
+    println!("📈 最新价格: {:.2}, 涨跌幅: {:.2}%", current_price, current_change_percent);
     
-    Ok((current_price, dates, prices, volumes, highs, lows))
+    Ok((current_price, current_change_percent, dates, prices, volumes, highs, lows))
+}
+
+// 打印最后一条真实数据和第一条预测数据的对比
+fn print_last_real_vs_prediction(
+    dates: &[String], 
+    prices: &[f64], 
+    technical_signals: &TechnicalSignals,
+    prediction: &Prediction,
+    last_change_percent: f64
+) {
+    if dates.is_empty() || prices.is_empty() {
+        println!("⚠️ 没有足够的历史数据进行对比");
+        return;
+    }
+
+    let last_date = dates.last().unwrap();
+    let last_price = prices.last().unwrap();
+
+    println!("\n📊 真实数据与预测对比:");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("📅 最后一条真实数据 ({}):", last_date);
+    println!("   价格: {:.2}, 涨跌幅: {:.2}%", last_price, last_change_percent);
+    println!("   MACD: DIF={:.4}, DEA={:.4}, HIST={:.4}, 金叉={}, 死叉={}", 
+             technical_signals.macd_dif, technical_signals.macd_dea, 
+             technical_signals.macd_histogram, 
+             technical_signals.macd_golden_cross, technical_signals.macd_death_cross);
+    println!("   KDJ: K={:.2}, D={:.2}, J={:.2}, 金叉={}, 死叉={}, 超买={}, 超卖={}", 
+             technical_signals.kdj_k, technical_signals.kdj_d, technical_signals.kdj_j,
+             technical_signals.kdj_golden_cross, technical_signals.kdj_death_cross,
+             technical_signals.kdj_overbought, technical_signals.kdj_oversold);
+    println!("   RSI: {:.2}, CCI: {:.2}", technical_signals.rsi, technical_signals.cci);
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("📈 第一天预测 ({}):", prediction.target_date);
+    println!("   价格: {:.2}, 涨跌幅: {:.2}%, 置信度: {:.2}%", 
+             prediction.predicted_price, prediction.predicted_change_percent, 
+             prediction.confidence * 100.0);
+    
+    if let Some(tech) = &prediction.technical_indicators {
+        println!("   MACD: DIF={:.4}, DEA={:.4}, HIST={:.4}, 金叉={}, 死叉={}", 
+                tech.macd_dif, tech.macd_dea, tech.macd_histogram, 
+                tech.macd_golden_cross, tech.macd_death_cross);
+        println!("   KDJ: K={:.2}, D={:.2}, J={:.2}, 金叉={}, 死叉={}, 超买={}, 超卖={}", 
+                tech.kdj_k, tech.kdj_d, tech.kdj_j,
+                tech.kdj_golden_cross, tech.kdj_death_cross,
+                tech.kdj_overbought, tech.kdj_oversold);
+        println!("   RSI: {:.2}, CCI: {:.2}", tech.rsi, tech.cci);
+    }
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+}
+
+// 新增：分析历史波动特征的结构体
+#[derive(Debug)]
+struct HistoricalVolatilityFeatures {
+    avg_daily_change: f64,         // 平均日涨跌幅(绝对值)
+    avg_up_change: f64,            // 平均上涨幅度
+    avg_down_change: f64,          // 平均下跌幅度
+    max_consecutive_up: usize,     // 最大连续上涨天数
+    max_consecutive_down: usize,   // 最大连续下跌天数
+    up_down_ratio: f64,            // 上涨/下跌天数比例
+    volatility_pattern: String,    // 波动模式描述
+}
+
+// 新增：分析历史波动特征的函数
+fn analyze_historical_volatility_pattern(prices: &[f64], days: usize) -> HistoricalVolatilityFeatures {
+    let window = days.min(prices.len() - 1);
+    if window < 5 {
+        return HistoricalVolatilityFeatures {
+            avg_daily_change: 0.01,
+            avg_up_change: 0.01,
+            avg_down_change: 0.01,
+            max_consecutive_up: 2,
+            max_consecutive_down: 2,
+            up_down_ratio: 1.0,
+            volatility_pattern: "数据不足".to_string(),
+        };
+    }
+    
+    // 计算日涨跌幅
+    let mut daily_changes = Vec::with_capacity(window);
+    for i in 1..=window {
+        let idx = prices.len() - i;
+        let change = (prices[idx] - prices[idx - 1]) / prices[idx - 1];
+        daily_changes.push(change);
+    }
+    
+    // 计算平均涨跌幅
+    let avg_daily_change = daily_changes.iter().map(|c| c.abs()).sum::<f64>() / daily_changes.len() as f64;
+    
+    // 区分上涨和下跌
+    let up_changes: Vec<f64> = daily_changes.iter().filter(|&&c| c > 0.0).cloned().collect();
+    let down_changes: Vec<f64> = daily_changes.iter().filter(|&&c| c < 0.0).cloned().collect();
+    
+    let avg_up_change = if !up_changes.is_empty() {
+        up_changes.iter().sum::<f64>() / up_changes.len() as f64
+    } else {
+        0.01
+    };
+    
+    let avg_down_change = if !down_changes.is_empty() {
+        down_changes.iter().sum::<f64>().abs() / down_changes.len() as f64
+    } else {
+        0.01
+    };
+    
+    // 计算连续上涨/下跌天数
+    let mut max_up = 0;
+    let mut max_down = 0;
+    let mut current_up = 0;
+    let mut current_down = 0;
+    
+    for &change in daily_changes.iter() {
+        if change > 0.0 {
+            current_up += 1;
+            current_down = 0;
+            max_up = max_up.max(current_up);
+        } else if change < 0.0 {
+            current_down += 1;
+            current_up = 0;
+            max_down = max_down.max(current_down);
+        } else {
+            // 持平时重置计数
+            current_up = 0;
+            current_down = 0;
+        }
+    }
+    
+    // 上涨/下跌天数比例
+    let up_days = daily_changes.iter().filter(|&&c| c > 0.0).count();
+    let down_days = daily_changes.iter().filter(|&&c| c < 0.0).count();
+    let up_down_ratio = if down_days > 0 {
+        up_days as f64 / down_days as f64
+    } else {
+        up_days as f64
+    };
+    
+    // 确定波动模式
+    let volatility_pattern = if avg_daily_change > 0.02 {
+        if max_up > 3 && max_down > 3 {
+            "大幅波动型".to_string()
+        } else if max_up > max_down {
+            "大幅上涨型".to_string()
+        } else {
+            "大幅下跌型".to_string()
+        }
+    } else if avg_daily_change > 0.01 {
+        if up_down_ratio > 1.5 {
+            "温和上涨型".to_string()
+        } else if up_down_ratio < 0.67 {
+            "温和下跌型".to_string()
+        } else {
+            "震荡型".to_string()
+        }
+    } else {
+        "低波动型".to_string()
+    };
+    
+    HistoricalVolatilityFeatures {
+        avg_daily_change,
+        avg_up_change,
+        avg_down_change,
+        max_consecutive_up: max_up,
+        max_consecutive_down: max_down,
+        up_down_ratio,
+        volatility_pattern,
+    }
+}
+
+// 新增：预测结果包装结构体，包含预测和最新真实数据
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredictionResponse {
+    pub predictions: Vec<Prediction>,
+    pub last_real_data: Option<LastRealData>,
+}
+
+// 新增：最新真实数据结构体
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LastRealData {
+    pub date: String,
+    pub price: f64,
+    pub change_percent: f64,
 }
