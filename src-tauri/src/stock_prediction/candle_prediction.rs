@@ -25,18 +25,39 @@ pub struct ModelConfig {
 }
 
 // 简化的模型创建函数
-fn create_model(_config: &ModelConfig, _device: &Device) -> Result<(VarMap, Box<dyn Module + Send + Sync>), candle_core::Error> {
+fn create_model(config: &ModelConfig, device: &Device) -> Result<(VarMap, Box<dyn Module + Send + Sync>), candle_core::Error> {
+    // 创建一个简单的线性回归模型
     let varmap = VarMap::new();
-    // 创建一个简单的模型占位符
-    struct DummyModel;
-    unsafe impl Send for DummyModel {}
-    unsafe impl Sync for DummyModel {}
-    impl Module for DummyModel {
-        fn forward(&self, xs: &Tensor) -> Result<Tensor, candle_core::Error> {
-            Ok(xs.clone())
+    
+    // 定义正确的输入和输出形状
+    let input_size = config.input_size;
+    let output_size = config.output_size;
+    
+    struct LinearRegression {
+        linear: candle_nn::Linear,
+    }
+    
+    impl LinearRegression {
+        fn new(in_size: usize, out_size: usize, vb: candle_nn::VarBuilder) -> Result<Self, candle_core::Error> {
+            let linear = candle_nn::linear(in_size, out_size, vb)?;
+            Ok(Self { linear })
         }
     }
-    let model: Box<dyn Module + Send + Sync> = Box::new(DummyModel);
+    
+    unsafe impl Send for LinearRegression {}
+    unsafe impl Sync for LinearRegression {}
+    
+    impl Module for LinearRegression {
+        fn forward(&self, xs: &Tensor) -> Result<Tensor, candle_core::Error> {
+            self.linear.forward(xs)
+        }
+    }
+    
+    let vb = candle_nn::VarBuilder::from_varmap(&varmap, candle_core::DType::F32, device);
+    let model = LinearRegression::new(input_size, output_size, vb)?;
+    
+    let model: Box<dyn Module + Send + Sync> = Box::new(model);
+    
     Ok((varmap, model))
 }
 
@@ -1367,7 +1388,23 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
                 .map_err(|e| format!("前向传播失败: {}", e))?;
             
             // 计算损失 (均方误差)
-            let loss = output.sub(&y_batch).map_err(|e| format!("计算损失失败: {}", e))?;
+            // 确保输出和目标张量的形状匹配
+            println!("输出形状: {:?}, 目标形状: {:?}", output.dims(), y_batch.dims());
+            
+            // 如果输出形状和目标形状不匹配，则进行调整
+            let reshaped_output = if output.dims() != y_batch.dims() {
+                if output.dim(0).unwrap() == y_batch.dim(0).unwrap() {
+                    // 如果批次大小相同但输出维度不同，尝试reshape
+                    output.reshape(&[output.dim(0).unwrap(), 1])
+                        .map_err(|e| format!("调整输出形状失败: {}", e))?
+                } else {
+                    return Err(format!("输出形状 {:?} 和目标形状 {:?} 不兼容", output.dims(), y_batch.dims()));
+                }
+            } else {
+                output
+            };
+            
+            let loss = reshaped_output.sub(&y_batch).map_err(|e| format!("计算损失失败: {}", e))?;
             let loss_squared = loss.sqr().map_err(|e| format!("计算平方失败: {}", e))?;
             let loss = loss_squared.mean_all().map_err(|e| format!("计算均值失败: {}", e))?;
             
@@ -1528,7 +1565,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         return Err("历史数据不足，无法进行预测，需要至少20天数据".to_string());
     }
     
-        // 计算特征向量
+    // 计算特征向量
     let mut features = Vec::new();
     let last_idx = prices.len() - 1;
     
@@ -1740,32 +1777,27 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     let output = model.forward(&input_tensor)
         .map_err(|e| format!("预测失败: {}", e))?;
     
-    // 获取预测结果(价格变化率)
-    // 更安全地处理输出张量，支持不同维度
+    // 如果输出是多维的，确保我们得到正确的值
+    println!("预测输出形状: {:?}", output.dims());
     let raw_change_rate = match output.dims() {
-        // 如果是标量 []
-        [] => {
-            output.to_scalar::<f32>().map_err(|e| format!("获取标量预测结果失败: {}", e))? as f64
+        // 如果是1维张量 [1] 或 [batch_size]
+        [_] => {
+            output.to_vec1::<f32>().map_err(|e| format!("获取预测结果失败: {}", e))?[0] as f64
         },
-        // 如果是 [1] 维度
-        [1] => {
-            let output_vec = output.to_vec1::<f32>().map_err(|e| format!("获取1维预测结果失败: {}", e))?;
-            output_vec[0] as f64
-        },
-        // 如果是 [1, 1] 维度
-        [1, 1] => {
-            let output_vec = output.to_vec2::<f32>().map_err(|e| format!("获取2维预测结果失败: {}", e))?;
-            output_vec[0][0] as f64
-        },
-        // 如果是其他维度，尝试获取第一个元素
-        _ => {
-            // 展平为1维数组并获取第一个值
-            let output_vec = output.flatten_all().map_err(|e| format!("展平张量失败: {}", e))?
-                .to_vec1::<f32>().map_err(|e| format!("转换为向量失败: {}", e))?;
-            if output_vec.is_empty() {
-                return Err("预测输出为空".to_string());
+        // 如果是2维张量 [batch_size, 1] 或 [batch_size, features]
+        [_, n] => {
+            if *n == 1 { // 修复: 解引用 n
+                // 如果是 [batch_size, 1]，直接获取第一个元素
+                output.to_vec2::<f32>().map_err(|e| format!("获取预测结果失败: {}", e))?[0][0] as f64
+            } else {
+                // 如果是 [batch_size, features]，获取第一行第一列元素
+                println!("警告: 预测输出维度与预期不符，尝试获取第一个值");
+                output.to_vec2::<f32>().map_err(|e| format!("获取预测结果失败: {}", e))?[0][0] as f64
             }
-            output_vec[0] as f64
+        },
+        // 其他维度，返回错误
+        _ => {
+            return Err(format!("预测输出维度不支持: {:?}", output.dims()));
         }
     };
     
@@ -1782,6 +1814,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     println!("📈 技术信号: {:?}, 信号强度: {:.2}, 买入信号: {}, 卖出信号: {}", 
              technical_signals.signal, technical_signals.signal_strength, 
              technical_signals.buy_signals, technical_signals.sell_signals);
+    println!("📊 原始模型预测变化率: {:.6}", raw_change_rate);
     
     // 生成预测
     let mut predictions: Vec<Prediction> = Vec::new();
@@ -1943,72 +1976,6 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     }
     
     Ok(predictions)
-}
-
-// 从数据库获取最近的市场数据
-async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, Vec<String>, Vec<f64>, Vec<i64>, Vec<f64>, Vec<f64>), String> {
-    // 创建临时数据库连接
-    use sqlx::sqlite::SqlitePoolOptions;
-    use chrono::Local;
-    
-    // 计算开始日期（大幅增加数据获取范围，确保有足够的历史数据进行技术分析）
-    let end_date = Local::now().naive_local().date();
-    let buffer_days = 60; // 增加缓冲期到60天，应对节假日
-    // 至少获取1年的数据，或者用户指定天数+缓冲期，取更大值
-    let total_days = std::cmp::max(365, days + buffer_days); 
-    let start_date = end_date - chrono::Duration::days(total_days as i64);
-    
-    // 使用动态数据库路径查找
-    let db_path = find_database_path()
-        .ok_or_else(|| "找不到数据库文件".to_string())?;
-    
-    let connection_string = format!("sqlite://{}", db_path.display());
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect(&connection_string)
-        .await
-        .map_err(|e| format!("连接数据库失败: {}", e))?;
-    
-    // 修改查询，获取更多历史数据但保持合理的限制
-    let limit = std::cmp::max(300, days * 2); // 至少300条记录，或者请求天数的2倍
-    let records = sqlx::query_as::<_, HistoricalDataType>(
-        r#"SELECT * FROM historical_data 
-           WHERE symbol = ? AND date BETWEEN ? AND ?
-           ORDER BY date DESC
-           LIMIT ?"#
-    )
-    .bind(symbol)
-    .bind(start_date.format("%Y-%m-%d").to_string())
-    .bind(end_date.format("%Y-%m-%d").to_string())
-    .bind(limit as i32)
-    .fetch_all(&pool)
-    .await
-    .map_err(|e| format!("查询历史数据失败: {}", e))?;
-    
-    if records.is_empty() {
-        return Err(format!("未找到股票代码 {} 的历史数据", symbol));
-    }
-    
-    // 反向排序以获取时间顺序（从旧到新）
-    let mut sorted_records = records;
-    sorted_records.reverse();
-    
-    // 提取数据
-    let dates: Vec<String> = sorted_records.iter().map(|r| r.date.clone()).collect();
-    let prices: Vec<f64> = sorted_records.iter().map(|r| r.close).collect();
-    let volumes: Vec<i64> = sorted_records.iter().map(|r| r.volume).collect();
-    let highs: Vec<f64> = sorted_records.iter().map(|r| r.high).collect();
-    let lows: Vec<f64> = sorted_records.iter().map(|r| r.low).collect();
-    
-    // 获取最新价格
-    let current_price = prices.last().copied().unwrap_or(0.0);
-    
-    println!("📊 获取到{}条历史数据用于预测，时间范围: {} 到 {}", 
-             sorted_records.len(),
-             sorted_records.first().map(|r| &r.date).unwrap_or(&"未知".to_string()),
-             sorted_records.last().map(|r| &r.date).unwrap_or(&"未知".to_string()));
-    
-    Ok((current_price, dates, prices, volumes, highs, lows))
 }
 
 // 重新训练模型
@@ -2296,9 +2263,40 @@ pub async fn evaluate_candle_model(model_id: String) -> std::result::Result<Eval
     let y_pred = model.forward(&x_test)
         .map_err(|e| format!("预测失败: {}", e))?;
     
+    // 确保预测输出的形状与目标需求一致
+    println!("预测输出形状: {:?}, 测试数据大小: {}", y_pred.dims(), test_size);
+    let y_pred_adjusted = if y_pred.dims().len() == 2 && y_pred.dims()[1] != 1 {
+        // 如果输出是 [test_size, N] 形状（N > 1），取第一列作为预测结果
+        println!("调整预测输出，从多列变为单列");
+        y_pred.narrow(1, 0, 1).map_err(|e| format!("调整预测形状失败: {}", e))?
+    } else if y_pred.dims().len() == 1 {
+        // 如果输出是 [test_size] 形状，重塑为 [test_size, 1]
+        println!("调整预测输出，从1维变为2维");
+        y_pred.reshape(&[test_size, 1]).map_err(|e| format!("调整预测形状失败: {}", e))?
+    } else {
+        // 其他情况下保持原样
+        y_pred
+    };
+    
     // 提取预测结果
-    let y_pred_vec = y_pred.flatten(0, 1).map_err(|e| format!("展平预测结果失败: {}", e))?
-        .to_vec1::<f32>().map_err(|e| format!("转换预测结果失败: {}", e))?;
+    let y_pred_vec = match y_pred_adjusted.dims().len() {
+        1 => {
+            // 如果是1维张量
+            y_pred_adjusted.to_vec1::<f32>().map_err(|e| format!("转换1维预测结果失败: {}", e))?
+                .into_iter().map(|x| x as f64).collect::<Vec<f64>>()
+        },
+        2 => {
+            // 如果是2维张量 [test_size, 1]
+            let vec2d = y_pred_adjusted.to_vec2::<f32>().map_err(|e| format!("转换2维预测结果失败: {}", e))?;
+            vec2d.into_iter().map(|row| row[0] as f64).collect::<Vec<f64>>()
+        },
+        _ => {
+            // 如果是其他维度，尝试展平
+            let flat = y_pred_adjusted.flatten_all().map_err(|e| format!("展平预测结果失败: {}", e))?;
+            flat.to_vec1::<f32>().map_err(|e| format!("转换展平预测结果失败: {}", e))?
+                .into_iter().map(|x| x as f64).collect::<Vec<f64>>()
+        }
+    };
     
     // 计算评估指标
     let mut correct = 0;
@@ -2372,7 +2370,7 @@ pub async fn evaluate_candle_model(model_id: String) -> std::result::Result<Eval
     for i in 0..max_examples {
         prediction_examples.push(PredictionExample {
             actual: targets[i],
-            predicted: y_pred_vec[i] as f64,
+            predicted: y_pred_vec[i],
             features: features_matrix[i].clone(),
         });
     }
@@ -2582,4 +2580,70 @@ fn calculate_direction_focused_accuracy(predictions: &[f64], actuals: &[f64]) ->
     let combined_accuracy = direction_accuracy * 0.7 + price_accuracy * 0.3;
     
     (direction_accuracy, combined_accuracy.min(0.85)) // 限制最高准确率保持现实性
+}
+
+// 从数据库获取最近的市场数据
+async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, Vec<String>, Vec<f64>, Vec<i64>, Vec<f64>, Vec<f64>), String> {
+    // 创建临时数据库连接
+    use sqlx::sqlite::SqlitePoolOptions;
+    use chrono::Local;
+    
+    // 计算开始日期（大幅增加数据获取范围，确保有足够的历史数据进行技术分析）
+    let end_date = Local::now().naive_local().date();
+    let buffer_days = 60; // 增加缓冲期到60天，应对节假日
+    // 至少获取1年的数据，或者用户指定天数+缓冲期，取更大值
+    let total_days = std::cmp::max(365, days + buffer_days); 
+    let start_date = end_date - chrono::Duration::days(total_days as i64);
+    
+    // 使用动态数据库路径查找
+    let db_path = find_database_path()
+        .ok_or_else(|| "找不到数据库文件".to_string())?;
+    
+    let connection_string = format!("sqlite://{}", db_path.display());
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect(&connection_string)
+        .await
+        .map_err(|e| format!("连接数据库失败: {}", e))?;
+    
+    // 修改查询，获取更多历史数据但保持合理的限制
+    let limit = std::cmp::max(300, days * 2); // 至少300条记录，或者请求天数的2倍
+    let records = sqlx::query_as::<_, HistoricalDataType>(
+        r#"SELECT * FROM historical_data 
+           WHERE symbol = ? AND date BETWEEN ? AND ?
+           ORDER BY date DESC
+           LIMIT ?"#
+    )
+    .bind(symbol)
+    .bind(start_date.format("%Y-%m-%d").to_string())
+    .bind(end_date.format("%Y-%m-%d").to_string())
+    .bind(limit as i32)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| format!("查询历史数据失败: {}", e))?;
+    
+    if records.is_empty() {
+        return Err(format!("未找到股票代码 {} 的历史数据", symbol));
+    }
+    
+    // 反向排序以获取时间顺序（从旧到新）
+    let mut sorted_records = records;
+    sorted_records.reverse();
+    
+    // 提取数据
+    let dates: Vec<String> = sorted_records.iter().map(|r| r.date.clone()).collect();
+    let prices: Vec<f64> = sorted_records.iter().map(|r| r.close).collect();
+    let volumes: Vec<i64> = sorted_records.iter().map(|r| r.volume).collect();
+    let highs: Vec<f64> = sorted_records.iter().map(|r| r.high).collect();
+    let lows: Vec<f64> = sorted_records.iter().map(|r| r.low).collect();
+    
+    // 获取最新价格
+    let current_price = prices.last().copied().unwrap_or(0.0);
+    
+    println!("📊 获取到{}条历史数据用于预测，时间范围: {} 到 {}", 
+             sorted_records.len(),
+             sorted_records.first().map(|r| &r.date).unwrap_or(&"未知".to_string()),
+             sorted_records.last().map(|r| &r.date).unwrap_or(&"未知".to_string()));
+    
+    Ok((current_price, dates, prices, volumes, highs, lows))
 }

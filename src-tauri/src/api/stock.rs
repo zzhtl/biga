@@ -121,7 +121,7 @@ fn parse_historical_data(
                 high: item.high,
                 low: item.low,
                 close: item.close,
-                volume: item.volume,
+                volume: item.volume as i64,
                 amount: item.amount,
                 amplitude,
                 turnover_rate,
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn test_parse_historical_data_item() {
-        let json_data = r#"[{"t":"2002-10-24 00:00:00","o":12.05,"h":12.46,"l":11.88,"c":12.09,"v":362898,"a":440587759.0,"pc":5.4,"sf":0}]"#;
+        let json_data = r#"[{"t":"2002-10-24 00:00:00","o":12.05,"h":12.46,"l":11.88,"c":12.09,"v":362898.0,"a":440587759.0,"pc":5.4,"sf":0}]"#;
         
         let historical_items: Result<Vec<HistoricalDataItem>, _> = serde_json::from_str(json_data);
         assert!(historical_items.is_ok(), "JSON parsing should succeed");
@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(item.high, 12.46);
         assert_eq!(item.low, 11.88);
         assert_eq!(item.close, 12.09);
-        assert_eq!(item.volume, 362898);
+        assert_eq!(item.volume, 362898.0);
         assert_eq!(item.amount, 440587759.0);
         assert_eq!(item.pre_close, 5.4);
         

@@ -1,10 +1,10 @@
-mod api;
+pub mod api;
 mod commands;
 mod constants;
 mod csv;
 mod db;
-mod error;
-mod stock_prediction;
+pub mod error;
+pub mod stock_prediction;
 
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use std::path::Path;

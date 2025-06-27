@@ -67,7 +67,7 @@ pub struct HistoricalDataItem {
     #[serde(rename = "c")]
     pub close: f64, // 收盘价（元）
     #[serde(rename = "v")]
-    pub volume: i64, // 成交量（手）
+    pub volume: f64, // 成交量（手）
     #[serde(rename = "a")]
     pub amount: f64, // 成交额（元）
     #[serde(rename = "pc")]
