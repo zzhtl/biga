@@ -88,6 +88,18 @@ pub struct Prediction {
     pub predicted_price: f64,
     pub predicted_change_percent: f64,
     pub confidence: f64,
+    pub trading_signal: Option<String>,
+    pub signal_strength: Option<f64>,
+    pub technical_indicators: Option<TechnicalIndicatorValues>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TechnicalIndicatorValues {
+    pub rsi: f64,
+    pub macd_histogram: f64,
+    pub kdj_j: f64,
+    pub cci: f64,
+    pub obv_trend: f64, // OBV相对于均值的比例
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +336,9 @@ async fn prepare_stock_data(
     let mut dates = Vec::new();
     let mut prices = Vec::new();
     let mut volumes = Vec::new();
+    let mut highs = Vec::new();
+    let mut lows = Vec::new();
+    let mut opens = Vec::new();
     let mut features_matrix = Vec::new();
     
     // 按日期排序（从旧到新）
@@ -335,6 +350,9 @@ async fn prepare_stock_data(
         dates.push(data.date.clone());
         prices.push(data.close);
         volumes.push(data.volume);
+        highs.push(data.high);
+        lows.push(data.low);
+        opens.push(data.open);
     }
     
     // 数据平滑处理：移除异常值
@@ -362,7 +380,9 @@ async fn prepare_stock_data(
                 &prices, 
                 &volumes, 
                 i, 
-                lookback_window
+                lookback_window,
+                Some(&highs),
+                Some(&lows)
             )?;
             feature_vector.push(feature_value);
         }
@@ -491,10 +511,12 @@ fn get_feature_required_days(feature_name: &str) -> usize {
         "close" | "volume" | "change_percent" => 1,
         "ma5" => 5,
         "ma10" => 10,
-        "ma20" | "bollinger" => 20,
-        "rsi" | "stochastic_k" | "stochastic_d" => 14,
-        "macd" => 26,
+        "ma20" | "bollinger" | "cci" => 20,
+        "rsi" | "stochastic_k" | "stochastic_d" | "dmi_plus" | "dmi_minus" | "adx" => 14,
+        "macd" | "macd_dif" | "macd_dea" | "macd_histogram" => 26,
         "momentum" => 10,
+        "kdj_k" | "kdj_d" | "kdj_j" => 9,
+        "obv" => 2,
         _ => 1,
     }
 }
@@ -506,6 +528,8 @@ fn calculate_feature_value(
     volumes: &[i64],
     index: usize,
     _lookback_window: usize,
+    highs: Option<&[f64]>,
+    lows: Option<&[f64]>,
 ) -> Result<f64, candle_core::Error> {
     match feature_name {
         "close" => {
@@ -597,6 +621,84 @@ fn calculate_feature_value(
             if index >= 10 {
                 let momentum = prices[index] / prices[index-10] - 1.0;
                 Ok(momentum)
+            } else {
+                Ok(0.0)
+            }
+        },
+        "kdj_k" | "kdj_d" | "kdj_j" => {
+            // KDJ指标
+            if let (Some(highs), Some(lows)) = (highs, lows) {
+                if index >= 9 && highs.len() > index && lows.len() > index {
+                    let start = index.saturating_sub(8);
+                    let (k, d, j) = calculate_kdj(&highs[start..=index], &lows[start..=index], &prices[start..=index], 9);
+                    match feature_name {
+                        "kdj_k" => Ok(k / 100.0), // 归一化到0-1
+                        "kdj_d" => Ok(d / 100.0),
+                        "kdj_j" => Ok(j / 100.0),
+                        _ => Ok(0.0)
+                    }
+                } else {
+                    Ok(0.5) // 默认中性值
+                }
+            } else {
+                Ok(0.5)
+            }
+        },
+        "cci" => {
+            // CCI指标
+            if let (Some(highs), Some(lows)) = (highs, lows) {
+                if index >= 20 && highs.len() > index && lows.len() > index {
+                    let start = index.saturating_sub(19);
+                    let cci = calculate_cci(&highs[start..=index], &lows[start..=index], &prices[start..=index], 20);
+                    Ok(cci / 200.0) // 归一化，CCI通常在-200到200之间
+                } else {
+                    Ok(0.0)
+                }
+            } else {
+                Ok(0.0)
+            }
+        },
+        "obv" => {
+            // OBV指标
+            if index >= 1 {
+                let obv = calculate_obv(&prices[0..=index], &volumes[0..=index]);
+                // 归一化OBV（相对于平均成交量）
+                let avg_volume = volumes[0..=index].iter().sum::<i64>() as f64 / (index + 1) as f64;
+                Ok(obv / (avg_volume * (index + 1) as f64))
+            } else {
+                Ok(0.0)
+            }
+        },
+        "macd_dif" | "macd_dea" | "macd_histogram" => {
+            // 完整MACD指标
+            if index >= 26 {
+                let (dif, dea, histogram) = calculate_macd_full(&prices[0..=index]);
+                let normalized = match feature_name {
+                    "macd_dif" => dif / prices[index],
+                    "macd_dea" => dea / prices[index],
+                    "macd_histogram" => histogram / prices[index],
+                    _ => 0.0
+                };
+                Ok(normalized)
+            } else {
+                Ok(0.0)
+            }
+        },
+        "dmi_plus" | "dmi_minus" | "adx" => {
+            // DMI指标
+            if let (Some(highs), Some(lows)) = (highs, lows) {
+                if index >= 14 && highs.len() > index && lows.len() > index {
+                    let start = index.saturating_sub(13);
+                    let (di_plus, di_minus, adx, _) = calculate_dmi(&highs[start..=index], &lows[start..=index], &prices[start..=index], 14);
+                    match feature_name {
+                        "dmi_plus" => Ok(di_plus / 100.0),
+                        "dmi_minus" => Ok(di_minus / 100.0),
+                        "adx" => Ok(adx / 100.0),
+                        _ => Ok(0.0)
+                    }
+                } else {
+                    Ok(0.0)
+                }
             } else {
                 Ok(0.0)
             }
@@ -786,6 +888,431 @@ fn calculate_ema(data: &[f64], period: usize) -> f64 {
     }
     
     ema
+}
+
+// 🎯 新增：计算完整的MACD指标（包括DIF、DEA、MACD柱）
+fn calculate_macd_full(prices: &[f64]) -> (f64, f64, f64) {
+    if prices.len() < 26 {
+        return (0.0, 0.0, 0.0);
+    }
+    
+    // 计算EMA12和EMA26
+    let ema12 = calculate_ema(prices, 12);
+    let ema26 = calculate_ema(prices, 26);
+    
+    // DIF = EMA12 - EMA26
+    let dif = ema12 - ema26;
+    
+    // 计算最近9天的DIF值用于计算DEA
+    let mut dif_values = Vec::new();
+    for i in (prices.len().saturating_sub(9))..prices.len() {
+        if i >= 26 {
+            let sub_prices = &prices[0..=i];
+            let sub_ema12 = calculate_ema(sub_prices, 12);
+            let sub_ema26 = calculate_ema(sub_prices, 26);
+            dif_values.push(sub_ema12 - sub_ema26);
+        }
+    }
+    
+    // DEA = EMA(DIF, 9)
+    let dea = if dif_values.len() >= 9 {
+        calculate_ema(&dif_values, 9)
+    } else {
+        dif // 如果数据不足，使用DIF作为DEA
+    };
+    
+    // MACD柱 = 2 * (DIF - DEA)
+    let macd = 2.0 * (dif - dea);
+    
+    (dif, dea, macd)
+}
+
+// 🎯 新增：计算KDJ指标
+fn calculate_kdj(highs: &[f64], lows: &[f64], closes: &[f64], n: usize) -> (f64, f64, f64) {
+    if highs.len() < n || lows.len() < n || closes.len() < n {
+        return (50.0, 50.0, 50.0);
+    }
+    
+    let len = highs.len();
+    let start = len.saturating_sub(n);
+    
+    // 计算N日内最高价和最低价
+    let highest = highs[start..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let lowest = lows[start..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    
+    if highest == lowest {
+        return (50.0, 50.0, 50.0);
+    }
+    
+    // 计算RSV
+    let rsv = (closes[len - 1] - lowest) / (highest - lowest) * 100.0;
+    
+    // 简化计算：使用最近3天的平均值模拟K值的平滑
+    let mut k_values = vec![rsv];
+    for i in 1..3 {
+        if len > i {
+            let idx = len - 1 - i;
+            if idx >= start {
+                let h = highs[start..=idx].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                let l = lows[start..=idx].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                if h > l {
+                    k_values.push((closes[idx] - l) / (h - l) * 100.0);
+                }
+            }
+        }
+    }
+    
+    let k = k_values.iter().sum::<f64>() / k_values.len() as f64;
+    
+    // D值是K值的3日移动平均
+    let d = k * 0.667 + 50.0 * 0.333; // 简化计算
+    
+    // J = 3K - 2D
+    let j = 3.0 * k - 2.0 * d;
+    
+    (k, d, j)
+}
+
+// 🎯 新增：计算OBV（能量潮）指标
+fn calculate_obv(prices: &[f64], volumes: &[i64]) -> f64 {
+    if prices.len() < 2 || volumes.len() < 2 {
+        return 0.0;
+    }
+    
+    let mut obv = 0.0;
+    for i in 1..prices.len().min(volumes.len()) {
+        if prices[i] > prices[i - 1] {
+            obv += volumes[i] as f64;
+        } else if prices[i] < prices[i - 1] {
+            obv -= volumes[i] as f64;
+        }
+        // 价格不变时，OBV保持不变
+    }
+    
+    obv
+}
+
+// 🎯 新增：计算CCI（商品通道指数）
+fn calculate_cci(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> f64 {
+    if highs.len() < period || lows.len() < period || closes.len() < period {
+        return 0.0;
+    }
+    
+    let start = highs.len().saturating_sub(period);
+    let mut tp_values = Vec::new(); // Typical Price
+    
+    for i in start..highs.len() {
+        let tp = (highs[i] + lows[i] + closes[i]) / 3.0;
+        tp_values.push(tp);
+    }
+    
+    // 计算移动平均
+    let ma = tp_values.iter().sum::<f64>() / tp_values.len() as f64;
+    
+    // 计算平均偏差
+    let md = tp_values.iter()
+        .map(|&tp| (tp - ma).abs())
+        .sum::<f64>() / tp_values.len() as f64;
+    
+    if md == 0.0 {
+        return 0.0;
+    }
+    
+    // CCI = (TP - MA) / (0.015 * MD)
+    let current_tp = (highs.last().unwrap() + lows.last().unwrap() + closes.last().unwrap()) / 3.0;
+    (current_tp - ma) / (0.015 * md)
+}
+
+// 🎯 新增：计算DMI（动向指标）
+fn calculate_dmi(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> (f64, f64, f64, f64) {
+    if highs.len() < period + 1 || lows.len() < period + 1 || closes.len() < period + 1 {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    
+    let mut tr_values = Vec::new();
+    let mut dm_plus_values = Vec::new();
+    let mut dm_minus_values = Vec::new();
+    
+    // 计算TR、+DM、-DM
+    for i in 1..highs.len() {
+        // True Range
+        let h_l = highs[i] - lows[i];
+        let h_pc = (highs[i] - closes[i - 1]).abs();
+        let l_pc = (lows[i] - closes[i - 1]).abs();
+        let tr = h_l.max(h_pc).max(l_pc);
+        tr_values.push(tr);
+        
+        // Directional Movement
+        let up_move = highs[i] - highs[i - 1];
+        let down_move = lows[i - 1] - lows[i];
+        
+        let dm_plus = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
+        let dm_minus = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
+        
+        dm_plus_values.push(dm_plus);
+        dm_minus_values.push(dm_minus);
+    }
+    
+    if tr_values.len() < period {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    
+    // 计算平滑后的值（使用简单移动平均代替Wilder's平滑）
+    let start = tr_values.len().saturating_sub(period);
+    let atr = tr_values[start..].iter().sum::<f64>() / period as f64;
+    let adm_plus = dm_plus_values[start..].iter().sum::<f64>() / period as f64;
+    let adm_minus = dm_minus_values[start..].iter().sum::<f64>() / period as f64;
+    
+    if atr == 0.0 {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    
+    // 计算方向指标
+    let di_plus = (adm_plus / atr) * 100.0;
+    let di_minus = (adm_minus / atr) * 100.0;
+    
+    // 计算ADX
+    let dx = if di_plus + di_minus == 0.0 {
+        0.0
+    } else {
+        ((di_plus - di_minus).abs() / (di_plus + di_minus)) * 100.0
+    };
+    
+    // 简化的ADX计算（应该是DX的平滑值）
+    let adx = dx;
+    
+    (di_plus, di_minus, adx, dx)
+}
+
+// 🎯 新增：计算SAR（抛物线停损转向）指标
+fn calculate_sar(highs: &[f64], lows: &[f64], af_step: f64, af_max: f64) -> Vec<f64> {
+    if highs.len() < 2 || lows.len() < 2 {
+        return vec![0.0; highs.len()];
+    }
+    
+    let mut sar_values = Vec::new();
+    let mut is_uptrend = true;
+    let mut af = af_step;
+    let mut ep = highs[0]; // 极值点
+    let mut sar = lows[0];
+    
+    sar_values.push(sar);
+    
+    for i in 1..highs.len() {
+        // 计算新的SAR
+        let new_sar = sar + af * (ep - sar);
+        
+        if is_uptrend {
+            // 上升趋势
+            if lows[i] <= new_sar {
+                // 趋势反转
+                is_uptrend = false;
+                sar = ep;
+                ep = lows[i];
+                af = af_step;
+            } else {
+                sar = new_sar;
+                if highs[i] > ep {
+                    ep = highs[i];
+                    af = (af + af_step).min(af_max);
+                }
+            }
+        } else {
+            // 下降趋势
+            if highs[i] >= new_sar {
+                // 趋势反转
+                is_uptrend = true;
+                sar = ep;
+                ep = highs[i];
+                af = af_step;
+            } else {
+                sar = new_sar;
+                if lows[i] < ep {
+                    ep = lows[i];
+                    af = (af + af_step).min(af_max);
+                }
+            }
+        }
+        
+        sar_values.push(sar);
+    }
+    
+    sar_values
+}
+
+// 🎯 新增：综合技术指标分析函数
+fn analyze_technical_signals(
+    prices: &[f64], 
+    highs: &[f64], 
+    lows: &[f64], 
+    volumes: &[i64]
+) -> TechnicalSignals {
+    let len = prices.len();
+    
+    // 计算各种技术指标
+    let (macd_dif, macd_dea, macd_histogram) = if len >= 26 {
+        calculate_macd_full(prices)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+    
+    let (kdj_k, kdj_d, kdj_j) = if len >= 14 && highs.len() >= 14 && lows.len() >= 14 {
+        calculate_kdj(highs, lows, prices, 9)
+    } else {
+        (50.0, 50.0, 50.0)
+    };
+    
+    let rsi = if len >= 14 {
+        calculate_rsi(&prices[len.saturating_sub(14)..])
+    } else {
+        50.0
+    };
+    
+    let cci = if len >= 20 && highs.len() >= 20 && lows.len() >= 20 {
+        calculate_cci(highs, lows, prices, 20)
+    } else {
+        0.0
+    };
+    
+    let obv = calculate_obv(prices, volumes);
+    let obv_ma = if volumes.len() >= 10 {
+        let recent_obv_values: Vec<f64> = (0..10).map(|i| {
+            let end = volumes.len() - i;
+            calculate_obv(&prices[0..end], &volumes[0..end])
+        }).collect();
+        recent_obv_values.iter().sum::<f64>() / recent_obv_values.len() as f64
+    } else {
+        obv
+    };
+    
+         // 🎯 生成买卖信号
+    let mut buy_signals = 0;
+    let mut sell_signals = 0;
+    let mut signal_strength: f64 = 0.0;
+    
+    // MACD信号
+    if macd_dif > macd_dea && macd_histogram > 0.0 {
+        buy_signals += 1;
+        signal_strength += 0.15;
+    } else if macd_dif < macd_dea && macd_histogram < 0.0 {
+        sell_signals += 1;
+        signal_strength -= 0.15;
+    }
+    
+    // KDJ信号
+    if kdj_j < 20.0 || (kdj_k < 30.0 && kdj_d < 30.0) {
+        buy_signals += 1;
+        signal_strength += 0.2;
+    } else if kdj_j > 80.0 || (kdj_k > 70.0 && kdj_d > 70.0) {
+        sell_signals += 1;
+        signal_strength -= 0.2;
+    }
+    
+    // RSI信号
+    if rsi < 30.0 {
+        buy_signals += 1;
+        signal_strength += 0.15;
+    } else if rsi > 70.0 {
+        sell_signals += 1;
+        signal_strength -= 0.15;
+    }
+    
+    // CCI信号
+    if cci < -100.0 {
+        buy_signals += 1;
+        signal_strength += 0.1;
+    } else if cci > 100.0 {
+        sell_signals += 1;
+        signal_strength -= 0.1;
+    }
+    
+    // OBV信号
+    if obv > obv_ma {
+        buy_signals += 1;
+        signal_strength += 0.1;
+    } else if obv < obv_ma {
+        sell_signals += 1;
+        signal_strength -= 0.1;
+    }
+    
+    // 价格突破信号
+    if len >= 20 {
+        let ma20 = prices[len-20..].iter().sum::<f64>() / 20.0;
+        if prices[len-1] > ma20 * 1.02 {
+            buy_signals += 1;
+            signal_strength += 0.1;
+        } else if prices[len-1] < ma20 * 0.98 {
+            sell_signals += 1;
+            signal_strength -= 0.1;
+        }
+    }
+    
+    // 成交量信号
+    if volumes.len() >= 5 {
+        let vol_ma5 = volumes[volumes.len()-5..].iter().sum::<i64>() as f64 / 5.0;
+        let current_vol = *volumes.last().unwrap() as f64;
+        if current_vol > vol_ma5 * 1.5 && prices[len-1] > prices[len-2] {
+            buy_signals += 1;
+            signal_strength += 0.1;
+        }
+    }
+    
+    // 计算综合信号
+    let signal = if buy_signals > sell_signals + 2 {
+        TradingSignal::StrongBuy
+    } else if buy_signals > sell_signals {
+        TradingSignal::Buy
+    } else if sell_signals > buy_signals + 2 {
+        TradingSignal::StrongSell
+    } else if sell_signals > buy_signals {
+        TradingSignal::Sell
+    } else {
+        TradingSignal::Hold
+    };
+    
+    TechnicalSignals {
+        macd_dif,
+        macd_dea,
+        macd_histogram,
+        kdj_k,
+        kdj_d,
+        kdj_j,
+        rsi,
+        cci,
+        obv,
+        signal,
+                 signal_strength: signal_strength.max(-1.0).min(1.0),
+        buy_signals,
+        sell_signals,
+    }
+}
+
+// 🎯 新增：技术信号结构体
+#[derive(Debug, Clone)]
+struct TechnicalSignals {
+    pub macd_dif: f64,
+    pub macd_dea: f64,
+    pub macd_histogram: f64,
+    pub kdj_k: f64,
+    pub kdj_d: f64,
+    pub kdj_j: f64,
+    pub rsi: f64,
+    pub cci: f64,
+    pub obv: f64,
+    pub signal: TradingSignal,
+    pub signal_strength: f64,
+    pub buy_signals: i32,
+    pub sell_signals: i32,
+}
+
+// 🎯 新增：交易信号枚举
+#[derive(Debug, Clone, PartialEq)]
+enum TradingSignal {
+    StrongBuy,
+    Buy,
+    Hold,
+    Sell,
+    StrongSell,
 }
 
 // 训练模型函数
@@ -994,7 +1521,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     varmap.load(&model_path).map_err(|e| format!("模型加载失败: {}", e))?;
     
     // 获取最近的真实市场数据用于预测
-    let (current_price, dates, prices, volumes) = get_recent_market_data(&request.stock_code, 60).await
+    let (current_price, dates, prices, volumes, highs, lows) = get_recent_market_data(&request.stock_code, 60).await
         .map_err(|e| format!("获取市场数据失败: {}", e))?;
     
     if prices.len() < 20 {
@@ -1247,8 +1774,14 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     let recent_trend = calculate_recent_trend(&prices);
     let support_resistance = calculate_support_resistance(&prices, current_price);
     
+    // 🎯 使用综合技术分析
+    let technical_signals = analyze_technical_signals(&prices, &highs, &lows, &volumes);
+    
     println!("📊 历史波动率: {:.4}, 近期趋势: {:.4}, 支撑阻力: {:.4}", 
              historical_volatility, recent_trend, support_resistance);
+    println!("📈 技术信号: {:?}, 信号强度: {:.2}, 买入信号: {}, 卖出信号: {}", 
+             technical_signals.signal, technical_signals.signal_strength, 
+             technical_signals.buy_signals, technical_signals.sell_signals);
     
     // 生成预测
     let mut predictions: Vec<Prediction> = Vec::new();
@@ -1267,7 +1800,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         }
         let date_str = target_date.format("%Y-%m-%d").to_string();
         
-        // 🎯 改进的预测策略：更真实的涨跌预测
+        // 🎯 改进的预测策略：结合技术分析的涨跌预测
         
         // 1. 基础模型预测（标准化处理）
         let base_model_prediction = raw_change_rate.tanh() * 0.02; // 限制在±2%范围内
@@ -1279,27 +1812,41 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         let trend_decay = 0.9_f64.powi(day as i32);
         let trend_factor = recent_trend * trend_decay;
         
-        // 4. 随机市场噪音（模拟真实市场的不确定性）
-        let market_noise = (rand::random::<f64>() - 0.5) * volatility_factor * 1.5;
+        // 4. 技术信号影响（A股特色：技术分析权重较高）
+        let technical_impact = technical_signals.signal_strength * 0.03 * (0.95_f64.powi(day as i32));
         
-        // 5. 均值回归效应（价格偏离均值时的回归倾向）
+        // 5. 随机市场噪音（模拟真实市场的不确定性，考虑A股波动性）
+        let market_noise = (rand::random::<f64>() - 0.5) * volatility_factor * 1.2;
+        
+        // 6. 均值回归效应（价格偏离均值时的回归倾向）
         let mean_reversion = if prices.len() >= 20 {
             let ma20 = prices[prices.len()-20..].iter().sum::<f64>() / 20.0;
             let deviation = (last_price - ma20) / ma20;
-            -deviation * 0.3 * (1.0 / day as f64) // 偏离越大，回归力越强
+            -deviation * 0.25 * (1.0 / day as f64) // 偏离越大，回归力越强
         } else {
             0.0
         };
         
-        // 6. 支撑阻力位影响
-        let sr_effect = support_resistance * 0.5;
+        // 7. 支撑阻力位影响
+        let sr_effect = support_resistance * 0.4;
         
-        // 综合计算预测变化率
-        let mut predicted_change_rate = base_model_prediction * 0.4  // 模型预测40%权重
-            + trend_factor * 0.25                                    // 趋势25%权重
-            + market_noise * 0.2                                     // 随机噪音20%权重
-            + mean_reversion * 0.1                                   // 均值回归10%权重
-            + sr_effect * 0.05;                                      // 支撑阻力5%权重
+        // 8. A股特色：追涨杀跌心理（短期动量效应）
+        let momentum_effect = if day <= 2 && technical_signals.buy_signals > technical_signals.sell_signals {
+            0.01 // 买入信号多时，短期可能继续上涨
+        } else if day <= 2 && technical_signals.sell_signals > technical_signals.buy_signals {
+            -0.01 // 卖出信号多时，短期可能继续下跌
+        } else {
+            0.0
+        };
+        
+        // 综合计算预测变化率（调整权重，更重视技术分析）
+        let mut predicted_change_rate = base_model_prediction * 0.25  // 模型预测25%权重
+            + technical_impact * 0.30                                 // 技术分析30%权重
+            + trend_factor * 0.20                                    // 趋势20%权重
+            + market_noise * 0.10                                    // 随机噪音10%权重
+            + mean_reversion * 0.08                                  // 均值回归8%权重
+            + sr_effect * 0.05                                       // 支撑阻力5%权重
+            + momentum_effect * 0.02;                                // 动量效应2%权重
         
         // 7. 引入周期性调整（模拟市场的周期性波动）
         let cycle_adjustment = match day % 3 {
@@ -1317,7 +1864,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         // 计算预测价格
         let predicted_price = last_price * (1.0 + clamped_change_rate);
         
-        // 🎯 改进的置信度计算
+        // 🎯 改进的置信度计算（结合技术分析）
         let base_confidence = (metadata.accuracy + 0.3).min(0.8); // 提升基础置信度
         
         // 置信度影响因子
@@ -1325,6 +1872,22 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         let trend_strength = (recent_trend.abs() * 10.0).min(0.2);            // 趋势强度奖励
         let prediction_magnitude = 1.0 - (change_percent.abs() / 15.0).min(0.3); // 预测幅度惩罚
         let time_decay = 0.95_f64.powi(day as i32);                           // 时间衰减
+        
+        // 技术信号一致性
+        let technical_consistency = match technical_signals.signal {
+            TradingSignal::StrongBuy | TradingSignal::StrongSell => 1.15, // 强烈信号提升置信度
+            TradingSignal::Buy | TradingSignal::Sell => 1.05,             // 一般信号轻微提升
+            TradingSignal::Hold => 0.95,                                  // 横盘信号降低置信度
+        };
+        
+        // 信号与预测方向一致性
+        let signal_alignment = match (&technical_signals.signal, predicted_change_rate > 0.0) {
+            (TradingSignal::StrongBuy | TradingSignal::Buy, true) => 1.1,   // 买入信号与上涨预测一致
+            (TradingSignal::StrongSell | TradingSignal::Sell, false) => 1.1, // 卖出信号与下跌预测一致
+            (TradingSignal::Hold, _) => 1.0,                                // 横盘信号中性
+            _ => 0.9,                                                        // 信号与预测不一致
+        };
+        
         let model_consistency = if day > 1 && !predictions.is_empty() {
             // 检查预测的一致性（避免剧烈波动）
             let prev_change = predictions.last().unwrap().predicted_change_percent;
@@ -1339,15 +1902,36 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             * prediction_magnitude 
             * time_decay 
             * model_consistency
+            * technical_consistency
+            * signal_alignment
             + trend_strength * 0.1)
-            .clamp(0.35, 0.85); // 提高最低置信度到35%
+            .clamp(0.40, 0.90); // 调整置信度范围为40%-90%
         
-        // 添加预测结果
+        // 添加预测结果（包含技术分析信息）
+        let trading_signal_str = match &technical_signals.signal {
+            TradingSignal::StrongBuy => "强烈买入",
+            TradingSignal::Buy => "买入",
+            TradingSignal::Hold => "持有",
+            TradingSignal::Sell => "卖出",
+            TradingSignal::StrongSell => "强烈卖出",
+        };
+        
+        let technical_indicators = TechnicalIndicatorValues {
+            rsi: technical_signals.rsi,
+            macd_histogram: technical_signals.macd_histogram,
+            kdj_j: technical_signals.kdj_j,
+            cci: technical_signals.cci,
+            obv_trend: if technical_signals.obv > 0.0 { 1.0 } else { -1.0 }, // 简化的OBV趋势
+        };
+        
         predictions.push(Prediction {
             target_date: date_str,
             predicted_price,
             predicted_change_percent: change_percent,
             confidence,
+            trading_signal: Some(trading_signal_str.to_string()),
+            signal_strength: Some(technical_signals.signal_strength),
+            technical_indicators: Some(technical_indicators),
         });
         
         // 更新上一个预测价格
@@ -1362,7 +1946,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
 }
 
 // 从数据库获取最近的市场数据
-async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, Vec<String>, Vec<f64>, Vec<i64>), String> {
+async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, Vec<String>, Vec<f64>, Vec<i64>, Vec<f64>, Vec<f64>), String> {
     // 创建临时数据库连接
     use sqlx::sqlite::SqlitePoolOptions;
     use chrono::Local;
@@ -1413,6 +1997,8 @@ async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, Vec<S
     let dates: Vec<String> = sorted_records.iter().map(|r| r.date.clone()).collect();
     let prices: Vec<f64> = sorted_records.iter().map(|r| r.close).collect();
     let volumes: Vec<i64> = sorted_records.iter().map(|r| r.volume).collect();
+    let highs: Vec<f64> = sorted_records.iter().map(|r| r.high).collect();
+    let lows: Vec<f64> = sorted_records.iter().map(|r| r.low).collect();
     
     // 获取最新价格
     let current_price = prices.last().copied().unwrap_or(0.0);
@@ -1422,7 +2008,7 @@ async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, Vec<S
              sorted_records.first().map(|r| &r.date).unwrap_or(&"未知".to_string()),
              sorted_records.last().map(|r| &r.date).unwrap_or(&"未知".to_string()));
     
-    Ok((current_price, dates, prices, volumes))
+    Ok((current_price, dates, prices, volumes, highs, lows))
 }
 
 // 重新训练模型

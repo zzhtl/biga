@@ -29,6 +29,15 @@
         predicted_price: number;
         predicted_change_percent: number;
         confidence: number;
+        trading_signal?: string;
+        signal_strength?: number;
+        technical_indicators?: {
+            rsi: number;
+            macd_histogram: number;
+            kdj_j: number;
+            cci: number;
+            obv_trend: number;
+        };
     }
     
     interface TrainingLog {
@@ -68,7 +77,7 @@
     let modelType = "candle_mlp"; // 默认使用Candle的MLP模型
     let lookbackDays = 180; // 修改为180天历史数据
     let trainTestSplit = 0.8;
-    let features = ["close", "volume", "change_percent", "ma_trend", "price_position", "volatility", "rsi_signal", "macd_momentum", "ma5", "ma10", "ma20", "rsi", "macd", "bollinger", "stochastic_k", "stochastic_d", "momentum"];
+    let features = ["close", "volume", "change_percent", "ma_trend", "price_position", "volatility", "rsi_signal", "macd_momentum", "ma5", "ma10", "ma20", "rsi", "macd", "bollinger", "stochastic_k", "stochastic_d", "momentum", "kdj_k", "kdj_d", "kdj_j", "cci", "obv", "macd_dif", "macd_dea", "macd_histogram"];
     let epochs = 100; // 训练轮数
     let batchSize = 32; // 批处理大小
     let learningRate = 0.001; // 学习率
@@ -646,6 +655,94 @@
                             }} />
                             MACD动量
                         </label>
+                        <label>
+                            <input type="checkbox" value="kdj_k" checked={features.includes('kdj_k')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'kdj_k'];
+                                else features = features.filter(f => f !== 'kdj_k');
+                            }} />
+                            KDJ-K值
+                        </label>
+                        <label>
+                            <input type="checkbox" value="kdj_d" checked={features.includes('kdj_d')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'kdj_d'];
+                                else features = features.filter(f => f !== 'kdj_d');
+                            }} />
+                            KDJ-D值
+                        </label>
+                        <label>
+                            <input type="checkbox" value="kdj_j" checked={features.includes('kdj_j')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'kdj_j'];
+                                else features = features.filter(f => f !== 'kdj_j');
+                            }} />
+                            KDJ-J值
+                        </label>
+                        <label>
+                            <input type="checkbox" value="cci" checked={features.includes('cci')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'cci'];
+                                else features = features.filter(f => f !== 'cci');
+                            }} />
+                            CCI指标
+                        </label>
+                        <label>
+                            <input type="checkbox" value="obv" checked={features.includes('obv')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'obv'];
+                                else features = features.filter(f => f !== 'obv');
+                            }} />
+                            OBV能量潮
+                        </label>
+                        <label>
+                            <input type="checkbox" value="macd_dif" checked={features.includes('macd_dif')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'macd_dif'];
+                                else features = features.filter(f => f !== 'macd_dif');
+                            }} />
+                            MACD-DIF
+                        </label>
+                        <label>
+                            <input type="checkbox" value="macd_dea" checked={features.includes('macd_dea')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'macd_dea'];
+                                else features = features.filter(f => f !== 'macd_dea');
+                            }} />
+                            MACD-DEA
+                        </label>
+                        <label>
+                            <input type="checkbox" value="macd_histogram" checked={features.includes('macd_histogram')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'macd_histogram'];
+                                else features = features.filter(f => f !== 'macd_histogram');
+                            }} />
+                            MACD柱状图
+                        </label>
+                        <label>
+                            <input type="checkbox" value="dmi_plus" checked={features.includes('dmi_plus')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'dmi_plus'];
+                                else features = features.filter(f => f !== 'dmi_plus');
+                            }} />
+                            DMI+DI
+                        </label>
+                        <label>
+                            <input type="checkbox" value="dmi_minus" checked={features.includes('dmi_minus')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'dmi_minus'];
+                                else features = features.filter(f => f !== 'dmi_minus');
+                            }} />
+                            DMI-DI
+                        </label>
+                        <label>
+                            <input type="checkbox" value="adx" checked={features.includes('adx')} on:change={(e) => {
+                                const target = e.target as HTMLInputElement;
+                                if (target.checked) features = [...features, 'adx'];
+                                else features = features.filter(f => f !== 'adx');
+                            }} />
+                            ADX趋势强度
+                        </label>
                     </div>
                 </div>
                 
@@ -887,6 +984,8 @@
                             <th>预测价格</th>
                             <th>涨跌幅</th>
                             <th>置信度</th>
+                            <th>交易信号</th>
+                            <th>技术指标</th>
                             <th>风险评级</th>
                         </tr>
                     </thead>
@@ -903,6 +1002,28 @@
                                         <div class="confidence-bar-inline" style="width: {prediction.confidence * 100}%"></div>
                                         <span>{(prediction.confidence * 100).toFixed(2)}%</span>
                                     </div>
+                                </td>
+                                <td>
+                                    <span class="signal-badge {prediction.trading_signal?.includes('买入') ? 'buy-signal' : prediction.trading_signal?.includes('卖出') ? 'sell-signal' : 'hold-signal'}">
+                                        {prediction.trading_signal || '持有'}
+                                    </span>
+                                    {#if prediction.signal_strength}
+                                        <div class="signal-strength">
+                                            强度: {(prediction.signal_strength * 100).toFixed(0)}%
+                                        </div>
+                                    {/if}
+                                </td>
+                                <td>
+                                    {#if prediction.technical_indicators}
+                                        <div class="tech-indicators">
+                                            <span title="RSI: {prediction.technical_indicators.rsi.toFixed(1)}">
+                                                RSI: {prediction.technical_indicators.rsi > 70 ? '超买' : prediction.technical_indicators.rsi < 30 ? '超卖' : '正常'}
+                                            </span>
+                                            <span title="KDJ-J: {prediction.technical_indicators.kdj_j.toFixed(1)}">
+                                                KDJ: {prediction.technical_indicators.kdj_j > 80 ? '超买' : prediction.technical_indicators.kdj_j < 20 ? '超卖' : '正常'}
+                                            </span>
+                                        </div>
+                                    {/if}
                                 </td>
                                 <td>
                                     <span class="risk-badge {prediction.confidence > 0.8 ? 'low-risk' : prediction.confidence > 0.6 ? 'medium-risk' : 'high-risk'}">
@@ -1439,5 +1560,51 @@
     .high-risk {
         background-color: #ef4444;
         color: #ef4444;
+    }
+    
+    .signal-badge {
+        padding: 0.375rem 0.75rem;
+        border-radius: 0.375rem;
+        font-size: 0.875rem;
+        font-weight: 600;
+        display: inline-block;
+    }
+    
+    .buy-signal {
+        background-color: rgba(16, 185, 129, 0.2);
+        color: #10b981;
+        border: 1px solid #10b981;
+    }
+    
+    .sell-signal {
+        background-color: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+        border: 1px solid #ef4444;
+    }
+    
+    .hold-signal {
+        background-color: rgba(251, 191, 36, 0.2);
+        color: #fbbf24;
+        border: 1px solid #fbbf24;
+    }
+    
+    .signal-strength {
+        font-size: 0.75rem;
+        color: rgba(255, 255, 255, 0.7);
+        margin-top: 0.25rem;
+    }
+    
+    .tech-indicators {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        font-size: 0.75rem;
+    }
+    
+    .tech-indicators span {
+        padding: 0.125rem 0.5rem;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 0.25rem;
+        white-space: nowrap;
     }
 </style>
