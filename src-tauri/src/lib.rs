@@ -26,20 +26,21 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            crate::commands::stock_list::get_stock_list,
-            crate::commands::stock::get_stock_infos,
-            crate::commands::stock_realtime::get_realtime_data,
-            crate::commands::stock::refresh_stock_infos,
-            crate::commands::stock_historical::get_historical_data,
-            crate::commands::stock_historical::refresh_historical_data,
-            crate::commands::stock_prediction::train_stock_prediction_model,
-            crate::commands::stock_prediction::predict_stock_price,
-            crate::commands::stock_prediction::list_stock_prediction_models,
-            crate::commands::stock_prediction::delete_stock_prediction_model,
-            crate::commands::stock_prediction::train_candle_model,
-            crate::commands::stock_prediction::predict_with_candle,
-            crate::commands::stock_prediction::retrain_candle_model,
-            crate::commands::stock_prediction::evaluate_candle_model
+            commands::stock_list::get_stock_list,
+            commands::stock::get_stock_infos,
+            commands::stock_realtime::get_realtime_data,
+            commands::stock::refresh_stock_infos,
+            commands::stock_historical::get_historical_data,
+            commands::stock_historical::refresh_historical_data,
+            commands::stock_prediction::train_stock_prediction_model,
+            commands::stock_prediction::predict_stock_price,
+            commands::stock_prediction::list_stock_prediction_models,
+            commands::stock_prediction::delete_stock_prediction_model,
+            commands::stock_prediction::train_candle_model,
+            commands::stock_prediction::predict_with_candle,
+            commands::stock_prediction::predict_candle_price_simple,
+            commands::stock_prediction::retrain_candle_model,
+            commands::stock_prediction::evaluate_candle_model
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {

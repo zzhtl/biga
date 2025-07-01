@@ -1,4 +1,4 @@
-use crate::stock_prediction::{TrainingRequest, PredictionRequest as CandlePredictionRequest, TrainingResult, ModelInfo, Prediction, PredictionResponse};
+use crate::stock_prediction::{TrainingRequest, PredictionRequest as CandlePredictionRequest, TrainingResult, ModelInfo, PredictionResponse};
 
 // 列出所有股票预测模型
 #[tauri::command]
@@ -52,4 +52,10 @@ pub async fn train_stock_prediction_model(request: TrainingRequest) -> Result<Tr
 #[tauri::command]
 pub async fn predict_stock_price(request: CandlePredictionRequest) -> Result<PredictionResponse, String> {
     predict_with_candle(request).await
+}
+
+// 预测功能（简化策略 - 专注方向准确性）
+#[tauri::command]
+pub async fn predict_candle_price_simple(request: CandlePredictionRequest) -> Result<PredictionResponse, String> {
+    crate::stock_prediction::predict_with_simple_strategy(request).await
 } 
