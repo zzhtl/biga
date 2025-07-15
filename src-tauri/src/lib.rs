@@ -40,7 +40,12 @@ pub fn run() {
             commands::stock_prediction::predict_with_candle,
             commands::stock_prediction::predict_candle_price_simple,
             commands::stock_prediction::retrain_candle_model,
-            commands::stock_prediction::evaluate_candle_model
+            commands::stock_prediction::evaluate_candle_model,
+            commands::stock_prediction::run_model_backtest,
+            commands::stock_prediction::get_optimization_suggestions,
+            commands::stock_prediction::get_multi_timeframe_signals,
+            commands::stock_prediction::get_latest_multi_timeframe_signal,
+            commands::stock_prediction::analyze_multi_timeframe_prediction_value
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {

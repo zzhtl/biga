@@ -25,8 +25,20 @@ pub mod prediction;
 // 评估功能
 pub mod evaluation;
 
+// 回测功能
+pub mod backtest;
+
 // 主要的预测功能（保持向后兼容）
 pub mod candle_prediction;
+
+// 特征优化
+pub mod feature_optimization;
+
+// 超参数优化
+pub mod hyperparameter_optimization;
+
+// 多时间周期分析
+pub mod multi_timeframe_analysis;
 
 // 重新导出主要的公共类型和函数
 pub use types::{
@@ -38,4 +50,5 @@ pub use types::{
 pub use model_management::{list_models, delete_model};
 pub use training::train_candle_model;
 pub use prediction::{predict_with_candle, predict_with_simple_strategy};
-pub use candle_prediction::{evaluate_candle_model, retrain_candle_model}; 
+pub use candle_prediction::{evaluate_candle_model, retrain_candle_model};
+pub use backtest::{run_backtest, BacktestRequest, BacktestReport, BacktestEntry, DailyAccuracy}; 

@@ -80,6 +80,50 @@
         }>;
     }
     
+    // 回测相关接口
+    interface BacktestRequest {
+        stock_code: string;
+        model_name?: string;
+        start_date: string;
+        end_date: string;
+        prediction_days: number;
+        backtest_interval: number;
+    }
+    
+    interface BacktestEntry {
+        prediction_date: string;
+        predictions: Prediction[];
+        actual_prices: number[];
+        actual_changes: number[];
+        price_accuracy: number;
+        direction_accuracy: number;
+        avg_prediction_error: number;
+    }
+    
+    interface DailyAccuracy {
+        date: string;
+        price_accuracy: number;
+        direction_accuracy: number;
+        prediction_count: number;
+        market_volatility: number;
+    }
+    
+    interface BacktestReport {
+        stock_code: string;
+        model_name: string;
+        backtest_period: string;
+        total_predictions: number;
+        backtest_entries: BacktestEntry[];
+        overall_price_accuracy: number;
+        overall_direction_accuracy: number;
+        average_prediction_error: number;
+        accuracy_trend: number[];
+        daily_accuracy: DailyAccuracy[];
+        price_error_distribution: number[];
+        direction_correct_rate: number;
+        volatility_vs_accuracy: Array<[number, number]>;
+    }
+    
     // 新增：最新真实数据接口
     interface LastRealData {
         date: string;
@@ -121,6 +165,14 @@
     let modelComparison: ModelComparisonItem[] = [];
     let showModelComparison = false;
     let predictionChart: ChartData | null = null;
+    
+    // 回测相关变量
+    let backtestReport: BacktestReport | null = null;
+    let isBacktesting = false;
+    let showBacktestReport = false;
+    let backtestStartDate = "";
+    let backtestEndDate = "";
+    let backtestInterval = 7; // 默认每7天进行一次预测
 
     onMount(async () => {
         try {
@@ -421,6 +473,60 @@
     function toggleAdvancedOptions() {
         advancedOptions = !advancedOptions;
     }
+    
+    // 执行回测
+    async function runBacktest() {
+        if (!stockCode) {
+            errorMessage = "请先输入股票代码";
+            return;
+        }
+        
+        if (!backtestStartDate || !backtestEndDate) {
+            errorMessage = "请选择回测日期范围";
+            return;
+        }
+        
+        if (!selectedModelName && useExistingModel) {
+            errorMessage = "请先选择模型";
+            return;
+        }
+        
+        isBacktesting = true;
+        errorMessage = "";
+        
+        try {
+            const backtestRequest: BacktestRequest = {
+                stock_code: stockCode,
+                model_name: useExistingModel ? selectedModelName : undefined,
+                start_date: backtestStartDate,
+                end_date: backtestEndDate,
+                prediction_days: daysToPredict,
+                backtest_interval: backtestInterval
+            };
+            
+            const result = await invoke<BacktestReport>('run_model_backtest', { request: backtestRequest });
+            backtestReport = result;
+            showBacktestReport = true;
+            
+            console.log("回测结果:", result);
+            
+        } catch (error) {
+            errorMessage = `回测失败: ${error}`;
+            console.error("回测失败:", error);
+        } finally {
+            isBacktesting = false;
+        }
+    }
+    
+    // 设置默认回测日期（最近3个月）
+    function setDefaultBacktestDates() {
+        const endDate = new Date();
+        const startDate = new Date();
+        startDate.setMonth(endDate.getMonth() - 3);
+        
+        backtestEndDate = endDate.toISOString().slice(0, 10);
+        backtestStartDate = startDate.toISOString().slice(0, 10);
+    }
 </script>
 
 <div class="container">
@@ -443,15 +549,18 @@
     {/if}
     
     <div class="tabs">
-        <button class:active={useExistingModel} on:click={() => useExistingModel = true}>
+        <button class:active={useExistingModel && !showBacktestReport} on:click={() => {useExistingModel = true; showBacktestReport = false;}}>
             使用现有模型
         </button>
-        <button class:active={!useExistingModel} on:click={() => useExistingModel = false}>
+        <button class:active={!useExistingModel && !showBacktestReport} on:click={() => {useExistingModel = false; showBacktestReport = false;}}>
             训练新模型
+        </button>
+        <button class:active={showBacktestReport} on:click={() => {showBacktestReport = true; setDefaultBacktestDates();}}>
+            回测报告
         </button>
     </div>
     
-    {#if useExistingModel}
+    {#if useExistingModel && !showBacktestReport}
         <div class="model-section">
             <h2>选择预测模型</h2>
             {#if modelList.length === 0}
@@ -503,7 +612,7 @@
                 </button>
             </div>
         </div>
-    {:else}
+    {:else if !useExistingModel && !showBacktestReport}
         <div class="model-section">
             <h2>训练新模型 (Candle)</h2>
             
@@ -878,6 +987,140 @@
                     </div>
                 {/if}
             </div>
+        </div>
+    {:else if showBacktestReport}
+        <div class="model-section">
+            <h2>模型回测报告</h2>
+            
+            <div class="backtest-settings">
+                <div class="form-group">
+                    <label>选择模型:</label>
+                    <select bind:value={selectedModelName} disabled={modelList.length === 0}>
+                        <option value="">请选择模型</option>
+                        {#each modelList as model}
+                            <option value={model.name}>{model.name} (准确率: {(model.accuracy * 100).toFixed(2)}%)</option>
+                        {/each}
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>回测开始日期:</label>
+                    <input type="date" bind:value={backtestStartDate} />
+                </div>
+                
+                <div class="form-group">
+                    <label>回测结束日期:</label>
+                    <input type="date" bind:value={backtestEndDate} />
+                </div>
+                
+                <div class="form-group">
+                    <label>预测天数:</label>
+                    <input type="number" bind:value={daysToPredict} min="1" max="10" />
+                </div>
+                
+                <div class="form-group">
+                    <label>回测间隔(天):</label>
+                    <input type="number" bind:value={backtestInterval} min="1" max="30" />
+                    <small>每隔几天进行一次预测</small>
+                </div>
+                
+                <button
+                    on:click={runBacktest}
+                    class:loading={isBacktesting}
+                    disabled={isBacktesting || !selectedModelName}
+                >
+                    {#if isBacktesting}
+                        <span class="spinner"></span>
+                        回测中...
+                    {:else}
+                        开始回测
+                    {/if}
+                </button>
+            </div>
+            
+            {#if backtestReport}
+                <div class="backtest-report">
+                    <h3>回测结果</h3>
+                    
+                    <!-- 总体统计 -->
+                    <div class="backtest-summary">
+                        <div class="summary-card">
+                            <h4>总体准确率</h4>
+                            <div class="summary-stats">
+                                <div class="stat-item">
+                                    <span class="stat-label">价格准确率:</span>
+                                    <span class="stat-value">{(backtestReport.overall_price_accuracy * 100).toFixed(2)}%</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">方向准确率:</span>
+                                    <span class="stat-value">{(backtestReport.overall_direction_accuracy * 100).toFixed(2)}%</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">平均误差:</span>
+                                    <span class="stat-value">{(backtestReport.average_prediction_error * 100).toFixed(2)}%</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">总预测次数:</span>
+                                    <span class="stat-value">{backtestReport.total_predictions}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                                        <!-- 准确率趋势图 -->
+                    <div class="accuracy-trend">
+                        <h4>准确率趋势</h4>
+                        <div class="trend-chart">
+                            <div class="trend-bars">
+                                {#each backtestReport.accuracy_trend as accuracy, i}
+                                    <div class="trend-bar" style="height: {accuracy * 100}px;" title="第{i + 1}次回测: {(accuracy * 100).toFixed(1)}%">
+                                        <div class="trend-bar-fill" style="background-color: rgb(34, 197, 94);"></div>
+                                    </div>
+                                {/each}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 详细回测记录 -->
+                    <div class="backtest-details">
+                        <h4>详细回测记录</h4>
+                        <div class="backtest-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>预测日期</th>
+                                        <th>价格准确率</th>
+                                        <th>方向准确率</th>
+                                        <th>平均误差</th>
+                                        <th>预测次数</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {#each backtestReport.backtest_entries as entry}
+                                        <tr>
+                                            <td>{new Date(entry.prediction_date).toLocaleDateString()}</td>
+                                            <td class="accuracy-cell">
+                                                <div class="accuracy-bar">
+                                                    <div class="accuracy-fill" style="width: {entry.price_accuracy * 100}%"></div>
+                                                    <span>{(entry.price_accuracy * 100).toFixed(1)}%</span>
+                                                </div>
+                                            </td>
+                                            <td class="accuracy-cell">
+                                                <div class="accuracy-bar">
+                                                    <div class="accuracy-fill direction-fill" style="width: {entry.direction_accuracy * 100}%"></div>
+                                                    <span>{(entry.direction_accuracy * 100).toFixed(1)}%</span>
+                                                </div>
+                                            </td>
+                                            <td>{(entry.avg_prediction_error * 100).toFixed(2)}%</td>
+                                            <td>{entry.predictions.length}</td>
+                                        </tr>
+                                    {/each}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            {/if}
         </div>
     {/if}
     
@@ -1846,5 +2089,180 @@
         font-weight: bold;
         padding: 0.25rem 0.75rem;
         border-radius: 0.25rem;
+    }
+    
+    /* 回测功能样式 */
+    .backtest-settings {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        margin-bottom: 2rem;
+    }
+    
+    .backtest-settings .form-group {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    
+    .backtest-settings input,
+    .backtest-settings select {
+        padding: 0.75rem;
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 0.25rem;
+        color: inherit;
+    }
+    
+    .backtest-settings select {
+        color: #000000;
+        background: rgba(255, 255, 255, 0.9);
+    }
+    
+    .backtest-settings select option {
+        color: #000000;
+        background: #ffffff;
+    }
+    
+    .backtest-settings small {
+        color: rgba(255, 255, 255, 0.7);
+        font-size: 0.875rem;
+    }
+    
+    .backtest-report {
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 0.5rem;
+        padding: 1.5rem;
+        margin-top: 1rem;
+    }
+    
+    .backtest-summary {
+        margin-bottom: 2rem;
+    }
+    
+    .summary-card {
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 0.5rem;
+        padding: 1.5rem;
+    }
+    
+    .summary-stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem;
+    }
+    
+    .stat-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.75rem;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 0.25rem;
+    }
+    
+    .stat-label {
+        font-weight: 600;
+        color: rgba(255, 255, 255, 0.8);
+    }
+    
+    .stat-value {
+        font-size: 1.25rem;
+        font-weight: bold;
+        color: #10b981;
+    }
+    
+    .accuracy-trend {
+        margin-bottom: 2rem;
+    }
+    
+    .trend-chart {
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        height: 200px;
+    }
+    
+    .trend-bars {
+        display: flex;
+        align-items: flex-end;
+        gap: 0.5rem;
+        height: 100%;
+    }
+    
+    .trend-bar {
+        flex: 1;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 0.25rem;
+        min-height: 20px;
+        position: relative;
+    }
+    
+    .trend-bar-fill {
+        width: 100%;
+        height: 100%;
+        border-radius: 0.25rem;
+    }
+    
+    .backtest-details {
+        margin-top: 2rem;
+    }
+    
+    .backtest-table {
+        overflow-x: auto;
+    }
+    
+    .backtest-table table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    
+    .backtest-table th,
+    .backtest-table td {
+        padding: 0.75rem 1rem;
+        text-align: left;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    .backtest-table th {
+        background: rgba(255, 255, 255, 0.05);
+        font-weight: 600;
+    }
+    
+    .accuracy-cell {
+        width: 120px;
+    }
+    
+    .accuracy-bar {
+        position: relative;
+        height: 1.5rem;
+        background: rgba(255, 255, 255, 0.1);
+        border-radius: 0.25rem;
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        padding: 0 0.5rem;
+    }
+    
+    .accuracy-fill {
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100%;
+        background: #4f46e5;
+        border-radius: 0.25rem;
+        transition: width 0.3s ease;
+    }
+    
+    .accuracy-fill.direction-fill {
+        background: #10b981;
+    }
+    
+    .accuracy-bar span {
+        position: relative;
+        z-index: 1;
+        font-size: 0.875rem;
+        font-weight: 600;
+        color: white;
     }
 </style>

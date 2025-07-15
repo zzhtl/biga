@@ -1,3 +1,20 @@
+use crate::db::models::HistoricalData;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacdData {
+    pub macd: f64,
+    pub signal: f64,
+    pub histogram: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KdjData {
+    pub k: f64,
+    pub d: f64,
+    pub j: f64,
+}
+
 // 计算指数移动平均线
 pub fn calculate_ema(data: &[f64], period: usize) -> f64 {
     if data.is_empty() || period == 0 || data.len() < period {
@@ -12,6 +29,28 @@ pub fn calculate_ema(data: &[f64], period: usize) -> f64 {
     }
     
     ema
+}
+
+// 计算EMA序列
+pub fn calculate_ema_series(data: &[f64], period: usize) -> Vec<f64> {
+    if data.is_empty() || period == 0 || data.len() < period {
+        return Vec::new();
+    }
+    
+    let mut ema_values = Vec::new();
+    let multiplier = 2.0 / (period as f64 + 1.0);
+    
+    // 第一个EMA值是前period个数据的简单平均
+    let mut ema = data[0..period].iter().sum::<f64>() / period as f64;
+    ema_values.push(ema);
+    
+    // 计算后续的EMA值
+    for i in period..data.len() {
+        ema = (data[i] - ema) * multiplier + ema;
+        ema_values.push(ema);
+    }
+    
+    ema_values
 }
 
 // RSI计算函数
