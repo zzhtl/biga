@@ -15,6 +15,7 @@ use crate::stock_prediction::utils::{
     calculate_volume_price_change, VolumePricePredictionStrategy
 };
 use crate::stock_prediction::technical_analysis::analyze_technical_signals;
+use crate::stock_prediction::technical_indicators::{get_feature_required_days, calculate_feature_value};
 
 // 简化的模型创建函数（与training.rs中的相同，用于加载模型）
 fn create_model(config: &ModelConfig, device: &Device) -> Result<(VarMap, Box<dyn Module + Send + Sync>), candle_core::Error> {
@@ -47,6 +48,37 @@ fn create_model(config: &ModelConfig, device: &Device) -> Result<(VarMap, Box<dy
     let model: Box<dyn Module + Send + Sync> = Box::new(model);
     
     Ok((varmap, model))
+}
+
+// 本地特征标准化（与训练阶段逻辑一致：按列计算 mean/std，再标准化）
+fn normalize_features_local(features: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    if features.is_empty() { return Vec::new(); }
+    let cols = features[0].len();
+    let rows = features.len();
+    let mut means = vec![0.0; cols];
+    let mut stds = vec![0.0; cols];
+
+    for c in 0..cols {
+        let mut sum = 0.0;
+        for r in 0..rows { sum += features[r][c]; }
+        let mean = sum / rows as f64;
+        means[c] = mean;
+        let mut var_sum = 0.0;
+        for r in 0..rows {
+            let diff = features[r][c] - mean;
+            var_sum += diff * diff;
+        }
+        let std = (var_sum / rows as f64).sqrt().max(1e-8);
+        stds[c] = std;
+    }
+
+    let mut normalized = vec![vec![0.0; cols]; rows];
+    for r in 0..rows {
+        for c in 0..cols {
+            normalized[r][c] = (features[r][c] - means[c]) / stds[c];
+        }
+    }
+    normalized
 }
 
 // 股票预测函数 - 基于趋势分析的改进版本
@@ -108,48 +140,54 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     println!("   🔒 趋势置信度: {:.0}%", trend_analysis.trend_confidence * 100.0);
     println!("   ⚖️  预测偏向倍数: {:.2}", trend_analysis.bias_multiplier);
     
-    // 计算特征向量
-    let mut features = Vec::new();
-    let last_idx = prices.len() - 1;
-    
-    // 为每个特征计算值
-    for feature_name in &metadata.features {
-        match feature_name.as_str() {
-            "close" => {
-                let price_min = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                let price_max = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                let price_range = price_max - price_min;
-                let normalized = if price_range > 0.0 {
-                    (current_price - price_min) / price_range
-                } else {
-                    0.5
-                };
-                features.push(normalized);
-            },
-            "volume" => {
-                let latest_volume = volumes[last_idx];
-                let vol_min = volumes.iter().fold(i64::MAX, |a, &b| a.min(b));
-                let vol_max = volumes.iter().fold(i64::MIN, |a, &b| a.max(b));
-                let vol_range = (vol_max - vol_min) as f64;
-                let normalized = if vol_range > 0.0 {
-                    (latest_volume - vol_min) as f64 / vol_range
-                } else {
-                    0.5
-                };
-                features.push(normalized);
-            },
-            _ => {
-                features.push(0.0);
-            }
-        }
+    // === 新增：与训练一致的特征计算与标准化 ===
+    // 计算所需的最小历史窗口
+    let required_days = metadata
+        .features
+        .iter()
+        .map(|f| get_feature_required_days(f))
+        .max()
+        .unwrap_or(20);
+    let lookback_window = required_days.max(30).min(prices.len().saturating_sub(1));
+    let start_idx = lookback_window;
+    let end_idx = prices.len() - 1;
+
+    if start_idx > end_idx {
+        return Err("历史数据不足以生成特征".to_string());
     }
-    
+
+    // 基于最近一段窗口，构建特征矩阵（用于标准化）
+    let mut features_matrix: Vec<Vec<f64>> = Vec::with_capacity(end_idx - start_idx + 1);
+    for i in start_idx..=end_idx {
+        let mut feature_vector = Vec::with_capacity(metadata.features.len());
+        for feature_name in &metadata.features {
+            let value = calculate_feature_value(
+                feature_name,
+                &prices,
+                &volumes,
+                i,
+                lookback_window,
+                Some(&highs),
+                Some(&lows),
+            ).map_err(|e| format!("计算特征 '{}' 失败: {}", feature_name, e))?;
+            feature_vector.push(value);
+        }
+        features_matrix.push(feature_vector);
+    }
+
+    // 标准化，并选取最新一行作为推理输入
+    let normalized_matrix = normalize_features_local(&features_matrix);
+    let last_normalized_row = normalized_matrix
+        .last()
+        .cloned()
+        .ok_or_else(|| "标准化特征为空".to_string())?;
+
     // 创建输入张量
-    let features_f32: Vec<f32> = features.iter().map(|&x| x as f32).collect();
-    let input_tensor = Tensor::from_slice(&features_f32, &[1, features.len()], &device)
+    let features_f32: Vec<f32> = last_normalized_row.iter().map(|&x| x as f32).collect();
+    let input_tensor = Tensor::from_slice(&features_f32, &[1, metadata.features.len()], &device)
         .map_err(|e| format!("创建输入张量失败: {}", e))?;
     
-    // 进行预测
+    // 进行预测（基础模型输出变化率）
     let output = model.forward(&input_tensor)
         .map_err(|e| format!("预测失败: {}", e))?;
     
@@ -191,7 +229,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         }
         let date_str = target_date.format("%Y-%m-%d").to_string();
         
-        // === 改进的预测算法：基于趋势分析 ===
+        // === 改进的预测算法：基于趋势分析 + 均线/量能融合 ===
         
         // 1. 基础模型预测（权重降低）
         let base_model_prediction = raw_change_rate * 0.02; // 降低基础模型权重
@@ -204,33 +242,24 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         let tech_decay = 0.92_f64.powi(day as i32);
         let technical_impact = match trend_analysis.overall_trend {
             TrendState::StrongBullish | TrendState::Bullish => {
-                // 涨势中，优先看日线金叉信号，加大权重
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    // 日线金叉时大幅加强预测上涨
                     technical_signals.signal_strength * 0.035 * tech_decay
                 } else if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    // 涨势中出现死叉，降低影响（可能是短期回调）
                     technical_signals.signal_strength * 0.005 * tech_decay
                 } else {
-                    // 一般技术信号
                     technical_signals.signal_strength * 0.015 * tech_decay
                 }
             },
             TrendState::StrongBearish | TrendState::Bearish => {
-                // 跌势中，优先看日线死叉信号，加大权重
                 if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    // 日线死叉时大幅加强预测下跌
                     technical_signals.signal_strength * 0.035 * tech_decay
                 } else if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    // 跌势中出现金叉，降低影响（可能是短期反弹）
                     technical_signals.signal_strength * 0.005 * tech_decay
                 } else {
-                    // 一般技术信号
                     technical_signals.signal_strength * 0.015 * tech_decay
                 }
             },
             TrendState::Neutral => {
-                // 中性趋势，技术指标权重正常，但更重视金叉死叉
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
                     technical_signals.signal_strength * 0.025 * tech_decay
                 } else if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
@@ -241,16 +270,52 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             }
         };
         
-        // 4. 波动率调整（根据趋势一致性调整）
+        // 4. 均线与量能偏置（新增）：MA5/10/20 与量比
+        let mut ma_bias: f64 = 0.0;
+        let mut vol_bias: f64 = 0.0;
+        if prices.len() >= 21 && volumes.len() >= 21 {
+            let n = prices.len();
+            let avg = |slice: &[f64]| slice.iter().sum::<f64>() / slice.len() as f64;
+            let ma5 = avg(&prices[n-5..n]);
+            let ma10 = avg(&prices[n-10..n]);
+            let ma20 = avg(&prices[n-20..n]);
+            let price = last_price;
+
+            // 均线位置与多空排列
+            if price > ma5 { ma_bias += 0.4; } else { ma_bias -= 0.4; }
+            if ma5 > ma10 { ma_bias += 0.3; } else { ma_bias -= 0.3; }
+            if ma10 > ma20 { ma_bias += 0.3; } else { ma_bias -= 0.3; }
+
+            // 均线斜率
+            let prev_ma5 = avg(&prices[n-6..n-1]);
+            let prev_ma10 = avg(&prices[n-11..n-1]);
+            let prev_ma20 = avg(&prices[n-21..n-1]);
+            if ma5 > prev_ma5 { ma_bias += 0.2; } else { ma_bias -= 0.2; }
+            if ma10 > prev_ma10 { ma_bias += 0.15; } else { ma_bias -= 0.15; }
+            if ma20 > prev_ma20 { ma_bias += 0.1; } else { ma_bias -= 0.1; }
+            ma_bias = ma_bias.clamp(-2.0, 2.0) * 0.01; // 映射到约±1%
+
+            // 量能偏置：5日/20日量比
+            let avgv = |slice: &[i64]| slice.iter().map(|&v| v as f64).sum::<f64>() / slice.len() as f64;
+            let v5 = avgv(&volumes[n-5..n]);
+            let v20 = avgv(&volumes[n-20..n]);
+            let vr = if v20 > 0.0 { v5 / v20 } else { 1.0 };
+            if vr > 1.5 { vol_bias += 0.008; }
+            else if vr > 1.2 { vol_bias += 0.004; }
+            if vr < 0.6 { vol_bias -= 0.008; }
+            else if vr < 0.8 { vol_bias -= 0.004; }
+        }
+        let ma_vol_decay = 0.96_f64.powi(day as i32);
+        
+        // 5. 波动率调整（根据趋势一致性调整）
         let volatility_factor = historical_volatility.clamp(0.01, 0.08);
         let trend_decay = match trend_analysis.overall_trend {
             TrendState::StrongBullish | TrendState::StrongBearish => {
-                // 强趋势时衰减更慢，特别是有日线金叉死叉确认时
                 if (technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross) && 
                    matches!(trend_analysis.overall_trend, TrendState::StrongBullish) ||
                    (technical_signals.macd_death_cross || technical_signals.kdj_death_cross) && 
                    matches!(trend_analysis.overall_trend, TrendState::StrongBearish) {
-                    0.99_f64.powi(day as i32) // 技术信号确认时衰减最慢
+                    0.99_f64.powi(day as i32)
                 } else {
                     0.97_f64.powi(day as i32)
                 }
@@ -259,13 +324,12 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             TrendState::Neutral => 0.90_f64.powi(day as i32),
         };
         
-        // 5. 随机扰动（根据趋势强度和技术信号一致性调整）
+        // 6. 随机扰动（根据趋势强度和技术信号一致性调整）
         let noise_amplitude = match trend_analysis.overall_trend {
             TrendState::StrongBullish | TrendState::StrongBearish => {
-                // 强趋势且有技术信号确认时，降低随机性
                 if (technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross || 
                     technical_signals.macd_death_cross || technical_signals.kdj_death_cross) {
-                    volatility_factor * 0.6 // 技术信号确认时随机性最低
+                    volatility_factor * 0.6
                 } else {
                     volatility_factor * 0.8
                 }
@@ -275,88 +339,146 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         };
         let market_noise = (rand::random::<f64>() * 2.0 - 1.0) * noise_amplitude;
         
-        // 6. 综合预测变化率（调整权重分配）
-        let mut predicted_change_rate = base_model_prediction * 0.08  // 基础模型 8%（进一步降低）
-            + trend_factor * trend_decay * 0.52                       // 趋势因子 52%
-            + technical_impact * 0.30                                 // 技术指标 30%（提高，特别是金叉死叉）
-            + market_noise * 0.10;                                   // 随机扰动 10%
+        // 7. 综合预测变化率（调整权重分配 + 新增MA/量能项）
+        let mut predicted_change_rate = base_model_prediction * 0.08
+            + trend_factor * trend_decay * 0.52
+            + technical_impact * 0.30
+            + (ma_bias + vol_bias) * ma_vol_decay * 0.20
+            + market_noise * 0.10;
         
-        // 7. 趋势一致性增强（特别重视日线金叉死叉）
+        // 8. 趋势一致性增强（特别重视日线金叉死叉）
         match trend_analysis.overall_trend {
             TrendState::StrongBullish => {
-                // 强涨势：如果有日线金叉，大幅增强上涨预测
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    if predicted_change_rate < 0.0 {
-                        predicted_change_rate *= 0.2; // 大幅减少下跌预测
-                    }
-                    predicted_change_rate += 0.012; // 大幅增加上涨基础
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.2; }
+                    predicted_change_rate += 0.012;
                 } else {
-                    if predicted_change_rate < 0.0 {
-                        predicted_change_rate *= 0.3;
-                    }
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.3; }
                     predicted_change_rate += 0.008;
                 }
             },
             TrendState::Bullish => {
-                // 涨势：日线金叉时增强预测
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    if predicted_change_rate < 0.0 {
-                        predicted_change_rate *= 0.4;
-                    }
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.4; }
                     predicted_change_rate += 0.007;
                 } else {
-                    if predicted_change_rate < 0.0 {
-                        predicted_change_rate *= 0.6;
-                    }
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.6; }
                     predicted_change_rate += 0.004;
                 }
             },
             TrendState::StrongBearish => {
-                // 强跌势：如果有日线死叉，大幅增强下跌预测
                 if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    if predicted_change_rate > 0.0 {
-                        predicted_change_rate *= 0.2; // 大幅减少上涨预测
-                    }
-                    predicted_change_rate -= 0.012; // 大幅增加下跌基础
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.2; }
+                    predicted_change_rate -= 0.012;
                 } else {
-                    if predicted_change_rate > 0.0 {
-                        predicted_change_rate *= 0.3;
-                    }
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.3; }
                     predicted_change_rate -= 0.008;
                 }
             },
             TrendState::Bearish => {
-                // 跌势：日线死叉时增强预测
                 if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    if predicted_change_rate > 0.0 {
-                        predicted_change_rate *= 0.4;
-                    }
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.4; }
                     predicted_change_rate -= 0.007;
                 } else {
-                    if predicted_change_rate > 0.0 {
-                        predicted_change_rate *= 0.6;
-                    }
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.6; }
                     predicted_change_rate -= 0.004;
                 }
             },
             TrendState::Neutral => {
-                // 中性：重视金叉死叉信号的方向性
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    predicted_change_rate += 0.005; // 轻微偏向上涨
+                    predicted_change_rate += 0.005;
                 } else if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    predicted_change_rate -= 0.005; // 轻微偏向下跌
+                    predicted_change_rate -= 0.005;
                 }
             }
         }
-        
-        // 8. 应用A股涨跌停限制
+
+        // === 新增：方向投票（优先保证涨/跌判断的合理性） ===
+        let (direction_prob_up, _direction_score) = {
+            let mut score: f64 = 0.0;
+
+            // 趋势权重
+            score += match trend_analysis.overall_trend {
+                TrendState::StrongBullish => 2.0,
+                TrendState::Bullish => 1.0,
+                TrendState::Neutral => 0.0,
+                TrendState::Bearish => -1.0,
+                TrendState::StrongBearish => -2.0,
+            };
+
+            // MACD 权重
+            if technical_signals.macd_golden_cross { score += 1.2; }
+            if technical_signals.macd_death_cross { score -= 1.2; }
+            if technical_signals.macd_histogram > 0.0 { score += 0.6; } else { score -= 0.6; }
+            if technical_signals.macd_zero_cross_up { score += 0.8; }
+            if technical_signals.macd_zero_cross_down { score -= 0.8; }
+
+            // KDJ 权重
+            if technical_signals.kdj_golden_cross { score += 0.8; }
+            if technical_signals.kdj_death_cross { score -= 0.8; }
+            if technical_signals.kdj_j > 80.0 { score -= 0.6; }
+            if technical_signals.kdj_j < 20.0 { score += 0.6; }
+
+            // RSI 权重
+            if technical_signals.rsi > 70.0 { score += 0.8; }
+            else if technical_signals.rsi > 55.0 { score += 0.5; }
+            else if technical_signals.rsi < 30.0 { score -= 0.8; }
+            else if technical_signals.rsi < 45.0 { score -= 0.5; }
+
+            // 均线排列与斜率
+            if prices.len() >= 21 {
+                let n = prices.len();
+                let avg = |slice: &[f64]| slice.iter().sum::<f64>() / slice.len() as f64;
+                let ma5 = avg(&prices[n-5..n]);
+                let ma10 = avg(&prices[n-10..n]);
+                let ma20 = avg(&prices[n-20..n]);
+                if ma5 > ma10 && ma10 > ma20 { score += 1.0; }
+                if ma5 < ma10 && ma10 < ma20 { score -= 1.0; }
+                let prev_ma5 = avg(&prices[n-6..n-1]);
+                if ma5 > prev_ma5 { score += 0.3; } else { score -= 0.3; }
+            }
+
+            // 量比与 OBV
+            if volumes.len() >= 20 {
+                let n = volumes.len();
+                let avgv = |slice: &[i64]| slice.iter().map(|&v| v as f64).sum::<f64>() / slice.len() as f64;
+                let v5 = avgv(&volumes[n-5..n]);
+                let v20 = avgv(&volumes[n-20..n]);
+                let vr = if v20 > 0.0 { v5 / v20 } else { 1.0 };
+                if vr > 1.2 { score += 0.3; }
+                if vr < 0.8 { score -= 0.3; }
+            }
+            if technical_signals.obv > 0.0 { score += 0.2; } else { score -= 0.2; }
+
+            let k = 0.9_f64; // 温和的放大系数
+            let prob_up = 1.0 / (1.0 + (-k * score).exp());
+            (prob_up, score)
+        };
+
+        // 根据方向概率调整预测方向，并设定保守幅度（更关注方向正确性）
+        if direction_prob_up >= 0.55 && predicted_change_rate < 0.0 {
+            predicted_change_rate = predicted_change_rate.abs();
+        }
+        if direction_prob_up <= 0.45 && predicted_change_rate > 0.0 {
+            predicted_change_rate = -predicted_change_rate.abs();
+        }
+        // 使用基于波动率与趋势置信的保守幅度（不追求幅度精确）
+        let dir_mag = (volatility_factor * (0.6 + 0.4 * trend_analysis.trend_confidence) * (0.98_f64.powi((day as i32) - 1)))
+            .clamp(0.003, 0.06);
+        if predicted_change_rate == 0.0 {
+            predicted_change_rate = if direction_prob_up >= 0.5 { dir_mag } else { -dir_mag };
+        } else {
+            predicted_change_rate = predicted_change_rate.signum() * dir_mag;
+        }
+
+        // 9. 应用A股涨跌停限制
         let change_percent = clamp_daily_change(predicted_change_rate * 100.0);
         let clamped_change_rate = change_percent / 100.0;
         let predicted_price = last_price * (1.0 + clamped_change_rate);
         
-        // 9. 计算置信度（基于趋势一致性）
+        // 10. 置信度（趋势一致性 + MA/量能增强）
         let base_confidence = (metadata.accuracy + 0.3).min(0.8);
-        let trend_confidence_boost = trend_analysis.trend_confidence * 0.2; // 趋势置信度加成
+        let trend_confidence_boost = trend_analysis.trend_confidence * 0.2;
         let volatility_impact = 1.0 - (volatility_factor * 6.0).min(0.3);
         let prediction_magnitude = 1.0 - (change_percent.abs() / 12.0).min(0.25);
         let time_decay = match trend_analysis.overall_trend {
@@ -364,49 +486,63 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             _ => 0.94_f64.powi(day as i32),
         };
         
+        // MA排列契合及量比对置信度的贡献
+        let mut confidence_extra = 0.0;
+        if prices.len() >= 21 && volumes.len() >= 21 {
+            let n = prices.len();
+            let avg = |slice: &[f64]| slice.iter().sum::<f64>() / slice.len() as f64;
+            let ma5 = avg(&prices[n-5..n]);
+            let ma10 = avg(&prices[n-10..n]);
+            let ma20 = avg(&prices[n-20..n]);
+            if ma5 > ma10 && ma10 > ma20 { confidence_extra += 0.03; }
+            if ma5 < ma10 && ma10 < ma20 { confidence_extra += 0.03; }
+            let avgv = |slice: &[i64]| slice.iter().map(|&v| v as f64).sum::<f64>() / slice.len() as f64;
+            let v5 = avgv(&volumes[n-5..n]);
+            let v20 = avgv(&volumes[n-20..n]);
+            let vr = if v20 > 0.0 { v5 / v20 } else { 1.0 };
+            if vr > 1.2 { confidence_extra += 0.02; }
+        }
+        
         let confidence = (base_confidence 
             * volatility_impact 
             * prediction_magnitude 
             * time_decay 
-            + trend_confidence_boost)
+            + trend_confidence_boost
+            + confidence_extra)
             .clamp(0.35, 0.92);
         
-        // 10. 交易信号（结合趋势状态和日线技术指标）
+        // 11. 交易信号（结合趋势状态和日线技术指标）
         let trading_signal_str = match &trend_analysis.overall_trend {
             TrendState::StrongBullish => {
-                // 强涨势：日线金叉时给出最强烈信号
                 if technical_signals.macd_golden_cross && technical_signals.kdj_golden_cross {
-                    "强烈买入" // 双金叉确认
+                    "强烈买入"
                 } else if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    "强烈买入" // 单个金叉也给强烈信号
+                    "强烈买入"
                 } else if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    "持有" // 强涨势中出现死叉，降级为持有
+                    "持有"
                 } else {
-                    "买入" // 强涨势默认买入
+                    "买入"
                 }
             },
             TrendState::Bullish => {
-                // 涨势：日线金叉时增强信号
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    "买入" // 金叉确认涨势
+                    "买入"
                 } else if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    "持有" // 死叉时谨慎
+                    "持有"
                 } else {
-                    "买入" // 涨势默认买入
+                    "买入"
                 }
             },
             TrendState::Neutral => {
-                // 中性：完全依据日线技术指标
                 if technical_signals.macd_golden_cross && technical_signals.kdj_golden_cross {
-                    "买入" // 双金叉时看涨
+                    "买入"
                 } else if technical_signals.macd_death_cross && technical_signals.kdj_death_cross {
-                    "卖出" // 双死叉时看跌
+                    "卖出"
                 } else if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    "买入" // 单金叉偏多
+                    "买入"
                 } else if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    "卖出" // 单死叉偏空
+                    "卖出"
                 } else {
-                    // 无明确金叉死叉，看其他技术指标
                     match &technical_signals.signal {
                         TradingSignal::StrongBuy => "买入",
                         TradingSignal::Buy => "买入",
@@ -417,25 +553,23 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
                 }
             },
             TrendState::Bearish => {
-                // 跌势：日线死叉时增强信号
                 if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    "卖出" // 死叉确认跌势
+                    "卖出"
                 } else if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    "持有" // 金叉时谨慎
+                    "持有"
                 } else {
-                    "卖出" // 跌势默认卖出
+                    "卖出"
                 }
             },
             TrendState::StrongBearish => {
-                // 强跌势：日线死叉时给出最强烈信号
                 if technical_signals.macd_death_cross && technical_signals.kdj_death_cross {
-                    "强烈卖出" // 双死叉确认
+                    "强烈卖出"
                 } else if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    "强烈卖出" // 单个死叉也给强烈信号
+                    "强烈卖出"
                 } else if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    "持有" // 强跌势中出现金叉，降级为持有
+                    "持有"
                 } else {
-                    "卖出" // 强跌势默认卖出
+                    "卖出"
                 }
             },
         };
