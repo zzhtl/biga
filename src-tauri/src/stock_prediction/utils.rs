@@ -212,42 +212,42 @@ pub fn calculate_direction_focused_accuracy(predictions: &[f64], actuals: &[f64]
     if predictions.len() != actuals.len() || predictions.is_empty() {
         return (0.0, 0.0);
     }
-    
-    let mut direction_correct = 0;
-    let mut total_predictions = 0;
-    let mut price_error_sum = 0.0;
-    
-    for i in 1..predictions.len().min(actuals.len()) {
-        // 计算预测和实际的变化方向
-        let pred_change = predictions[i] - predictions[i-1];
-        let actual_change = actuals[i] - actuals[i-1];
-        
-        // 方向分类（使用更严格的阈值）
-        let pred_direction = Direction::from_change_percent(pred_change / predictions[i-1] * 100.0);
-        let actual_direction = Direction::from_change_percent(actual_change / actuals[i-1] * 100.0);
-        
-        // 方向准确性检查
+
+    let len = predictions.len();
+
+    // 自动识别单位：若平均绝对值 > 1.0，视为“百分比数值”；否则视为“比例/小数”
+    let avg_abs = (
+        predictions.iter().map(|v| v.abs()).sum::<f64>() +
+        actuals.iter().map(|v| v.abs()).sum::<f64>()
+    ) / (len as f64 * 2.0);
+    let use_percent_unit = avg_abs > 1.0;
+
+    let mut direction_correct: usize = 0;
+    let mut abs_change_diff_sum: f64 = 0.0; // 使用变化率（小数）的绝对差
+
+    for i in 0..len {
+        // 规范到百分比尺度用于方向判定（Direction 阈值基于 ±0.5%）
+        let pred_pct = if use_percent_unit { predictions[i] } else { predictions[i] * 100.0 };
+        let actual_pct = if use_percent_unit { actuals[i] } else { actuals[i] * 100.0 };
+
+        let pred_direction = Direction::from_change_percent(pred_pct);
+        let actual_direction = Direction::from_change_percent(actual_pct);
         if pred_direction == actual_direction {
             direction_correct += 1;
         }
-        
-        // 价格准确性（相对误差）
-        let relative_error = ((predictions[i] - actuals[i]) / actuals[i]).abs();
-        price_error_sum += relative_error;
-        
-        total_predictions += 1;
+
+        // 价格（变化率）准确性使用小数尺度的绝对差
+        let pred_frac = if use_percent_unit { predictions[i] / 100.0 } else { predictions[i] };
+        let actual_frac = if use_percent_unit { actuals[i] / 100.0 } else { actuals[i] };
+        abs_change_diff_sum += (pred_frac - actual_frac).abs();
     }
-    
-    if total_predictions == 0 {
-        return (0.0, 0.0);
-    }
-    
-    let direction_accuracy = direction_correct as f64 / total_predictions as f64;
-    let price_accuracy = (1.0 - (price_error_sum / total_predictions as f64)).max(0.0);
-    
+
+    let direction_accuracy = direction_correct as f64 / len as f64;
+    let price_accuracy = (1.0 - (abs_change_diff_sum / len as f64)).max(0.0);
+
     // 方向准确率权重提高到70%，价格准确率30%
     let combined_accuracy = direction_accuracy * 0.7 + price_accuracy * 0.3;
-    
+
     (direction_accuracy, combined_accuracy.min(0.85)) // 限制最高准确率保持现实性
 }
 

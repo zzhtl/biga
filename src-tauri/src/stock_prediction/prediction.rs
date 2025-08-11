@@ -238,8 +238,8 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         let base_model_prediction = raw_change_rate * 0.02; // 降低基础模型权重
         
         // 2. 趋势主导因子（大幅提高权重）
-        let trend_bias = trend_analysis.trend_strength * 0.015; // 趋势强度转换为日变化率
-        let trend_factor = trend_bias * trend_analysis.bias_multiplier * 0.6; // 60%权重给趋势
+        let trend_bias = trend_analysis.trend_strength * 0.012; // 略降映射强度
+        let trend_factor = trend_bias * trend_analysis.bias_multiplier * 0.5; // 降低趋势偏置权重
         
         // 3. 技术指标确认（与趋势配合）
         let tech_decay = 0.92_f64.powi(day as i32);
@@ -327,74 +327,74 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             TrendState::Neutral => 0.90_f64.powi(day as i32),
         };
         
-        // 6. 随机扰动（根据趋势强度和技术信号一致性调整）
+        // 6. 随机扰动（轻微减小幅度，避免噪声将方向推向上涨）
         let noise_amplitude = match trend_analysis.overall_trend {
             TrendState::StrongBullish | TrendState::StrongBearish => {
                 if (technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross || 
                     technical_signals.macd_death_cross || technical_signals.kdj_death_cross) {
-                    volatility_factor * 0.6
+                    volatility_factor * 0.5
                 } else {
-                    volatility_factor * 0.8
+                    volatility_factor * 0.7
                 }
             },
-            TrendState::Bullish | TrendState::Bearish => volatility_factor * 1.0,
-            TrendState::Neutral => volatility_factor * 1.3,
+            TrendState::Bullish | TrendState::Bearish => volatility_factor * 0.9,
+            TrendState::Neutral => volatility_factor * 1.1,
         };
         let market_noise = (rand::random::<f64>() * 2.0 - 1.0) * noise_amplitude;
         
-        // 7. 综合预测变化率（调整权重分配 + 新增MA/量能项）
-        let mut predicted_change_rate = base_model_prediction * 0.08
-            + trend_factor * trend_decay * 0.52
+        // 7. 综合预测变化率（下调趋势正偏权重，增加空头趋势权重对称性）
+        let mut predicted_change_rate = base_model_prediction * 0.10
+            + trend_factor * trend_decay * 0.40
             + technical_impact * 0.30
             + (ma_bias + vol_bias) * ma_vol_decay * 0.20
-            + market_noise * 0.10;
+            + market_noise * 0.12;
         
         // 8. 趋势一致性增强（特别重视日线金叉死叉）
         match trend_analysis.overall_trend {
             TrendState::StrongBullish => {
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.2; }
-                    predicted_change_rate += 0.012;
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.25; }
+                    predicted_change_rate += 0.010;
                 } else {
-                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.3; }
-                    predicted_change_rate += 0.008;
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.40; }
+                    predicted_change_rate += 0.006;
                 }
             },
             TrendState::Bullish => {
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.4; }
-                    predicted_change_rate += 0.007;
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.50; }
+                    predicted_change_rate += 0.005;
                 } else {
-                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.6; }
-                    predicted_change_rate += 0.004;
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.70; }
+                    predicted_change_rate += 0.003;
                 }
             },
             TrendState::StrongBearish => {
                 if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.2; }
-                    predicted_change_rate -= 0.012;
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.25; }
+                    predicted_change_rate -= 0.010;
                 } else {
-                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.3; }
-                    predicted_change_rate -= 0.008;
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.40; }
+                    predicted_change_rate -= 0.006;
                 }
             },
             TrendState::Bearish => {
                 if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.4; }
-                    predicted_change_rate -= 0.007;
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.50; }
+                    predicted_change_rate -= 0.005;
                 } else {
-                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.6; }
-                    predicted_change_rate -= 0.004;
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.70; }
+                    predicted_change_rate -= 0.003;
                 }
             },
             TrendState::Neutral => {
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    predicted_change_rate += 0.005;
+                    predicted_change_rate += 0.003;
                 } else if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    predicted_change_rate -= 0.005;
+                    predicted_change_rate -= 0.003;
                 }
             }
-        }
+        };
 
         // === 新增：方向投票（优先保证涨/跌判断的合理性） ===
         let (direction_prob_up, _direction_score) = {
@@ -422,11 +422,11 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             if technical_signals.kdj_j > 80.0 { score -= 0.6; }
             if technical_signals.kdj_j < 20.0 { score += 0.6; }
 
-            // RSI 权重
-            if technical_signals.rsi > 70.0 { score += 0.8; }
-            else if technical_signals.rsi > 55.0 { score += 0.5; }
-            else if technical_signals.rsi < 30.0 { score -= 0.8; }
-            else if technical_signals.rsi < 45.0 { score -= 0.5; }
+            // RSI 权重（修正：>70 超买应降低上涨概率，<30 超卖应提高上涨概率）
+            if technical_signals.rsi > 70.0 { score -= 0.8; }
+            else if technical_signals.rsi > 55.0 { score -= 0.3; }
+            else if technical_signals.rsi < 30.0 { score += 0.8; }
+            else if technical_signals.rsi < 45.0 { score += 0.3; }
 
             // 均线排列与斜率
             if prices.len() >= 21 {
@@ -511,10 +511,11 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         };
 
         // 根据方向概率调整预测方向，并设定保守幅度（更关注方向正确性）
-        if direction_prob_up >= 0.55 && predicted_change_rate < 0.0 {
+        // 收敛阈值，避免总偏向上涨或下跌
+        if direction_prob_up >= 0.60 && predicted_change_rate < 0.0 {
             predicted_change_rate = predicted_change_rate.abs();
         }
-        if direction_prob_up <= 0.45 && predicted_change_rate > 0.0 {
+        if direction_prob_up <= 0.40 && predicted_change_rate > 0.0 {
             predicted_change_rate = -predicted_change_rate.abs();
         }
         // 使用基于波动率与趋势置信的保守幅度（不追求幅度精确）
@@ -531,8 +532,8 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         let clamped_change_rate = change_percent / 100.0;
         let predicted_price = last_price * (1.0 + clamped_change_rate);
         
-        // 10. 置信度（趋势一致性 + MA/量能增强）
-        let base_confidence = (metadata.accuracy + 0.3).min(0.8);
+        // 10. 置信度（轻降上限，避免总是高置信度买入）
+        let base_confidence = (metadata.accuracy + 0.25).min(0.75);
         let trend_confidence_boost = trend_analysis.trend_confidence * 0.2;
         let volatility_impact = 1.0 - (volatility_factor * 6.0).min(0.3);
         let prediction_magnitude = 1.0 - (change_percent.abs() / 12.0).min(0.25);
