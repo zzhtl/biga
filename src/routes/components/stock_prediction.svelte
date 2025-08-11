@@ -173,6 +173,7 @@
     let backtestStartDate = "";
     let backtestEndDate = "";
     let backtestInterval = 7; // 默认每7天进行一次预测
+    let expandedEntryIndex: number | null = null; // 展开查看的回测条目索引
 
     onMount(async () => {
         try {
@@ -1093,10 +1094,11 @@
                                         <th>方向准确率</th>
                                         <th>平均误差</th>
                                         <th>预测次数</th>
+                                        <th>详情</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {#each backtestReport.backtest_entries as entry}
+                                    {#each backtestReport.backtest_entries as entry, i}
                                         <tr>
                                             <td>{new Date(entry.prediction_date).toLocaleDateString()}</td>
                                             <td class="accuracy-cell">
@@ -1113,7 +1115,52 @@
                                             </td>
                                             <td>{(entry.avg_prediction_error * 100).toFixed(2)}%</td>
                                             <td>{entry.predictions.length}</td>
+                                            <td>
+                                                <button class="action-btn" type="button" on:click={() => expandedEntryIndex = expandedEntryIndex === i ? null : i}>
+                                                    {expandedEntryIndex === i ? '收起' : '详情'}
+                                                </button>
+                                            </td>
                                         </tr>
+                                        {#if expandedEntryIndex === i}
+                                            <tr class="details-row">
+                                                <td colspan="6">
+                                                    <div class="entry-details">
+                                                        <h5>详细对比（{new Date(entry.prediction_date).toLocaleDateString()} 发起）</h5>
+                                                        <div class="entry-table-wrapper">
+                                                            <table class="entry-table">
+                                                                <thead>
+                                                                    <tr>
+                                                                        <th>目标日期</th>
+                                                                        <th>预测价格</th>
+                                                                        <th>实际价格</th>
+                                                                        <th>误差</th>
+                                                                        <th>方向</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                    {#each entry.predictions as p, idx}
+                                                                        {#if entry.actual_prices && entry.actual_prices[idx] !== undefined}
+                                                                            {@const actual = entry.actual_prices[idx]}
+                                                                            {@const errPct = actual !== 0 ? Math.abs((p.predicted_price - actual) / actual) * 100 : 0}
+                                                                            {@const dirCorrect = (p.predicted_change_percent > 0 && entry.actual_changes[idx] > 0) || (p.predicted_change_percent < 0 && entry.actual_changes[idx] < 0) || (p.predicted_change_percent === 0 && entry.actual_changes[idx] === 0)}
+                                                                            <tr>
+                                                                                <td>{new Date(p.target_date).toLocaleDateString()}</td>
+                                                                                <td>{p.predicted_price.toFixed(2)}</td>
+                                                                                <td>{actual.toFixed(2)}</td>
+                                                                                <td class={errPct <= 2 ? 'positive' : errPct >= 5 ? 'negative' : ''}>{errPct.toFixed(2)}%</td>
+                                                                                <td>
+                                                                                    <span class={dirCorrect ? 'chip-correct' : 'chip-wrong'}>{dirCorrect ? '正确' : '错误'}</span>
+                                                                                </td>
+                                                                            </tr>
+                                                                        {/if}
+                                                                    {/each}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        {/if}
                                     {/each}
                                 </tbody>
                             </table>
@@ -2264,5 +2311,49 @@
         font-size: 0.875rem;
         font-weight: 600;
         color: white;
+    }
+
+    /* 回测详情扩展 */
+    .entry-details {
+        margin-top: 1rem;
+        padding: 1rem;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 0.5rem;
+    }
+    .entry-table-wrapper {
+        overflow-x: auto;
+    }
+    .entry-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    .entry-table th,
+    .entry-table td {
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .chip-correct {
+        display: inline-block;
+        padding: 0.125rem 0.5rem;
+        border-radius: 0.5rem;
+        background: rgba(16, 185, 129, 0.2);
+        color: #10b981;
+        border: 1px solid #10b981;
+        font-weight: 600;
+        font-size: 0.8rem;
+    }
+    .chip-wrong {
+        display: inline-block;
+        padding: 0.125rem 0.5rem;
+        border-radius: 0.5rem;
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+        border: 1px solid #ef4444;
+        font-weight: 600;
+        font-size: 0.8rem;
+    }
+    .details-row td {
+        background: rgba(255, 255, 255, 0.03);
+        padding: 0;
     }
 </style>

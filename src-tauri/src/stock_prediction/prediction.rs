@@ -16,6 +16,9 @@ use crate::stock_prediction::utils::{
 };
 use crate::stock_prediction::technical_analysis::analyze_technical_signals;
 use crate::stock_prediction::technical_indicators::{get_feature_required_days, calculate_feature_value};
+use crate::stock_prediction::multi_timeframe_analysis::{
+    StockData, convert_to_weekly, convert_to_monthly, calculate_macd_signal, calculate_kdj_signal
+};
 
 // 简化的模型创建函数（与training.rs中的相同，用于加载模型）
 fn create_model(config: &ModelConfig, device: &Device) -> Result<(VarMap, Box<dyn Module + Send + Sync>), candle_core::Error> {
@@ -406,14 +409,14 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
                 TrendState::StrongBearish => -2.0,
             };
 
-            // MACD 权重
+            // MACD 权重（当下日线）
             if technical_signals.macd_golden_cross { score += 1.2; }
             if technical_signals.macd_death_cross { score -= 1.2; }
             if technical_signals.macd_histogram > 0.0 { score += 0.6; } else { score -= 0.6; }
             if technical_signals.macd_zero_cross_up { score += 0.8; }
             if technical_signals.macd_zero_cross_down { score -= 0.8; }
 
-            // KDJ 权重
+            // KDJ 权重（当下日线）
             if technical_signals.kdj_golden_cross { score += 0.8; }
             if technical_signals.kdj_death_cross { score -= 0.8; }
             if technical_signals.kdj_j > 80.0 { score -= 0.6; }
@@ -449,6 +452,58 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
                 if vr < 0.8 { score -= 0.3; }
             }
             if technical_signals.obv > 0.0 { score += 0.2; } else { score -= 0.2; }
+
+            // 多周期信号融合（日/周/月）
+            // 构造日线数据
+            let mut daily_data: Vec<StockData> = Vec::with_capacity(prices.len());
+            for (i, date) in dates.iter().enumerate() {
+                // 缺少开盘价，这里用收盘价近似
+                let open_approx = prices[i];
+                daily_data.push(StockData {
+                    symbol: request.stock_code.clone(),
+                    date: date.clone(),
+                    open: open_approx,
+                    high: highs.get(i).copied().unwrap_or(prices[i]),
+                    low: lows.get(i).copied().unwrap_or(prices[i]),
+                    close: prices[i],
+                    volume: volumes.get(i).copied().unwrap_or(0) as f64,
+                });
+            }
+            let weekly_data = convert_to_weekly(&daily_data);
+            let monthly_data = convert_to_monthly(&daily_data);
+
+            let daily_macd = calculate_macd_signal(&daily_data, 12, 26, 9);
+            let weekly_macd = calculate_macd_signal(&weekly_data, 12, 26, 9);
+            let monthly_macd = calculate_macd_signal(&monthly_data, 12, 26, 9);
+            let daily_kdj = calculate_kdj_signal(&daily_data, 9, 3, 3);
+            let weekly_kdj = calculate_kdj_signal(&weekly_data, 9, 3, 3);
+            let monthly_kdj = calculate_kdj_signal(&monthly_data, 9, 3, 3);
+
+            if let (Some(dm), Some(wm), Some(mm)) = (daily_macd.last(), weekly_macd.last(), monthly_macd.last()) {
+                if dm.is_golden_cross { score += 0.5; } else if dm.is_death_cross { score -= 0.5; }
+                if wm.is_golden_cross { score += 0.8; } else if wm.is_death_cross { score -= 0.8; }
+                if mm.is_golden_cross { score += 1.2; } else if mm.is_death_cross { score -= 1.2; }
+                if dm.histogram > 0.0 { score += 0.2; } else { score -= 0.2; }
+                if wm.histogram > 0.0 { score += 0.35; } else { score -= 0.35; }
+                if mm.histogram > 0.0 { score += 0.5; } else { score -= 0.5; }
+            }
+            if let (Some(dk), Some(wk), Some(mk)) = (daily_kdj.last(), weekly_kdj.last(), monthly_kdj.last()) {
+                if dk.is_golden_cross { score += 0.3; } else if dk.is_death_cross { score -= 0.3; }
+                if wk.is_golden_cross { score += 0.5; } else if wk.is_death_cross { score -= 0.5; }
+                if mk.is_golden_cross { score += 0.8; } else if mk.is_death_cross { score -= 0.8; }
+                if dk.j > 80.0 { score -= 0.2; }
+                if dk.j < 20.0 { score += 0.2; }
+            }
+
+            // 20日突破信号（Donchian 简化）
+            if highs.len() >= 21 && lows.len() >= 21 {
+                let n = highs.len();
+                let max20 = highs[n-21..n-1].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+                let min20 = lows[n-21..n-1].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+                let last_close = prices[n-1];
+                if last_close > max20 { score += 0.8; }
+                if last_close < min20 { score -= 0.8; }
+            }
 
             let k = 0.9_f64; // 温和的放大系数
             let prob_up = 1.0 / (1.0 + (-k * score).exp());
