@@ -35,6 +35,8 @@ pub struct PatternRecognition {
     pub reliability: f64,         // 可靠性 0-1
     pub direction: Direction,     // 看涨/看跌
     pub description: String,      // 形态描述
+    pub location_type: String,    // 位置类型：顶部/底部/中继
+    pub confirmed: bool,          // 是否已确认
 }
 
 #[derive(Debug, Clone)]
@@ -276,7 +278,74 @@ pub fn is_three_black_crows(c1: &Candle, c2: &Candle, c3: &Candle) -> Option<f64
     None
 }
 
-/// 综合识别所有K线形态
+/// 判断形态位置类型（顶部/底部/中继）
+fn determine_location_type(candles: &[Candle], position: usize, direction: Direction) -> String {
+    if position < 20 || position >= candles.len() {
+        return "中继".to_string();
+    }
+    
+    // 取前20根K线作为判断依据
+    let lookback = &candles[position.saturating_sub(20)..position];
+    let current_price = candles[position].close;
+    
+    // 计算最高价和最低价
+    let max_price = lookback.iter().map(|c| c.high).fold(f64::NEG_INFINITY, f64::max);
+    let min_price = lookback.iter().map(|c| c.low).fold(f64::INFINITY, f64::min);
+    
+    let range = max_price - min_price;
+    let position_pct = (current_price - min_price) / range;
+    
+    match direction {
+        Direction::Bullish => {
+            // 看涨形态：在底部区域(< 30%)可靠性更高
+            if position_pct < 0.3 {
+                "底部反转".to_string()
+            } else if position_pct < 0.7 {
+                "中继上涨".to_string()
+            } else {
+                "顶部警惕".to_string()
+            }
+        }
+        Direction::Bearish => {
+            // 看跌形态：在顶部区域(> 70%)可靠性更高
+            if position_pct > 0.7 {
+                "顶部反转".to_string()
+            } else if position_pct > 0.3 {
+                "中继下跌".to_string()
+            } else {
+                "底部警惕".to_string()
+            }
+        }
+        Direction::Neutral => "中继震荡".to_string(),
+    }
+}
+
+/// 创建形态识别记录的辅助函数
+fn create_pattern_recognition(
+    candles: &[Candle],
+    pattern: CandlePattern,
+    position: usize,
+    strength: f64,
+    reliability: f64,
+    direction: Direction,
+    description: String,
+) -> PatternRecognition {
+    let location_type = determine_location_type(candles, position, direction);
+    let confirmed = position < candles.len() - 1; // 不是最后一根K线才算确认
+    
+    PatternRecognition {
+        pattern,
+        position,
+        strength,
+        reliability,
+        direction,
+        description,
+        location_type,
+        confirmed,
+    }
+}
+
+/// 综合识别所有K线形态（增强版）
 pub fn identify_all_patterns(
     candles: &[Candle],
 ) -> Vec<PatternRecognition> {
@@ -291,36 +360,39 @@ pub fn identify_all_patterns(
     let last = &candles[n - 1];
     
     if let Some(strength) = is_hammer(last) {
-        patterns.push(PatternRecognition {
-            pattern: CandlePattern::Hammer,
-            position: n - 1,
+        patterns.push(create_pattern_recognition(
+            candles,
+            CandlePattern::Hammer,
+            n - 1,
             strength,
-            reliability: 0.75,
-            direction: Direction::Bullish,
-            description: "锤子线：底部反转信号，看涨".to_string(),
-        });
+            0.75,
+            Direction::Bullish,
+            "锤子线：底部反转信号，看涨".to_string(),
+        ));
     }
     
     if let Some(strength) = is_shooting_star(last) {
-        patterns.push(PatternRecognition {
-            pattern: CandlePattern::ShootingStar,
-            position: n - 1,
+        patterns.push(create_pattern_recognition(
+            candles,
+            CandlePattern::ShootingStar,
+            n - 1,
             strength,
-            reliability: 0.75,
-            direction: Direction::Bearish,
-            description: "射击之星：顶部反转信号，看跌".to_string(),
-        });
+            0.75,
+            Direction::Bearish,
+            "射击之星：顶部反转信号，看跌".to_string(),
+        ));
     }
     
     if let Some(strength) = is_doji(last) {
-        patterns.push(PatternRecognition {
-            pattern: CandlePattern::Doji,
-            position: n - 1,
+        patterns.push(create_pattern_recognition(
+            candles,
+            CandlePattern::Doji,
+            n - 1,
             strength,
-            reliability: 0.60,
-            direction: Direction::Neutral,
-            description: "十字星：趋势可能反转，观望".to_string(),
-        });
+            0.60,
+            Direction::Neutral,
+            "十字星：趋势可能反转，观望".to_string(),
+        ));
     }
     
     // 两根K线形态
@@ -329,47 +401,51 @@ pub fn identify_all_patterns(
         let curr = &candles[n - 1];
         
         if let Some(strength) = is_bullish_engulfing(prev, curr) {
-            patterns.push(PatternRecognition {
-                pattern: CandlePattern::BullishEngulfing,
-                position: n - 1,
+            patterns.push(create_pattern_recognition(
+                candles,
+                CandlePattern::BullishEngulfing,
+                n - 1,
                 strength,
-                reliability: 0.80,
-                direction: Direction::Bullish,
-                description: "看涨吞没：强烈看涨信号".to_string(),
-            });
+                0.80,
+                Direction::Bullish,
+                "看涨吞没：强烈看涨信号".to_string(),
+            ));
         }
         
         if let Some(strength) = is_bearish_engulfing(prev, curr) {
-            patterns.push(PatternRecognition {
-                pattern: CandlePattern::BearishEngulfing,
-                position: n - 1,
+            patterns.push(create_pattern_recognition(
+                candles,
+                CandlePattern::BearishEngulfing,
+                n - 1,
                 strength,
-                reliability: 0.80,
-                direction: Direction::Bearish,
-                description: "看跌吞没：强烈看跌信号".to_string(),
-            });
+                0.80,
+                Direction::Bearish,
+                "看跌吞没：强烈看跌信号".to_string(),
+            ));
         }
         
         if let Some(strength) = is_piercing_line(prev, curr) {
-            patterns.push(PatternRecognition {
-                pattern: CandlePattern::PiercingLine,
-                position: n - 1,
+            patterns.push(create_pattern_recognition(
+                candles,
+                CandlePattern::PiercingLine,
+                n - 1,
                 strength,
-                reliability: 0.70,
-                direction: Direction::Bullish,
-                description: "刺透形态：底部反转，看涨".to_string(),
-            });
+                0.70,
+                Direction::Bullish,
+                "刺透形态：底部反转，看涨".to_string(),
+            ));
         }
         
         if let Some(strength) = is_dark_cloud_cover(prev, curr) {
-            patterns.push(PatternRecognition {
-                pattern: CandlePattern::DarkCloudCover,
-                position: n - 1,
+            patterns.push(create_pattern_recognition(
+                candles,
+                CandlePattern::DarkCloudCover,
+                n - 1,
                 strength,
-                reliability: 0.70,
-                direction: Direction::Bearish,
-                description: "乌云盖顶：顶部反转，看跌".to_string(),
-            });
+                0.70,
+                Direction::Bearish,
+                "乌云盖顶：顶部反转，看跌".to_string(),
+            ));
         }
     }
     
@@ -380,47 +456,51 @@ pub fn identify_all_patterns(
         let c3 = &candles[n - 1];
         
         if let Some(strength) = is_morning_star(c1, c2, c3) {
-            patterns.push(PatternRecognition {
-                pattern: CandlePattern::MorningStar,
-                position: n - 1,
+            patterns.push(create_pattern_recognition(
+                candles,
+                CandlePattern::MorningStar,
+                n - 1,
                 strength,
-                reliability: 0.85,
-                direction: Direction::Bullish,
-                description: "启明星：强烈底部反转信号".to_string(),
-            });
+                0.85,
+                Direction::Bullish,
+                "启明星：强烈底部反转信号".to_string(),
+            ));
         }
         
         if let Some(strength) = is_evening_star(c1, c2, c3) {
-            patterns.push(PatternRecognition {
-                pattern: CandlePattern::EveningStar,
-                position: n - 1,
+            patterns.push(create_pattern_recognition(
+                candles,
+                CandlePattern::EveningStar,
+                n - 1,
                 strength,
-                reliability: 0.85,
-                direction: Direction::Bearish,
-                description: "黄昏星：强烈顶部反转信号".to_string(),
-            });
+                0.85,
+                Direction::Bearish,
+                "黄昏星：强烈顶部反转信号".to_string(),
+            ));
         }
         
         if let Some(strength) = is_three_white_soldiers(c1, c2, c3) {
-            patterns.push(PatternRecognition {
-                pattern: CandlePattern::ThreeWhiteSoldiers,
-                position: n - 1,
+            patterns.push(create_pattern_recognition(
+                candles,
+                CandlePattern::ThreeWhiteSoldiers,
+                n - 1,
                 strength,
-                reliability: 0.80,
-                direction: Direction::Bullish,
-                description: "三只白鸦：强势上涨信号".to_string(),
-            });
+                0.80,
+                Direction::Bullish,
+                "三只白鸦：强势上涨信号".to_string(),
+            ));
         }
         
         if let Some(strength) = is_three_black_crows(c1, c2, c3) {
-            patterns.push(PatternRecognition {
-                pattern: CandlePattern::ThreeBlackCrows,
-                position: n - 1,
+            patterns.push(create_pattern_recognition(
+                candles,
+                CandlePattern::ThreeBlackCrows,
+                n - 1,
                 strength,
-                reliability: 0.80,
-                direction: Direction::Bearish,
-                description: "三只黑鸦：强势下跌信号".to_string(),
-            });
+                0.80,
+                Direction::Bearish,
+                "三只黑鸦：强势下跌信号".to_string(),
+            ));
         }
     }
     

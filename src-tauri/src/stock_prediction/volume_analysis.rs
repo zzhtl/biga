@@ -11,6 +11,10 @@ pub struct VolumeAnalysisResult {
     pub volume_price_sync: bool,        // 量价配合是否良好
     pub abnormal_volume_days: Vec<usize>, // 异常放量的日期索引
     pub accumulation_signal: f64,       // 吸筹信号强度 0-100
+    pub vr_ratio: f64,                  // VR量价比率
+    pub mfi: f64,                       // 资金流向指标 (0-100)
+    pub volume_pattern: String,         // 成交量形态
+    pub money_flow_trend: String,       // 资金流向趋势
 }
 
 /// 计算OBV（能量潮）指标
@@ -171,28 +175,161 @@ pub fn detect_accumulation_signal(
     score
 }
 
-/// 综合量价分析
-pub fn analyze_volume_price(
+/// 计算VR量价比率
+/// VR = (上涨日成交量和 + 1/2平盘日成交量和) / (下跌日成交量和 + 1/2平盘日成交量和)
+pub fn calculate_vr_ratio(prices: &[f64], volumes: &[i64], window: usize) -> f64 {
+    if prices.len() < window || volumes.len() < window {
+        return 100.0; // 默认值
+    }
+    
+    let n = prices.len();
+    let start = n - window;
+    
+    let mut up_volume = 0.0;
+    let mut down_volume = 0.0;
+    let mut equal_volume = 0.0;
+    
+    for i in (start + 1)..n {
+        let vol = volumes[i] as f64;
+        if prices[i] > prices[i - 1] {
+            up_volume += vol;
+        } else if prices[i] < prices[i - 1] {
+            down_volume += vol;
+        } else {
+            equal_volume += vol;
+        }
+    }
+    
+    let numerator = up_volume + equal_volume * 0.5;
+    let denominator = down_volume + equal_volume * 0.5;
+    
+    if denominator > 0.0 {
+        (numerator / denominator) * 100.0
+    } else {
+        200.0 // 极端看涨
+    }
+}
+
+/// 计算MFI资金流向指标
+/// MFI = 100 - (100 / (1 + 资金流量比))
+pub fn calculate_mfi(prices: &[f64], volumes: &[i64], highs: &[f64], lows: &[f64], window: usize) -> f64 {
+    if prices.len() < window + 1 {
+        return 50.0;
+    }
+    
+    let n = prices.len();
+    let mut positive_flow = 0.0;
+    let mut negative_flow = 0.0;
+    
+    for i in (n - window)..n {
+        if i == 0 { continue; }
+        
+        // 典型价格 = (最高价 + 最低价 + 收盘价) / 3
+        let typical_price = (highs[i] + lows[i] + prices[i]) / 3.0;
+        let prev_typical_price = (highs[i-1] + lows[i-1] + prices[i-1]) / 3.0;
+        
+        // 资金流量 = 典型价格 × 成交量
+        let money_flow = typical_price * volumes[i] as f64;
+        
+        if typical_price > prev_typical_price {
+            positive_flow += money_flow;
+        } else if typical_price < prev_typical_price {
+            negative_flow += money_flow;
+        }
+    }
+    
+    if negative_flow == 0.0 {
+        return 100.0;
+    }
+    
+    let money_flow_ratio = positive_flow / negative_flow;
+    100.0 - (100.0 / (1.0 + money_flow_ratio))
+}
+
+/// 识别成交量形态
+pub fn identify_volume_pattern(volumes: &[i64], volume_ratios: &[f64]) -> String {
+    if volumes.len() < 10 || volume_ratios.len() < 10 {
+        return "数据不足".to_string();
+    }
+    
+    let n = volumes.len();
+    let recent_ratios = &volume_ratios[n-5..];
+    
+    // 1. 放量突破形态
+    if recent_ratios.last().unwrap() > &2.0 && recent_ratios[recent_ratios.len()-2] > 1.5 {
+        return "放量突破".to_string();
+    }
+    
+    // 2. 缩量整理形态
+    let avg_ratio: f64 = recent_ratios.iter().sum::<f64>() / recent_ratios.len() as f64;
+    if avg_ratio < 0.7 {
+        return "缩量整理".to_string();
+    }
+    
+    // 3. 温和放量形态
+    if avg_ratio > 1.0 && avg_ratio < 1.5 {
+        let is_gradual = recent_ratios.windows(2).all(|w| (w[1] - w[0]).abs() < 0.3);
+        if is_gradual {
+            return "温和放量".to_string();
+        }
+    }
+    
+    // 4. 间歇放量形态
+    let high_volume_days = recent_ratios.iter().filter(|&&r| r > 1.5).count();
+    if high_volume_days >= 2 && high_volume_days <= 3 {
+        return "间歇放量".to_string();
+    }
+    
+    "常规波动".to_string()
+}
+
+/// 判断资金流向趋势
+pub fn analyze_money_flow_trend(mfi: f64, obv: &[f64]) -> String {
+    let obv_trend = if obv.len() >= 10 {
+        let recent = &obv[obv.len()-10..];
+        if recent.last().unwrap() > recent.first().unwrap() {
+            "上升"
+        } else {
+            "下降"
+        }
+    } else {
+        "不明"
+    };
+    
+    // 综合MFI和OBV判断
+    if mfi > 80.0 {
+        format!("强势流入(MFI:{:.0}, OBV:{})", mfi, obv_trend)
+    } else if mfi > 60.0 {
+        format!("持续流入(MFI:{:.0}, OBV:{})", mfi, obv_trend)
+    } else if mfi > 40.0 {
+        format!("平衡状态(MFI:{:.0}, OBV:{})", mfi, obv_trend)
+    } else if mfi > 20.0 {
+        format!("持续流出(MFI:{:.0}, OBV:{})", mfi, obv_trend)
+    } else {
+        format!("强势流出(MFI:{:.0}, OBV:{})", mfi, obv_trend)
+    }
+}
+
+/// 综合量价分析（增强版）
+pub fn analyze_volume_price_enhanced(
     prices: &[f64],
     volumes: &[i64],
+    highs: &[f64],
+    lows: &[f64],
 ) -> VolumeAnalysisResult {
-    // 计算OBV
+    // 原有指标计算
     let obv = calculate_obv(prices, volumes);
-    
-    // 计算量比
     let volume_ratio = calculate_volume_ratio(volumes, 5);
-    
-    // 检测异常放量
     let abnormal_volume_days = detect_abnormal_volume(&volume_ratio, 2.0);
-    
-    // 判断量价配合
     let volume_price_sync = check_volume_price_sync(prices, volumes, 10);
-    
-    // 判断量能趋势
     let volume_trend = identify_volume_trend(volumes, 10);
-    
-    // 检测吸筹信号
     let accumulation_signal = detect_accumulation_signal(prices, volumes, &obv, 20);
+    
+    // 新增指标计算
+    let vr_ratio = calculate_vr_ratio(prices, volumes, 24);
+    let mfi = calculate_mfi(prices, volumes, highs, lows, 14);
+    let volume_pattern = identify_volume_pattern(volumes, &volume_ratio);
+    let money_flow_trend = analyze_money_flow_trend(mfi, &obv);
     
     VolumeAnalysisResult {
         obv,
@@ -201,7 +338,22 @@ pub fn analyze_volume_price(
         volume_price_sync,
         abnormal_volume_days,
         accumulation_signal,
+        vr_ratio,
+        mfi,
+        volume_pattern,
+        money_flow_trend,
     }
+}
+
+/// 综合量价分析（兼容旧版）
+pub fn analyze_volume_price(
+    prices: &[f64],
+    volumes: &[i64],
+) -> VolumeAnalysisResult {
+    // 使用price作为highs和lows的估算
+    let highs = prices.to_vec();
+    let lows = prices.to_vec();
+    analyze_volume_price_enhanced(prices, volumes, &highs, &lows)
 }
 
 #[cfg(test)]

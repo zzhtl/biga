@@ -1,6 +1,5 @@
 use candle_core::{Device, Tensor};
 use candle_nn::{Module, VarMap};
-use rand;
 use chrono;
 use crate::stock_prediction::types::{
     ModelConfig, Prediction, TechnicalIndicatorValues, PredictionRequest, 
@@ -15,7 +14,12 @@ use crate::stock_prediction::utils::{
     calculate_volume_price_change
 };
 use crate::stock_prediction::technical_analysis::analyze_technical_signals;
-use crate::stock_prediction::technical_indicators::{get_feature_required_days, calculate_feature_value};
+use crate::stock_prediction::technical_indicators::{
+    get_feature_required_days, 
+    calculate_feature_value, 
+    calculate_rsi,
+    calculate_macd_full
+};
 use crate::stock_prediction::multi_timeframe_analysis::{
     StockData, convert_to_weekly, convert_to_monthly, calculate_macd_signal, calculate_kdj_signal
 };
@@ -950,14 +954,21 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             TrendState::Bullish | TrendState::Bearish => volatility_factor * 0.9,
             TrendState::Neutral => volatility_factor * 1.1,
         };
-        let market_noise = (rand::random::<f64>() * 2.0 - 1.0) * noise_amplitude;
+        
+        // 使用确定性的市场波动（基于历史波动率和预测天数）
+        // 金融逻辑：市场总有波动，但波动是确定性的（基于历史数据）
+        let market_fluctuation = {
+            // 基于预测天数的确定性波动因子
+            let day_factor = ((day as f64 * 0.618).sin() * 0.5 + 0.5); // 0.0-1.0的确定性波动
+            noise_amplitude * (day_factor - 0.5) * 2.0 // 转换为±noise_amplitude范围
+        };
         
         // 7. 综合预测变化率（下调趋势正偏权重，增加空头趋势权重对称性）
         let mut predicted_change_rate = base_model_prediction * 0.10
             + trend_factor * trend_decay * 0.40
             + technical_impact * 0.30
             + (ma_bias + vol_bias) * ma_vol_decay * 0.20
-            + market_noise * 0.12;
+            + market_fluctuation * 0.12;
         
         // 8. 趋势一致性增强（特别重视日线金叉死叉）
         match trend_analysis.overall_trend {
@@ -1128,13 +1139,24 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         if direction_prob_up <= 0.40 && predicted_change_rate > 0.0 {
             predicted_change_rate = -predicted_change_rate.abs();
         }
-        // 使用基于波动率与趋势置信的保守幅度（不追求幅度精确）
+        // 使用基于波动率与趋势置信的幅度调整
+        // 金融逻辑：保守预测，但保留趋势信息
         let dir_mag = (volatility_factor * (0.6 + 0.4 * trend_analysis.trend_confidence) * (0.98_f64.powi((day as i32) - 1)))
             .clamp(0.003, 0.06);
-        if predicted_change_rate == 0.0 {
+        
+        // 确保有合理的变化率（金融逻辑：股价不会完全不动）
+        if predicted_change_rate.abs() < 0.001 {
+            // 变化率太小时，使用dir_mag作为基准
             predicted_change_rate = if direction_prob_up >= 0.5 { dir_mag } else { -dir_mag };
+        } else if predicted_change_rate.abs() > dir_mag * 2.0 {
+            // 变化率过大时，限制为2倍dir_mag（保守预测）
+            predicted_change_rate = predicted_change_rate.signum() * dir_mag * 2.0;
         } else {
-            predicted_change_rate = predicted_change_rate.signum() * dir_mag;
+            // 变化率适中，保留原值但确保有最小幅度
+            let min_mag = dir_mag * 0.3;
+            if predicted_change_rate.abs() < min_mag {
+                predicted_change_rate = predicted_change_rate.signum() * min_mag;
+            }
         }
 
         // 9. 应用A股涨跌停限制
@@ -1266,6 +1288,8 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             trading_signal: Some(trading_signal_str.to_string()),
             signal_strength: Some(trend_analysis.trend_strength),
             technical_indicators: Some(technical_indicators),
+            prediction_reason: None,  // 主预测函数暂不生成理由
+            key_factors: None,
         });
         
         last_price = predicted_price;
@@ -1277,7 +1301,14 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             lows.push(predicted_price * 0.995);
             
             if let Some(&last_volume) = volumes.last() {
-                let volume_change = 0.8 + rand::random::<f64>() * 0.4;
+                // 使用确定性的成交量变化（基于趋势方向）
+                let volume_change = match trend_analysis.overall_trend {
+                    TrendState::StrongBullish => 1.08,  // 强势上涨：成交量明显增加
+                    TrendState::Bullish => 1.05,        // 上涨趋势：成交量略增
+                    TrendState::Neutral => 1.0,         // 震荡：成交量持平
+                    TrendState::Bearish => 0.95,        // 下跌趋势：成交量略减
+                    TrendState::StrongBearish => 0.92,  // 强势下跌：成交量明显减少
+                };
                 volumes.push((last_volume as f64 * volume_change) as i64);
             }
             
@@ -1387,6 +1418,8 @@ pub async fn predict_with_simple_strategy(request: PredictionRequest) -> std::re
             trading_signal: Some(trading_signal.clone()),
             signal_strength: Some(volume_price_strategy.direction_confidence),
             technical_indicators: Some(technical_indicators),
+            prediction_reason: None,  // 量价策略暂不生成理由
+            key_factors: None,
         });
         
         last_price = predicted_price;
@@ -1567,7 +1600,7 @@ pub async fn predict_with_professional_strategy(
     
     let candle_patterns = candlestick_patterns::identify_all_patterns(&candles);
     
-    println!("\n📊 ========== K线形态识别 ==========");
+    println!("\n📊 ========== K线形态识别（增强版） ==========");
     if !candle_patterns.is_empty() {
         for pattern in &candle_patterns {
             let direction_str = match pattern.direction {
@@ -1575,26 +1608,46 @@ pub async fn predict_with_professional_strategy(
                 candlestick_patterns::Direction::Bearish => "🔴 看跌",
                 candlestick_patterns::Direction::Neutral => "🟡 中性",
             };
-            println!("   {} - {} (强度: {:.0}%, 可靠性: {:.0}%)", 
+            let confirm_str = if pattern.confirmed { "✅已确认" } else { "⏳待确认" };
+            println!("   {} - {} (强度: {:.0}%, 可靠性: {:.0}%) {}", 
                      direction_str,
                      pattern.description,
                      pattern.strength * 100.0,
-                     pattern.reliability * 100.0);
+                     pattern.reliability * 100.0,
+                     confirm_str);
+            println!("      位置: {} | 出现在第{}根K线", 
+                     pattern.location_type,
+                     pattern.position + 1);
         }
     } else {
         println!("   未检测到明显的K线形态信号");
     }
     
-    // 7. 量价关系深度分析
-    let volume_analysis_raw = volume_analysis::analyze_volume_price(&prices, &volumes);
+    // 7. 量价关系深度分析（增强版）
+    let volume_analysis_raw = volume_analysis::analyze_volume_price_enhanced(&prices, &volumes, &highs, &lows);
     
-    println!("\n📈 ========== 量价关系分析 ==========");
+    println!("\n📈 ========== 量价关系分析（增强版） ==========");
     println!("   量能趋势: {}", volume_analysis_raw.volume_trend);
     println!("   量价配合: {}", if volume_analysis_raw.volume_price_sync { "✅ 良好" } else { "⚠️ 背离" });
     println!("   吸筹信号: {:.0}分", volume_analysis_raw.accumulation_signal);
+    println!("   🔥 VR量价比率: {:.1} {}", 
+             volume_analysis_raw.vr_ratio,
+             if volume_analysis_raw.vr_ratio > 180.0 { "(强势)" }
+             else if volume_analysis_raw.vr_ratio > 120.0 { "(适中)" }
+             else if volume_analysis_raw.vr_ratio > 80.0 { "(弱势)" }
+             else { "(超弱)" });
+    println!("   💰 MFI资金流向: {:.1}", volume_analysis_raw.mfi);
+    println!("   📊 成交量形态: {}", volume_analysis_raw.volume_pattern);
+    println!("   💵 资金趋势: {}", volume_analysis_raw.money_flow_trend);
     
     if volume_analysis_raw.accumulation_signal > 60.0 {
         println!("   💡 检测到主力吸筹信号！");
+    }
+    
+    if volume_analysis_raw.mfi > 80.0 {
+        println!("   ⚡ MFI超买预警！资金流入过热");
+    } else if volume_analysis_raw.mfi < 20.0 {
+        println!("   ⚡ MFI超卖！资金流出严重");
     }
     
     if !volume_analysis_raw.abnormal_volume_days.is_empty() {
@@ -1881,6 +1934,122 @@ fn generate_trading_advice(
 }
 
 /// 生成价格预测
+/// 生成预测理由和关键因素
+fn generate_prediction_reason(
+    predicted_price: f64,
+    current_price: f64,
+    change_percent: f64,
+    day: usize,
+    support_resistance: &SupportResistance,
+    multi_timeframe: &MultiTimeframeSignal,
+    trend_strength: f64,
+    rsi: f64,
+    macd_histogram: f64,
+) -> (String, Vec<String>) {
+    let mut reasons = Vec::new();
+    let mut key_factors = Vec::new();
+    
+    // 1. 分析价格位置
+    let near_resistance = support_resistance.resistance_levels.iter()
+        .any(|&r| (predicted_price - r).abs() / r < 0.02);
+    let near_support = support_resistance.support_levels.iter()
+        .any(|&s| (predicted_price - s).abs() / s < 0.02);
+    
+    // 2. 分析趋势强度
+    let trend_desc = if trend_strength > 0.010 {
+        "强势上涨趋势"
+    } else if trend_strength > 0.005 {
+        "温和上涨趋势"
+    } else if trend_strength > -0.005 {
+        "震荡整理"
+    } else if trend_strength > -0.010 {
+        "温和下跌趋势"
+    } else {
+        "强势下跌趋势"
+    };
+    
+    // 3. RSI状态分析
+    let rsi_state = if rsi > 70.0 {
+        "超买区域，存在回调压力"
+    } else if rsi > 60.0 {
+        "偏强区域，上涨动能充足"
+    } else if rsi > 40.0 {
+        "中性区域，多空平衡"
+    } else if rsi > 30.0 {
+        "偏弱区域，下跌动能较强"
+    } else {
+        "超卖区域，存在反弹动力"
+    };
+    
+    // 4. MACD状态分析
+    let macd_state = if macd_histogram > 0.5 {
+        "MACD红柱放大，多头强势"
+    } else if macd_histogram > 0.0 {
+        "MACD红柱缩小，多头减弱"
+    } else if macd_histogram > -0.5 {
+        "MACD绿柱缩小，空头减弱"
+    } else {
+        "MACD绿柱放大，空头强势"
+    };
+    
+    // 5. 生成主要理由
+    if change_percent > 0.0 {
+        // 上涨预测
+        if near_resistance {
+            reasons.push(format!("接近压力位{:.2}元，上涨空间受限", 
+                support_resistance.resistance_levels.iter()
+                    .find(|&&r| (predicted_price - r).abs() / r < 0.02)
+                    .unwrap_or(&predicted_price)));
+            key_factors.push("⚠️ 压力位约束".to_string());
+        } else if rsi > 70.0 {
+            reasons.push("RSI超买，短期可能回调".to_string());
+            key_factors.push("⚠️ 技术指标超买".to_string());
+        } else {
+            reasons.push(format!("处于{}，", trend_desc));
+            reasons.push(rsi_state.to_string());
+            if multi_timeframe.resonance_level >= 2 {
+                reasons.push(format!("多周期{}共振", multi_timeframe.resonance_direction));
+                key_factors.push(format!("✅ {}级共振", multi_timeframe.resonance_level));
+            }
+        }
+    } else if change_percent < 0.0 {
+        // 下跌预测
+        if near_support {
+            reasons.push(format!("接近支撑位{:.2}元，下跌空间有限", 
+                support_resistance.support_levels.iter()
+                    .find(|&&s| (predicted_price - s).abs() / s < 0.02)
+                    .unwrap_or(&predicted_price)));
+            key_factors.push("✅ 支撑位保护".to_string());
+        } else if rsi < 30.0 {
+            reasons.push("RSI超卖，短期可能反弹".to_string());
+            key_factors.push("✅ 技术指标超卖".to_string());
+        } else {
+            reasons.push(format!("处于{}，", trend_desc));
+            reasons.push(rsi_state.to_string());
+            if multi_timeframe.resonance_level >= 2 {
+                reasons.push(format!("多周期{}共振", multi_timeframe.resonance_direction));
+                key_factors.push(format!("⚠️ {}级共振下跌", multi_timeframe.resonance_level));
+            }
+        }
+    } else {
+        // 横盘预测
+        reasons.push("多空力量平衡，震荡整理".to_string());
+        key_factors.push("📊 震荡整理".to_string());
+    }
+    
+    // 6. 添加MACD分析
+    key_factors.push(macd_state.to_string());
+    
+    // 7. 远期预测衰减说明
+    if day > 3 {
+        reasons.push(format!("第{}日预测，不确定性增加", day));
+        key_factors.push(format!("⏰ T+{} 预测衰减", day));
+    }
+    
+    let final_reason = reasons.join("；");
+    (final_reason, key_factors)
+}
+
 async fn generate_price_predictions(
     request: &PredictionRequest,
     prices: &[f64],
@@ -1890,7 +2059,7 @@ async fn generate_price_predictions(
     dates: &[String],
     current_price: f64,
     multi_timeframe: &MultiTimeframeSignal,
-    _support_resistance: &SupportResistance,
+    support_resistance: &SupportResistance,
 ) -> Result<Vec<Prediction>, String> {
     let mut predictions = Vec::new();
     let mut last_price = current_price;
@@ -1901,7 +2070,7 @@ async fn generate_price_predictions(
     ).unwrap_or_else(|_| chrono::Local::now().naive_local().date());
     
     // 基于共振方向确定趋势偏向
-    let trend_bias = match multi_timeframe.resonance_level {
+    let trend_bias: f64 = match multi_timeframe.resonance_level {
         3 => {
             if multi_timeframe.resonance_direction.contains("多头") { 0.015 }
             else if multi_timeframe.resonance_direction.contains("空头") { -0.015 }
@@ -1920,7 +2089,28 @@ async fn generate_price_predictions(
         _ => 0.0,
     };
     
-    let volatility = calculate_historical_volatility(prices).clamp(0.01, 0.08);
+    // 计算历史波动率（金融级别：必须基于实际市场波动）
+    let volatility = calculate_historical_volatility(prices).clamp(0.015, 0.08);
+    
+    // 计算价格动量（最近5日相对前5日的变化）
+    let momentum = if prices.len() >= 10 {
+        let recent_avg = prices[prices.len()-5..].iter().sum::<f64>() / 5.0;
+        let previous_avg = prices[prices.len()-10..prices.len()-5].iter().sum::<f64>() / 5.0;
+        (recent_avg - previous_avg) / previous_avg
+    } else {
+        0.0
+    };
+    
+    // 趋势强度（结合动量和共振）
+    let initial_trend_strength = if trend_bias.abs() > 0.001 {
+        trend_bias
+    } else {
+        // 无明显共振时，使用动量作为趋势判断
+        momentum * 0.5
+    };
+    
+    // 用于累积预测的向量（动态更新RSI/MACD）
+    let mut predicted_prices_for_calc = prices.to_vec();
     
     for day in 1..=request.prediction_days {
         let mut target_date = last_date;
@@ -1929,28 +2119,105 @@ async fn generate_price_predictions(
         }
         let date_str = target_date.format("%Y-%m-%d").to_string();
         
-        // 趋势衰减
-        let trend_decay = 0.95_f64.powi(day as i32);
+        // 计算当前的RSI和MACD（基于累积预测价格）
+        let current_rsi = calculate_rsi(&predicted_prices_for_calc);
+        let (_, _, macd_histogram) = calculate_macd_full(&predicted_prices_for_calc);
         
-        // 随机波动
-        let noise = (rand::random::<f64>() * 2.0 - 1.0) * volatility * 0.5;
+        // 趋势衰减（金融逻辑：预测越远衰减越快）
+        let trend_decay = 0.93_f64.powi(day as i32);
         
-        // 综合变化率
-        let change_rate = trend_bias * trend_decay + noise;
-        let change_percent = clamp_daily_change(change_rate * 100.0);
+        // 动态调整趋势强度（金融逻辑：根据技术指标和价位调整）
+        let mut current_trend_strength = initial_trend_strength;
+        
+        // 检查是否接近压力位（上涨时）
+        if current_trend_strength > 0.0 {
+            for &resistance in &support_resistance.resistance_levels {
+                if (last_price - resistance).abs() / resistance < 0.03 {
+                    // 接近压力位，减弱上涨趋势
+                    current_trend_strength *= 0.3;
+                    break;
+                }
+            }
+            // RSI超买，减弱上涨趋势
+            if current_rsi > 70.0 {
+                current_trend_strength *= 0.4;
+            } else if current_rsi > 65.0 {
+                current_trend_strength *= 0.7;
+            }
+        }
+        
+        // 检查是否接近支撑位（下跌时）
+        if current_trend_strength < 0.0 {
+            for &support in &support_resistance.support_levels {
+                if (last_price - support).abs() / support < 0.03 {
+                    // 接近支撑位，减弱下跌趋势
+                    current_trend_strength *= 0.3;
+                    break;
+                }
+            }
+            // RSI超卖，减弱下跌趋势
+            if current_rsi < 30.0 {
+                current_trend_strength *= 0.4;
+            } else if current_rsi < 35.0 {
+                current_trend_strength *= 0.7;
+            }
+        }
+        
+        // 确定性波动调整（基于历史波动率和趋势方向）
+        let base_volatility = volatility * 0.3;
+        
+        let volatility_adjustment = if current_trend_strength.abs() < 0.001 {
+            // 震荡市：使用历史波动率的确定性波动
+            let day_factor = if day % 2 == 0 { 1.0 } else { -0.8 };
+            base_volatility * day_factor * trend_decay
+        } else if current_trend_strength > 0.0 {
+            // 上涨趋势：正向波动，随时间衰减
+            base_volatility * (1.0 + current_trend_strength * 2.0) * trend_decay
+        } else {
+            // 下跌趋势：负向波动，随时间衰减
+            base_volatility * (1.0 + current_trend_strength * 2.0) * trend_decay
+        };
+        
+        // 综合变化率（金融逻辑：趋势 + 波动）
+        let change_rate = current_trend_strength * trend_decay + volatility_adjustment;
+        
+        // 确保变化率有最小值（金融逻辑：股价不会完全不动）
+        let adjusted_change_rate = if change_rate.abs() < 0.001 {
+            // 最小波动：±0.3%
+            if day % 3 == 0 { 0.003 } 
+            else if day % 3 == 1 { -0.002 }
+            else { 0.001 }
+        } else {
+            change_rate
+        };
+        
+        let change_percent = clamp_daily_change(adjusted_change_rate * 100.0);
         let predicted_price = last_price * (1.0 + change_percent / 100.0);
         
         // 置信度随时间递减
         let confidence = (0.70 * trend_decay + multi_timeframe.signal_quality * 0.003).clamp(0.40, 0.85);
         
         // 交易信号
-        let trading_signal = if trend_bias > 0.008 {
+        let trading_signal = if current_trend_strength > 0.008 {
             "买入"
-        } else if trend_bias < -0.008 {
+        } else if current_trend_strength < -0.008 {
             "卖出"
         } else {
             "持有"
         }.to_string();
+        
+        // 生成预测理由和关键因素
+        let (prediction_reason, key_factors) = generate_prediction_reason(
+            predicted_price,
+            current_price,
+            change_percent,
+            day,
+            support_resistance,
+            multi_timeframe,
+            current_trend_strength,
+            current_rsi,
+            macd_histogram,
+        );
         
         predictions.push(Prediction {
             target_date: date_str,
@@ -1960,8 +2227,12 @@ async fn generate_price_predictions(
             trading_signal: Some(trading_signal),
             signal_strength: Some(multi_timeframe.signal_quality / 100.0),
             technical_indicators: None,
+            prediction_reason: Some(prediction_reason),
+            key_factors: Some(key_factors),
         });
         
+        // 更新价格向量用于下一轮RSI/MACD计算
+        predicted_prices_for_calc.push(predicted_price);
         last_price = predicted_price;
     }
     

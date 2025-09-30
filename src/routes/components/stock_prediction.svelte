@@ -51,6 +51,8 @@
         trading_signal?: string;
         signal_strength?: number;
         technical_indicators?: TechnicalIndicatorValues;
+        prediction_reason?: string;  // 预测理由
+        key_factors?: string[];      // 关键因素
     }
     
     interface TrainingLog {
@@ -1695,6 +1697,7 @@
                             <th>涨跌幅</th>
                             <th>置信度</th>
                             <th>交易信号</th>
+                            <th>预测理由</th>
                             <th>技术指标</th>
                             <th>风险评级</th>
                         </tr>
@@ -1721,6 +1724,22 @@
                                         <div class="signal-strength">
                                             强度: {(prediction.signal_strength * 100).toFixed(0)}%
                                         </div>
+                                    {/if}
+                                </td>
+                                <td class="prediction-reason-cell">
+                                    {#if prediction.prediction_reason}
+                                        <div class="prediction-reason">
+                                            <div class="reason-text">{prediction.prediction_reason}</div>
+                                            {#if prediction.key_factors && prediction.key_factors.length > 0}
+                                                <div class="key-factors">
+                                                    {#each prediction.key_factors as factor}
+                                                        <span class="factor-tag">{factor}</span>
+                                                    {/each}
+                                                </div>
+                                            {/if}
+                                        </div>
+                                    {:else}
+                                        <span class="no-reason">暂无理由</span>
                                     {/if}
                                 </td>
                                 <td>
@@ -3031,5 +3050,57 @@
         background: rgba(255, 255, 255, 0.05);
         border-radius: 0.25rem;
         border-left: 3px solid #fbbf24;
+    }
+    
+    /* 预测理由样式 */
+    .prediction-reason-cell {
+        min-width: 200px;
+        max-width: 300px;
+    }
+    
+    .prediction-reason {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+    
+    .reason-text {
+        font-size: 0.875rem;
+        line-height: 1.4;
+        color: rgba(255, 255, 255, 0.9);
+    }
+    
+    .key-factors {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.25rem;
+    }
+    
+    .factor-tag {
+        display: inline-block;
+        padding: 0.125rem 0.5rem;
+        background: rgba(59, 130, 246, 0.2);
+        border: 1px solid rgba(59, 130, 246, 0.4);
+        border-radius: 0.25rem;
+        font-size: 0.75rem;
+        color: #93c5fd;
+    }
+    
+    .factor-tag:has(⚠️) {
+        background: rgba(251, 191, 36, 0.2);
+        border-color: rgba(251, 191, 36, 0.4);
+        color: #fde047;
+    }
+    
+    .factor-tag:has(✅) {
+        background: rgba(16, 185, 129, 0.2);
+        border-color: rgba(16, 185, 129, 0.4);
+        color: #6ee7b7;
+    }
+    
+    .no-reason {
+        color: rgba(255, 255, 255, 0.5);
+        font-size: 0.875rem;
+        font-style: italic;
     }
 </style>

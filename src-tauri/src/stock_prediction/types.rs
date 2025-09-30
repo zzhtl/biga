@@ -42,6 +42,8 @@ pub struct Prediction {
     pub trading_signal: Option<String>,
     pub signal_strength: Option<f64>,
     pub technical_indicators: Option<TechnicalIndicatorValues>,
+    pub prediction_reason: Option<String>,  // 预测理由
+    pub key_factors: Option<Vec<String>>,   // 关键因素列表
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
