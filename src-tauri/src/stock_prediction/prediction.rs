@@ -2092,6 +2092,19 @@ async fn generate_price_predictions(
     // 计算历史波动率（金融级别：必须基于实际市场波动）
     let volatility = calculate_historical_volatility(prices).clamp(0.015, 0.08);
     
+    // 计算MA均线（用于均值回归）
+    let ma20 = if prices.len() >= 20 {
+        prices[prices.len()-20..].iter().sum::<f64>() / 20.0
+    } else {
+        current_price
+    };
+    
+    let ma60 = if prices.len() >= 60 {
+        prices[prices.len()-60..].iter().sum::<f64>() / 60.0
+    } else {
+        current_price
+    };
+    
     // 计算价格动量（最近5日相对前5日的变化）
     let momentum = if prices.len() >= 10 {
         let recent_avg = prices[prices.len()-5..].iter().sum::<f64>() / 5.0;
@@ -2101,12 +2114,12 @@ async fn generate_price_predictions(
         0.0
     };
     
-    // 趋势强度（结合动量和共振）
+    // 趋势强度（结合动量和共振，但限制最大强度）
     let initial_trend_strength = if trend_bias.abs() > 0.001 {
-        trend_bias
+        trend_bias.clamp(-0.020, 0.020)  // 限制最大趋势强度±2%
     } else {
         // 无明显共振时，使用动量作为趋势判断
-        momentum * 0.5
+        (momentum * 0.5).clamp(-0.015, 0.015)
     };
     
     // 用于累积预测的向量（动态更新RSI/MACD）
@@ -2124,7 +2137,26 @@ async fn generate_price_predictions(
         let (_, _, macd_histogram) = calculate_macd_full(&predicted_prices_for_calc);
         
         // 趋势衰减（金融逻辑：预测越远衰减越快）
-        let trend_decay = 0.93_f64.powi(day as i32);
+        // 更激进的衰减：第1天100%，第2天81%，第3天66%，第5天44%
+        let trend_decay = 0.90_f64.powi(day as i32);
+        
+        // 均值回归力量（价格偏离均线越远，回归力量越强）
+        let price_deviation_from_ma20 = (last_price - ma20) / ma20;
+        let price_deviation_from_ma60 = (last_price - ma60) / ma60;
+        
+        // 回归系数：偏离±5%以上时启动回归
+        let mean_reversion_force = {
+            let deviation = price_deviation_from_ma20 * 0.6 + price_deviation_from_ma60 * 0.4;
+            if deviation.abs() > 0.05 {
+                // 偏离>5%，强制回归
+                -deviation * 0.3  // 30%的回归力量
+            } else if deviation.abs() > 0.03 {
+                // 偏离>3%，温和回归
+                -deviation * 0.2  // 20%的回归力量
+            } else {
+                0.0  // 偏离<3%，不回归
+            }
+        };
         
         // 动态调整趋势强度（金融逻辑：根据技术指标和价位调整）
         let mut current_trend_strength = initial_trend_strength;
@@ -2163,23 +2195,26 @@ async fn generate_price_predictions(
             }
         }
         
-        // 确定性波动调整（基于历史波动率和趋势方向）
-        let base_volatility = volatility * 0.3;
+        // 确定性波动调整（金融逻辑：双向波动，不放大趋势）
+        let base_volatility = volatility * 0.25;
+        
+        // 双向波动因子：基于日期的确定性正负波动
+        let oscillation_factor = ((day as f64 * 1.618).sin() * 0.5 + 
+                                   (day as f64 * 0.618).cos() * 0.3) * trend_decay;
         
         let volatility_adjustment = if current_trend_strength.abs() < 0.001 {
-            // 震荡市：使用历史波动率的确定性波动
-            let day_factor = if day % 2 == 0 { 1.0 } else { -0.8 };
-            base_volatility * day_factor * trend_decay
-        } else if current_trend_strength > 0.0 {
-            // 上涨趋势：正向波动，随时间衰减
-            base_volatility * (1.0 + current_trend_strength * 2.0) * trend_decay
+            // 震荡市：纯双向波动
+            base_volatility * oscillation_factor
         } else {
-            // 下跌趋势：负向波动，随时间衰减
-            base_volatility * (1.0 + current_trend_strength * 2.0) * trend_decay
+            // 趋势市：小幅双向波动（不放大趋势，只增加波动性）
+            base_volatility * oscillation_factor * 0.5
         };
         
-        // 综合变化率（金融逻辑：趋势 + 波动）
-        let change_rate = current_trend_strength * trend_decay + volatility_adjustment;
+        // 综合变化率（金融逻辑：趋势 + 波动 + 均值回归）
+        // 关键修复：趋势衰减更快，加入均值回归
+        let change_rate = current_trend_strength * trend_decay * 0.7  // 降低趋势权重
+                        + volatility_adjustment                       // 双向波动
+                        + mean_reversion_force;                       // 均值回归
         
         // 确保变化率有最小值（金融逻辑：股价不会完全不动）
         let adjusted_change_rate = if change_rate.abs() < 0.001 {
