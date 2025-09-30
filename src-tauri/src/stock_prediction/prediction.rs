@@ -21,6 +21,7 @@ use crate::stock_prediction::multi_timeframe_analysis::{
 };
 use crate::stock_prediction::volume_analysis;
 use crate::stock_prediction::candlestick_patterns;
+use crate::stock_prediction::multi_factor_scoring;
 
 // ==================== 金融级预测策略系统 ====================
 
@@ -82,6 +83,7 @@ pub struct ProfessionalPrediction {
     pub risk_level: String,
     pub candle_patterns: Vec<candlestick_patterns::PatternRecognition>, // K线形态
     pub volume_analysis: VolumeAnalysisInfo,  // 量价分析结果
+    pub multi_factor_score: multi_factor_scoring::MultiFactorScore,  // 多因子综合评分
 }
 
 /// 量价分析信息（用于序列化）
@@ -1653,6 +1655,121 @@ pub async fn predict_with_professional_strategy(
         change_percent: current_change_percent,
     });
     
+    // 9. 多因子综合评分
+    println!("\n🎯 ========== 多因子综合评分 ==========");
+    
+    // 计算需要的技术指标
+    let n = prices.len();
+    let calc_ma = |window: usize| -> f64 {
+        if n >= window {
+            prices[n-window..].iter().sum::<f64>() / window as f64
+        } else {
+            current_price
+        }
+    };
+    
+    let ma5 = calc_ma(5);
+    let ma10 = calc_ma(10);
+    let ma20 = calc_ma(20);
+    let ma60 = calc_ma(60);
+    
+    // 计算RSI（简化版）
+    let rsi = if n >= 14 {
+        let recent_prices = &prices[n-14..];
+        let mut gains = 0.0;
+        let mut losses = 0.0;
+        
+        for i in 1..recent_prices.len() {
+            let change = recent_prices[i] - recent_prices[i-1];
+            if change > 0.0 {
+                gains += change;
+            } else {
+                losses += -change;
+            }
+        }
+        
+        let avg_gain = gains / 14.0;
+        let avg_loss = losses / 14.0;
+        
+        if avg_loss == 0.0 {
+            100.0
+        } else {
+            let rs = avg_gain / avg_loss;
+            100.0 - (100.0 / (1.0 + rs))
+        }
+    } else {
+        50.0
+    };
+    
+    // 计算MACD（简化版）
+    let ema12 = calc_ma(12);
+    let ema26 = calc_ma(26);
+    let macd_dif = ema12 - ema26;
+    let macd_dea = calc_ma(9); // 简化，实际应该是DIF的EMA
+    
+    // 计算各因子得分
+    let trend_factor = multi_factor_scoring::score_trend_factor(
+        ma5, ma10, ma20, ma60, current_price
+    );
+    
+    let volume_factor = multi_factor_scoring::score_volume_factor(
+        &volume_analysis.volume_trend,
+        volume_analysis.volume_price_sync,
+        volume_analysis.accumulation_signal,
+        &volume_analysis.obv_trend,
+    );
+    
+    let pattern_factor = multi_factor_scoring::score_pattern_factor(&candle_patterns);
+    
+    let momentum_factor = multi_factor_scoring::score_momentum_factor(
+        rsi, macd_dif, macd_dea
+    );
+    
+    let sr_factor = multi_factor_scoring::score_support_resistance_factor(
+        current_price,
+        &support_resistance.support_levels,
+        &support_resistance.resistance_levels,
+    );
+    
+    let mtf_factor = multi_factor_scoring::score_multi_timeframe_factor(
+        multi_timeframe.resonance_level,
+        &multi_timeframe.resonance_direction,
+        multi_timeframe.signal_quality,
+    );
+    
+    let factors = vec![
+        trend_factor,
+        volume_factor,
+        pattern_factor,
+        momentum_factor,
+        sr_factor,
+        mtf_factor,
+    ];
+    
+    let multi_factor_score = multi_factor_scoring::calculate_multi_factor_score(factors);
+    
+    // 打印评分结果
+    println!("   📊 综合评分: {:.1}分 ({})", 
+             multi_factor_score.total_score,
+             multi_factor_score.signal_quality.to_string());
+    println!("   💡 操作建议: {}", multi_factor_score.operation_suggestion);
+    println!("\n   各因子得分:");
+    for factor in &multi_factor_score.factors {
+        let status_icon = match factor.status {
+            multi_factor_scoring::FactorStatus::VeryBullish => "🔥",
+            multi_factor_scoring::FactorStatus::Bullish => "📈",
+            multi_factor_scoring::FactorStatus::Neutral => "➡️",
+            multi_factor_scoring::FactorStatus::Bearish => "📉",
+            multi_factor_scoring::FactorStatus::VeryBearish => "❄️",
+        };
+        println!("      {} {} {:.1}分 (权重{:.0}%) - {}", 
+                 status_icon,
+                 factor.name,
+                 factor.score,
+                 factor.weight * 100.0,
+                 factor.description);
+    }
+    
     let professional_prediction = ProfessionalPrediction {
         buy_points,
         sell_points,
@@ -1663,6 +1780,7 @@ pub async fn predict_with_professional_strategy(
         risk_level,
         candle_patterns,
         volume_analysis,
+        multi_factor_score,
     };
     
     println!("\n✅ 金融级策略分析完成！\n");
