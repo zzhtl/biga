@@ -46,7 +46,8 @@ pub fn run() {
             commands::stock_prediction::get_multi_timeframe_signals,
             commands::stock_prediction::get_latest_multi_timeframe_signal,
             commands::stock_prediction::analyze_multi_timeframe_prediction_value,
-            commands::stock_prediction::predict_with_professional_strategy
+            commands::stock_prediction::predict_with_professional_strategy,
+            commands::stock_prediction::predict_with_technical_only
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {

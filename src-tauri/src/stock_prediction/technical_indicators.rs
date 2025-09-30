@@ -21,9 +21,12 @@ pub fn calculate_ema(data: &[f64], period: usize) -> f64 {
     }
     
     let multiplier = 2.0 / (period as f64 + 1.0);
-    let mut ema = data[0];
     
-    for i in 1..data.len() {
+    // 第一个EMA值使用前period个数据的简单平均值（SMA）
+    let mut ema = data[0..period].iter().sum::<f64>() / period as f64;
+    
+    // 从period开始计算后续的EMA值
+    for i in period..data.len() {
         ema = (data[i] - ema) * multiplier + ema;
     }
     
@@ -52,31 +55,51 @@ pub fn calculate_ema_series(data: &[f64], period: usize) -> Vec<f64> {
     ema_values
 }
 
-// RSI计算函数
+// RSI计算函数 - 使用标准Wilder平滑法
 pub fn calculate_rsi(prices: &[f64]) -> f64 {
-    if prices.len() < 2 {
+    if prices.len() < 15 {  // 需要至少15个数据点（14期+1）
         return 50.0;
     }
     
-    let mut gains = 0.0;
-    let mut losses = 0.0;
+    let period = 14;
     
-    for i in 1..prices.len() {
+    // 计算第一个周期的平均涨跌幅
+    let mut first_gain = 0.0;
+    let mut first_loss = 0.0;
+    
+    for i in 1..=period {
         let change = prices[i] - prices[i-1];
         if change > 0.0 {
-            gains += change;
+            first_gain += change;
         } else {
-            losses += -change;
+            first_loss += -change;
         }
     }
     
-    gains /= (prices.len() - 1) as f64;
-    losses /= (prices.len() - 1) as f64;
+    // 初始平均涨跌幅
+    let mut avg_gain = first_gain / period as f64;
+    let mut avg_loss = first_loss / period as f64;
     
-    if losses == 0.0 {
+    // 使用Wilder平滑法计算后续的平均涨跌幅
+    // Wilder平滑: 新平均 = (前平均 × 13 + 当前值) / 14
+    for i in (period + 1)..prices.len() {
+        let change = prices[i] - prices[i-1];
+        
+        if change > 0.0 {
+            avg_gain = (avg_gain * (period - 1) as f64 + change) / period as f64;
+            avg_loss = (avg_loss * (period - 1) as f64) / period as f64;
+        } else {
+            avg_gain = (avg_gain * (period - 1) as f64) / period as f64;
+            avg_loss = (avg_loss * (period - 1) as f64 + (-change)) / period as f64;
+        }
+    }
+    
+    // 计算RSI
+    if avg_loss == 0.0 {
         100.0
     } else {
-        100.0 - (100.0 / (1.0 + (gains / losses)))
+        let rs = avg_gain / avg_loss;
+        100.0 - (100.0 / (1.0 + rs))
     }
 }
 
@@ -92,40 +115,63 @@ pub fn calculate_macd(prices: &[f64]) -> f64 {
 }
 
 // 计算完整的MACD指标（包括DIF、DEA、MACD柱）
+// 标准MACD算法：
+// 1. DIF = EMA(12) - EMA(26)
+// 2. DEA = EMA(DIF, 9)
+// 3. MACD = 2 × (DIF - DEA)
 pub fn calculate_macd_full(prices: &[f64]) -> (f64, f64, f64) {
+    // 至少需要26个数据点才能计算DIF
     if prices.len() < 26 {
         return (0.0, 0.0, 0.0);
     }
     
-    // 计算EMA12和EMA26
-    let ema12 = calculate_ema(prices, 12);
-    let ema26 = calculate_ema(prices, 26);
+    // 步骤1: 使用EMA序列函数计算完整的EMA12和EMA26序列
+    let ema12_series = calculate_ema_series(prices, 12);
+    let ema26_series = calculate_ema_series(prices, 26);
     
-    // DIF = EMA12 - EMA26
-    let dif = ema12 - ema26;
+    if ema12_series.is_empty() || ema26_series.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
     
-    // 计算最近9天的DIF值用于计算DEA
-    let mut dif_values = Vec::new();
-    for i in (prices.len().saturating_sub(9))..prices.len() {
-        if i >= 26 {
-            let sub_prices = &prices[0..=i];
-            let sub_ema12 = calculate_ema(sub_prices, 12);
-            let sub_ema26 = calculate_ema(sub_prices, 26);
-            dif_values.push(sub_ema12 - sub_ema26);
+    // 步骤2: 计算完整的DIF序列（需要对齐两个EMA序列）
+    // ema12_series[0] 对应 prices[11] (第12个点，因为需要12个数据计算第一个EMA12)
+    // ema26_series[0] 对应 prices[25] (第26个点，因为需要26个数据计算第一个EMA26)
+    // 要对齐到同一时间点：
+    // ema12_series[14] 对应 prices[25] (12 + 14 = 26)
+    // ema26_series[0] 对应 prices[25]
+    let mut dif_series = Vec::new();
+    let offset = 14; // ema26的周期(26) - ema12的周期(12) = 14
+    
+    for i in 0..ema26_series.len() {
+        let ema12_idx = offset + i;
+        if ema12_idx < ema12_series.len() {
+            let dif = ema12_series[ema12_idx] - ema26_series[i];
+            dif_series.push(dif);
         }
     }
     
-    // DEA = EMA(DIF, 9)
-    let dea = if dif_values.len() >= 9 {
-        calculate_ema(&dif_values, 9)
+    if dif_series.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    
+    // 获取最新的DIF值
+    let dif = *dif_series.last().unwrap();
+    
+    // 步骤3: 计算DEA（DIF的9日EMA序列）
+    let dea = if dif_series.len() >= 9 {
+        // 如果DIF序列足够长（>=9），使用标准EMA计算
+        calculate_ema(&dif_series, 9)
     } else {
-        dif // 如果数据不足，使用DIF作为DEA
+        // 如果DIF序列不足9个，返回当前DIF作为DEA（表示DEA尚未稳定）
+        // 这样MACD柱会接近0，表示信号不稳定
+        dif
     };
     
-    // MACD柱 = 2 * (DIF - DEA)
-    let macd = 2.0 * (dif - dea);
+    // 步骤4: 计算MACD柱状图
+    // 传统MACD柱 = 2 × (DIF - DEA)，乘以2是为了放大信号
+    let macd_histogram = 2.0 * (dif - dea);
     
-    (dif, dea, macd)
+    (dif, dea, macd_histogram)
 }
 
 // 布林带位置计算
@@ -166,46 +212,47 @@ pub fn calculate_stochastic_k(prices: &[f64], current_price: f64) -> f64 {
     }
 }
 
-// KDJ指标计算
+// KDJ指标计算 - 标准算法实现
 pub fn calculate_kdj(highs: &[f64], lows: &[f64], closes: &[f64], n: usize) -> (f64, f64, f64) {
     if highs.len() < n || lows.len() < n || closes.len() < n {
         return (50.0, 50.0, 50.0);
     }
     
     let len = highs.len();
-    let start = len.saturating_sub(n);
     
-    // 计算N日内最高价和最低价
-    let highest = highs[start..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-    let lowest = lows[start..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    // 初始K和D值为50
+    let mut k = 50.0;
+    let mut d = 50.0;
     
-    if highest == lowest {
-        return (50.0, 50.0, 50.0);
-    }
-    
-    // 计算RSV
-    let rsv = (closes[len - 1] - lowest) / (highest - lowest) * 100.0;
-    
-    // 简化计算：使用最近3天的平均值模拟K值的平滑
-    let mut k_values = vec![rsv];
-    for i in 1..3 {
-        if len > i {
-            let idx = len - 1 - i;
-            if idx >= start {
-                let h = highs[start..=idx].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-                let l = lows[start..=idx].iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                if h > l {
-                    k_values.push((closes[idx] - l) / (h - l) * 100.0);
-                }
-            }
+    // 从第n个数据点开始计算
+    for i in n..=len {
+        let start = i.saturating_sub(n);
+        let end = i;
+        
+        // 计算n日内的最高价和最低价
+        let highest = highs[start..end].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        let lowest = lows[start..end].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        
+        if highest == lowest {
+            // 价格无波动时保持当前值
+            continue;
         }
+        
+        // 计算RSV (未成熟随机值)
+        // RSV = (收盘价 - n日最低价) / (n日最高价 - n日最低价) × 100
+        let close = closes[end - 1];
+        let rsv = (close - lowest) / (highest - lowest) * 100.0;
+        
+        // 计算K值（快速随机指标）
+        // K = 2/3 × 前一日K值 + 1/3 × 当日RSV
+        k = (2.0 / 3.0) * k + (1.0 / 3.0) * rsv;
+        
+        // 计算D值（慢速随机指标）
+        // D = 2/3 × 前一日D值 + 1/3 × 当日K值
+        d = (2.0 / 3.0) * d + (1.0 / 3.0) * k;
     }
     
-    let k = k_values.iter().sum::<f64>() / k_values.len() as f64;
-    
-    // D值是K值的3日移动平均
-    let d = k * 0.667 + 50.0 * 0.333; // 简化计算
-    
+    // 计算J值（超快速随机指标）
     // J = 3K - 2D
     let j = 3.0 * k - 2.0 * d;
     

@@ -395,4 +395,20 @@ pub async fn predict_with_professional_strategy(request: CandlePredictionRequest
 pub struct ProfessionalPredictionResponse {
     pub predictions: PredictionResponse,
     pub professional_analysis: ProfessionalPrediction,
+}
+
+// ==================== 纯技术分析预测命令（无需模型）====================
+
+use crate::stock_prediction::prediction::TechnicalOnlyRequest;
+
+/// 纯技术分析预测 - 不依赖模型，只基于历史数据
+#[tauri::command]
+pub async fn predict_with_technical_only(request: TechnicalOnlyRequest) -> Result<ProfessionalPredictionResponse, String> {
+    let (prediction_response, professional_analysis) = 
+        crate::stock_prediction::prediction::predict_with_technical_analysis_only(request).await?;
+    
+    Ok(ProfessionalPredictionResponse {
+        predictions: prediction_response,
+        professional_analysis,
+    })
 } 

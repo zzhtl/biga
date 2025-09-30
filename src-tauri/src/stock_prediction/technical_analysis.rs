@@ -88,111 +88,79 @@ pub fn analyze_technical_signals(
     };
     
     // 增强：改进MACD交叉信号识别
-    // 判断MACD交叉信号 - 增加连续性和强度判断
-    let macd_golden_cross = if macd_dif_history.len() >= 3 && macd_dea_history.len() >= 3 {
-        // 判断DIF是否向上穿过DEA（金叉）
-        // 增强版：要求穿越明显，避免微小波动
-        let cross_condition = macd_dif_history[macd_dif_history.len()-2] < macd_dea_history[macd_dea_history.len()-2] && 
-                             macd_dif_history[macd_dif_history.len()-1] > macd_dea_history[macd_dea_history.len()-1];
+    // 判断MACD交叉信号 - 标准金叉死叉判断
+    let macd_golden_cross = if macd_dif_history.len() >= 2 && macd_dea_history.len() >= 2 {
+        // 金叉标准定义：前一时刻DIF在DEA下方，当前时刻DIF在DEA上方
+        let prev_dif = macd_dif_history[macd_dif_history.len()-2];
+        let prev_dea = macd_dea_history[macd_dea_history.len()-2];
+        let curr_dif = macd_dif_history[macd_dif_history.len()-1];
+        let curr_dea = macd_dea_history[macd_dea_history.len()-1];
         
-        // 穿越强度检查：DIF上升且DEA平缓或下降时更可靠
-        let strength_condition = macd_dif_history[macd_dif_history.len()-1] > macd_dif_history[macd_dif_history.len()-2] &&
-                               (macd_dea_history[macd_dea_history.len()-1] <= macd_dea_history[macd_dea_history.len()-2] * 1.001);
-        
-        // 趋势确认：之前DIF持续下降，现在开始上升
-        let trend_condition = macd_dif_history.len() >= 4 &&
-                             macd_dif_history[macd_dif_history.len()-3] > macd_dif_history[macd_dif_history.len()-2] &&
-                             macd_dif_history[macd_dif_history.len()-1] > macd_dif_history[macd_dif_history.len()-2];
-        
-        cross_condition && (strength_condition || trend_condition)
+        // 穿越条件：前一刻DIF<=DEA，当前DIF>DEA
+        prev_dif <= prev_dea && curr_dif > curr_dea
     } else {
         false
     };
     
-    let macd_death_cross = if macd_dif_history.len() >= 3 && macd_dea_history.len() >= 3 {
-        // 判断DIF是否向下穿过DEA（死叉）
-        // 增强版：要求穿越明显，避免微小波动
-        let cross_condition = macd_dif_history[macd_dif_history.len()-2] > macd_dea_history[macd_dea_history.len()-2] && 
-                             macd_dif_history[macd_dif_history.len()-1] < macd_dea_history[macd_dea_history.len()-1];
+    let macd_death_cross = if macd_dif_history.len() >= 2 && macd_dea_history.len() >= 2 {
+        // 死叉标准定义：前一时刻DIF在DEA上方，当前时刻DIF在DEA下方
+        let prev_dif = macd_dif_history[macd_dif_history.len()-2];
+        let prev_dea = macd_dea_history[macd_dea_history.len()-2];
+        let curr_dif = macd_dif_history[macd_dif_history.len()-1];
+        let curr_dea = macd_dea_history[macd_dea_history.len()-1];
         
-        // 穿越强度检查：DIF下降且DEA平缓或上升时更可靠
-        let strength_condition = macd_dif_history[macd_dif_history.len()-1] < macd_dif_history[macd_dif_history.len()-2] &&
-                               (macd_dea_history[macd_dea_history.len()-1] >= macd_dea_history[macd_dea_history.len()-2] * 0.999);
-        
-        // 趋势确认：之前DIF持续上升，现在开始下降
-        let trend_condition = macd_dif_history.len() >= 4 &&
-                             macd_dif_history[macd_dif_history.len()-3] < macd_dif_history[macd_dif_history.len()-2] &&
-                             macd_dif_history[macd_dif_history.len()-1] < macd_dif_history[macd_dif_history.len()-2];
-        
-        cross_condition && (strength_condition || trend_condition)
+        // 穿越条件：前一刻DIF>=DEA，当前DIF<DEA
+        prev_dif >= prev_dea && curr_dif < curr_dea
     } else {
         false
     };
     
     // 增强：改进MACD零轴穿越识别
-    // 判断MACD零轴穿越 - 增加连续性判断
-    let macd_zero_cross_up = if macd_histogram_history.len() >= 3 {
-        // 基本条件：由负变正
-        let cross_condition = macd_histogram_history[macd_histogram_history.len()-2] < 0.0 && 
-                             macd_histogram_history[macd_histogram_history.len()-1] > 0.0;
+    // 判断MACD零轴穿越 - 标准穿越判断
+    let macd_zero_cross_up = if macd_histogram_history.len() >= 2 {
+        // 零轴上穿：前一时刻柱状图为负，当前时刻为正（由负变正）
+        let prev_hist = macd_histogram_history[macd_histogram_history.len()-2];
+        let curr_hist = macd_histogram_history[macd_histogram_history.len()-1];
         
-        // 增强条件：确认是持续向上突破，而不是临时波动
-        let trend_condition = macd_histogram_history.len() >= 4 &&
-                             macd_histogram_history[macd_histogram_history.len()-1] > macd_histogram_history[macd_histogram_history.len()-2] &&
-                             macd_histogram_history[macd_histogram_history.len()-2] > macd_histogram_history[macd_histogram_history.len()-3];
-        
-        cross_condition && trend_condition
+        prev_hist <= 0.0 && curr_hist > 0.0
     } else {
         false
     };
     
-    let macd_zero_cross_down = if macd_histogram_history.len() >= 3 {
-        // 基本条件：由正变负
-        let cross_condition = macd_histogram_history[macd_histogram_history.len()-2] > 0.0 && 
-                             macd_histogram_history[macd_histogram_history.len()-1] < 0.0;
+    let macd_zero_cross_down = if macd_histogram_history.len() >= 2 {
+        // 零轴下穿：前一时刻柱状图为正，当前时刻为负（由正变负）
+        let prev_hist = macd_histogram_history[macd_histogram_history.len()-2];
+        let curr_hist = macd_histogram_history[macd_histogram_history.len()-1];
         
-        // 增强条件：确认是持续向下突破，而不是临时波动
-        let trend_condition = macd_histogram_history.len() >= 4 &&
-                             macd_histogram_history[macd_histogram_history.len()-1] < macd_histogram_history[macd_histogram_history.len()-2] &&
-                             macd_histogram_history[macd_histogram_history.len()-2] < macd_histogram_history[macd_histogram_history.len()-3];
-        
-        cross_condition && trend_condition
+        prev_hist >= 0.0 && curr_hist < 0.0
     } else {
         false
     };
     
     // 增强：改进KDJ交叉信号识别
-    // 判断KDJ交叉信号 - 增加位置和强度判断
-    let kdj_golden_cross = if kdj_k_history.len() >= 3 && kdj_d_history.len() >= 3 {
-        // 基本条件：K线向上穿过D线（金叉）
-        let cross_condition = kdj_k_history[kdj_k_history.len()-2] < kdj_d_history[kdj_d_history.len()-2] && 
-                             kdj_k_history[kdj_k_history.len()-1] > kdj_d_history[kdj_d_history.len()-1];
+    // 判断KDJ交叉信号 - 标准金叉死叉判断
+    let kdj_golden_cross = if kdj_k_history.len() >= 2 && kdj_d_history.len() >= 2 {
+        // 金叉标准定义：前一时刻K在D下方，当前时刻K在D上方
+        let prev_k = kdj_k_history[kdj_k_history.len()-2];
+        let prev_d = kdj_d_history[kdj_d_history.len()-2];
+        let curr_k = kdj_k_history[kdj_k_history.len()-1];
+        let curr_d = kdj_d_history[kdj_d_history.len()-1];
         
-        // 位置条件：低位金叉（K和D都在50以下）更有效
-        let position_condition = kdj_k_history[kdj_k_history.len()-1] < 50.0 && 
-                               kdj_d_history[kdj_d_history.len()-1] < 50.0;
-        
-        // 强度条件：K线上升速度快
-        let strength_condition = kdj_k_history[kdj_k_history.len()-1] - kdj_k_history[kdj_k_history.len()-2] > 3.0;
-        
-        cross_condition && (position_condition || strength_condition)
+        // 穿越条件：前一刻K<=D，当前K>D
+        prev_k <= prev_d && curr_k > curr_d
     } else {
         false
     };
     
-    let kdj_death_cross = if kdj_k_history.len() >= 3 && kdj_d_history.len() >= 3 {
-        // 基本条件：K线向下穿过D线（死叉）
-        let cross_condition = kdj_k_history[kdj_k_history.len()-2] > kdj_d_history[kdj_d_history.len()-2] && 
-                             kdj_k_history[kdj_k_history.len()-1] < kdj_d_history[kdj_d_history.len()-1];
+    let kdj_death_cross = if kdj_k_history.len() >= 2 && kdj_d_history.len() >= 2 {
+        // 死叉标准定义：前一时刻K在D上方，当前时刻K在D下方
+        let prev_k = kdj_k_history[kdj_k_history.len()-2];
+        let prev_d = kdj_d_history[kdj_d_history.len()-2];
+        let curr_k = kdj_k_history[kdj_k_history.len()-1];
+        let curr_d = kdj_d_history[kdj_d_history.len()-1];
         
-        // 位置条件：高位死叉（K和D都在50以上）更有效
-        let position_condition = kdj_k_history[kdj_k_history.len()-1] > 50.0 && 
-                               kdj_d_history[kdj_d_history.len()-1] > 50.0;
-        
-        // 强度条件：K线下降速度快
-        let strength_condition = kdj_k_history[kdj_k_history.len()-2] - kdj_k_history[kdj_k_history.len()-1] > 3.0;
-        
-        cross_condition && (position_condition || strength_condition)
+        // 穿越条件：前一刻K>=D，当前K<D
+        prev_k >= prev_d && curr_k < curr_d
     } else {
         false
     };

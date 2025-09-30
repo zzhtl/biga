@@ -189,6 +189,14 @@
         divergence: VolumePriceDivergence;
         current_advice: string;
         risk_level: string;
+        candle_patterns: any[];
+        volume_analysis: any;
+        multi_factor_score: {
+            total_score: number;
+            factors: any[];
+            signal_quality: any;
+            operation_suggestion: string;
+        };
     }
     
     // 新增：专业预测响应接口
@@ -232,6 +240,84 @@
     let backtestEndDate = "";
     let backtestInterval = 7; // 默认每7天进行一次预测
     let expandedEntryIndex: number | null = null; // 展开查看的回测条目索引
+    
+    // 纯技术分析预测（无需模型）- 默认展示
+    let showTechnicalOnly = true;
+    let technicalHistoryDays = 180; // 使用多少天历史数据
+    let technicalPredictionDays = 7; // 预测未来多少天
+    let isTechnicalPredicting = false;
+    
+    // 纯技术分析预测函数
+    async function predictWithTechnicalOnly() {
+        if (!stockCode) {
+            errorMessage = "请先选择股票";
+            return;
+        }
+        
+        isTechnicalPredicting = true;
+        errorMessage = "";
+        predictions = [];
+        professionalAnalysis = null;
+        lastRealData = null;
+        predictionChart = null;
+        showProfessionalAnalysis = false;
+        
+        try {
+            const request = {
+                stock_code: stockCode,
+                history_days: technicalHistoryDays,
+                prediction_days: technicalPredictionDays
+            };
+            
+            console.log('纯技术分析预测请求:', request);
+            
+            const result = await invoke<ProfessionalPredictionResponse>('predict_with_technical_only', { request });
+            console.log('纯技术分析预测响应:', result);
+            
+            // 提取预测数据
+            if (result.predictions) {
+                if (Array.isArray(result.predictions)) {
+                    predictions = result.predictions;
+                } else if ('predictions' in result.predictions && Array.isArray(result.predictions.predictions)) {
+                    predictions = result.predictions.predictions;
+                    // 提取最新真实数据
+                    if (result.predictions.last_real_data) {
+                        lastRealData = {
+                            date: result.predictions.last_real_data.date,
+                            price: result.predictions.last_real_data.price,
+                            change_percent: result.predictions.last_real_data.change_percent
+                        };
+                    }
+                }
+            }
+            
+            // 提取专业分析结果
+            if (result.professional_analysis) {
+                professionalAnalysis = result.professional_analysis;
+                showProfessionalAnalysis = true;
+            }
+            
+            // 生成图表数据
+            if (predictions && predictions.length > 0) {
+                generatePredictionChart(predictions);
+                console.log("纯技术分析预测图表数据已生成");
+            }
+            
+            if (predictions.length > 0 && professionalAnalysis) {
+                await alert(`✅ 纯技术分析预测成功！\n基于${technicalHistoryDays}天历史数据\n预测未来${technicalPredictionDays}天走势\n\n综合评分: ${professionalAnalysis.multi_factor_score.total_score.toFixed(1)}/100`);
+            }
+        } catch (error) {
+            errorMessage = `纯技术分析预测失败: ${error}`;
+            console.error('纯技术分析预测错误:', error);
+            await alert(errorMessage);
+            predictions = [];
+            professionalAnalysis = null;
+            lastRealData = null;
+            predictionChart = null;
+        } finally {
+            isTechnicalPredicting = false;
+        }
+    }
 
     onMount(async () => {
         try {
@@ -708,18 +794,63 @@
     {/if}
     
     <div class="tabs">
-        <button class:active={useExistingModel && !showBacktestReport} on:click={() => {useExistingModel = true; showBacktestReport = false;}}>
+        <button class:active={showTechnicalOnly} on:click={() => {showTechnicalOnly = true; showBacktestReport = false; useExistingModel = false;}}>
+            📊 纯技术分析
+        </button>
+        <button class:active={useExistingModel && !showBacktestReport && !showTechnicalOnly} on:click={() => {useExistingModel = true; showBacktestReport = false; showTechnicalOnly = false;}}>
             使用现有模型
         </button>
-        <button class:active={!useExistingModel && !showBacktestReport} on:click={() => {useExistingModel = false; showBacktestReport = false;}}>
+        <button class:active={!useExistingModel && !showBacktestReport && !showTechnicalOnly} on:click={() => {useExistingModel = false; showBacktestReport = false; showTechnicalOnly = false;}}>
             训练新模型
         </button>
-        <button class:active={showBacktestReport} on:click={() => {showBacktestReport = true; setDefaultBacktestDates();}}>
+        <button class:active={showBacktestReport} on:click={() => {showBacktestReport = true; showTechnicalOnly = false; setDefaultBacktestDates();}}>
             回测报告
         </button>
     </div>
     
-    {#if useExistingModel && !showBacktestReport}
+    {#if showTechnicalOnly}
+        <div class="model-section">
+            <h2>📊 纯技术分析预测（无需模型训练）</h2>
+            <p class="section-desc">
+                基于历史数据的纯技术指标分析，无需训练模型即可预测。
+                包含：多因子评分、支撑压力位、多周期共振、量价背离、K线形态等专业分析。
+            </p>
+            
+            <div class="prediction-settings">
+                <div class="form-group">
+                    <label>历史数据天数：</label>
+                    <input type="number" bind:value={technicalHistoryDays} min="60" max="365" step="10" />
+                    <small>建议120-250天，数据越多越准确</small>
+                </div>
+                
+                <div class="form-group">
+                    <label>预测天数：</label>
+                    <input type="number" bind:value={technicalPredictionDays} min="1" max="30" />
+                    <small>预测未来1-30天的走势</small>
+                </div>
+                
+                <button
+                    on:click={predictWithTechnicalOnly}
+                    class:loading={isTechnicalPredicting}
+                    disabled={isTechnicalPredicting || !stockCode}
+                    class="predict-btn"
+                >
+                    {isTechnicalPredicting ? '分析中...' : '🔮 开始预测'}
+                </button>
+            </div>
+            
+            <div class="info-box">
+                <h4>💡 纯技术分析优势</h4>
+                <ul>
+                    <li>✅ <strong>无需模型训练</strong> - 直接基于历史数据分析</li>
+                    <li>✅ <strong>实时响应</strong> - 几秒钟即可得到结果</li>
+                    <li>✅ <strong>金融级指标</strong> - RSI、MACD、KDJ、ATR、ADX等</li>
+                    <li>✅ <strong>多维度分析</strong> - 趋势、量能、形态、情绪综合评估</li>
+                    <li>✅ <strong>智能买卖点</strong> - 自动识别支撑压力位和交易机会</li>
+                </ul>
+            </div>
+        </div>
+    {:else if useExistingModel && !showBacktestReport}
         <div class="model-section">
             <h2>选择预测模型</h2>
             {#if modelList.length === 0}
@@ -3354,5 +3485,57 @@
         color: rgba(255, 255, 255, 0.5);
         font-size: 0.875rem;
         font-style: italic;
+    }
+    
+    /* 纯技术分析样式 */
+    .section-desc {
+        color: rgba(255, 255, 255, 0.7);
+        margin-bottom: 1.5rem;
+        line-height: 1.6;
+    }
+    
+    .prediction-settings {
+        background: rgba(255, 255, 255, 0.03);
+        padding: 1.5rem;
+        border-radius: 0.75rem;
+        margin-bottom: 1.5rem;
+    }
+    
+    .info-box {
+        background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.1));
+        border: 1px solid rgba(99, 102, 241, 0.3);
+        border-radius: 0.75rem;
+        padding: 1.5rem;
+        margin-top: 1.5rem;
+    }
+    
+    .info-box h4 {
+        color: #818cf8;
+        margin-bottom: 1rem;
+        font-size: 1.1rem;
+    }
+    
+    .info-box ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+    }
+    
+    .info-box li {
+        padding: 0.5rem 0;
+        color: rgba(255, 255, 255, 0.9);
+        line-height: 1.6;
+    }
+    
+    .info-box li strong {
+        color: #a5b4fc;
+    }
+    
+    .predict-btn {
+        width: 100%;
+        padding: 1rem;
+        font-size: 1.1rem;
+        font-weight: 600;
+        margin-top: 1rem;
     }
 </style>
