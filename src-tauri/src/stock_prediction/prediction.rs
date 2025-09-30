@@ -26,6 +26,8 @@ use crate::stock_prediction::multi_timeframe_analysis::{
 use crate::stock_prediction::volume_analysis;
 use crate::stock_prediction::candlestick_patterns;
 use crate::stock_prediction::multi_factor_scoring;
+use crate::stock_prediction::core_weights::*; // 核心预测权重
+use crate::stock_prediction::constants::*;    // 技术参数配置
 
 // ==================== 金融级预测策略系统 ====================
 
@@ -397,7 +399,7 @@ fn identify_buy_points(
             reasons.push("底部背离确认".to_string());
         }
         
-        let signal_strength = 70.0 + multi_timeframe.signal_quality * 0.2;
+        let signal_strength = BUY_POINT_BASE_STRENGTH + multi_timeframe.signal_quality * SIGNAL_QUALITY_STRENGTH_IMPACT;
         
         buy_points.push(BuySellPoint {
             point_type: "买入点".to_string(),
@@ -407,14 +409,14 @@ fn identify_buy_points(
             take_profit: vec![take_profit1, take_profit2],
             risk_reward_ratio,
             reasons,
-            confidence: 0.75 + multi_timeframe.resonance_level as f64 * 0.05,
+            confidence: BUY_POINT_BASE_CONFIDENCE + multi_timeframe.resonance_level as f64 * RESONANCE_CONFIDENCE_BOOST,
             accuracy_rate: None,  // 待回测统计
         });
     }
     
     // 买点2：突破压力位 + 放量
     if let Some(&first_resistance) = support_resistance.resistance_levels.first() {
-        if current_price > first_resistance * 0.99 && current_price < first_resistance * 1.02 {
+        if current_price > first_resistance * NEAR_RESISTANCE_RANGE_LOW && current_price < first_resistance * NEAR_RESISTANCE_RANGE_HIGH {
             // 检查是否放量
             if volumes.len() >= 5 {
                 let recent_vol = volumes[n-1];
@@ -555,7 +557,7 @@ fn identify_sell_points(
             take_profit,
             risk_reward_ratio,
             reasons,
-            confidence: 0.75 + multi_timeframe.resonance_level as f64 * 0.05,
+            confidence: BUY_POINT_BASE_CONFIDENCE + multi_timeframe.resonance_level as f64 * RESONANCE_CONFIDENCE_BOOST,
             accuracy_rate: None,  // 待回测统计
         });
     }
@@ -563,7 +565,7 @@ fn identify_sell_points(
     // 卖点2：跌破关键支撑
     // 破位信号，建议立即止损出局
     if let Some(&first_support) = support_resistance.support_levels.first() {
-        if current_price < first_support * 0.99 {
+        if current_price < first_support * NEAR_RESISTANCE_RANGE_LOW {
             if volumes.len() >= 5 {
                 let recent_vol = volumes[n-1];
                 let avg_vol = volumes[n-5..n-1].iter().map(|&v| v as f64).sum::<f64>() / 4.0;
@@ -828,9 +830,129 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     // 计算历史数据特征
     let historical_volatility = calculate_historical_volatility(&prices);
     let _recent_trend = calculate_recent_trend(&prices);
-    let _support_resistance = calculate_support_resistance(&prices, current_price);
+    let support_resistance = calculate_support_resistance_levels(&prices, &highs, &lows, current_price);
     let _volatility_features = analyze_historical_volatility_pattern(&prices, 30);
     let mut technical_signals = analyze_technical_signals(&prices, &highs, &lows, &volumes);
+    
+    // 计算多因子评分（用于预测调整）
+    use crate::stock_prediction::technical_indicators::{
+        calculate_market_sentiment, calculate_atr, calculate_dmi_adx
+    };
+    
+    let n = prices.len();
+    let calc_ma = |window: usize| -> f64 {
+        if n >= window {
+            prices[n-window..].iter().sum::<f64>() / window as f64
+        } else {
+            current_price
+        }
+    };
+    
+    let ma5 = calc_ma(5);
+    let ma10 = calc_ma(10);
+    let ma20 = calc_ma(20);
+    let ma60 = calc_ma(60);
+    
+    // 计算RSI
+    let rsi = if n >= 14 {
+        let recent_prices = &prices[n-14..];
+        let mut gains = 0.0;
+        let mut losses = 0.0;
+        for i in 1..recent_prices.len() {
+            let change = recent_prices[i] - recent_prices[i-1];
+            if change > 0.0 { gains += change; } else { losses += -change; }
+        }
+        let avg_gain = gains / 14.0;
+        let avg_loss = losses / 14.0;
+        if avg_loss == 0.0 { 100.0 } else {
+            let rs = avg_gain / avg_loss;
+            100.0 - (100.0 / (1.0 + rs))
+        }
+    } else { 50.0 };
+    
+    // 计算MACD
+    let ema12 = calc_ma(12);
+    let ema26 = calc_ma(26);
+    let macd_dif = ema12 - ema26;
+    let macd_dea = calc_ma(9);
+    
+    // 计算市场情绪和波动率
+    let market_sentiment = calculate_market_sentiment(&prices, &volumes, &highs, &lows);
+    let atr = calculate_atr(&highs, &lows, &prices, 14);
+    let volatility_pct = (atr / current_price) * 100.0;
+    let (_di_plus, _di_minus, adx) = calculate_dmi_adx(&highs, &lows, &prices, 14);
+    
+    // 计算各因子得分
+    use crate::stock_prediction::multi_factor_scoring;
+    use crate::stock_prediction::candlestick_patterns;
+    use crate::stock_prediction::volume_analysis;
+    
+    let candles: Vec<candlestick_patterns::Candle> = prices.iter().zip(highs.iter()).zip(lows.iter()).zip(volumes.iter())
+        .map(|(((& close, &high), &low), &volume)| {
+            candlestick_patterns::Candle {
+                open: close,
+                high,
+                low,
+                close,
+                volume,
+            }
+        }).collect();
+    let candle_patterns = candlestick_patterns::identify_all_patterns(&candles);
+    let volume_analysis_result = volume_analysis::analyze_volume_price_enhanced(&prices, &volumes, &highs, &lows);
+    
+    let trend_factor = multi_factor_scoring::score_trend_factor(ma5, ma10, ma20, ma60, current_price);
+    let obv_last = volume_analysis_result.obv.last().copied().unwrap_or(0.0);
+    let obv_trend_str = if obv_last > 0.0 { "上升".to_string() } else { "下降".to_string() };
+    let volume_factor = multi_factor_scoring::score_volume_factor(
+        &volume_analysis_result.volume_trend,
+        volume_analysis_result.volume_price_sync,
+        volume_analysis_result.accumulation_signal,
+        &obv_trend_str,
+    );
+    let pattern_factor = multi_factor_scoring::score_pattern_factor(&candle_patterns);
+    let momentum_factor = multi_factor_scoring::score_momentum_factor(rsi, macd_dif, macd_dea);
+    let sr_factor = multi_factor_scoring::score_support_resistance_factor(
+        current_price,
+        &support_resistance.support_levels,
+        &support_resistance.resistance_levels,
+    );
+    
+    // 构建多周期数据
+    let mut daily_data: Vec<StockData> = Vec::with_capacity(prices.len());
+    for (i, date) in dates.iter().enumerate() {
+        daily_data.push(StockData {
+            symbol: request.stock_code.clone(),
+            date: date.clone(),
+            open: prices[i],
+            high: highs.get(i).copied().unwrap_or(prices[i]),
+            low: lows.get(i).copied().unwrap_or(prices[i]),
+            close: prices[i],
+            volume: volumes.get(i).copied().unwrap_or(0) as f64,
+        });
+    }
+    
+    let multi_timeframe = analyze_multi_timeframe_resonance(&daily_data);
+    
+    let mtf_factor = multi_factor_scoring::score_multi_timeframe_factor(
+        multi_timeframe.resonance_level,
+        &multi_timeframe.resonance_direction,
+        multi_timeframe.signal_quality,
+    );
+    let sentiment_factor = multi_factor_scoring::score_sentiment_factor(
+        market_sentiment.sentiment_score,
+        market_sentiment.fear_greed_index,
+        &market_sentiment.market_phase,
+    );
+    let volatility_factor = multi_factor_scoring::score_volatility_factor(atr, current_price);
+    
+    let mut factors = vec![
+        trend_factor, volume_factor, pattern_factor, momentum_factor,
+        sr_factor, mtf_factor, sentiment_factor, volatility_factor,
+    ];
+    
+    // 智能权重调整
+    multi_factor_scoring::adjust_factor_weights(&mut factors, &market_sentiment.market_phase, volatility_pct, adx);
+    let multi_factor_score = multi_factor_scoring::calculate_multi_factor_score(factors);
     
     // 生成预测
     let mut predictions: Vec<Prediction> = Vec::new();
@@ -850,39 +972,39 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         // === 改进的预测算法：基于趋势分析 + 均线/量能融合 ===
         
         // 1. 基础模型预测（权重降低）
-        let base_model_prediction = raw_change_rate * 0.02; // 降低基础模型权重
+        let base_model_prediction = raw_change_rate * BASE_MODEL_WEIGHT;
         
         // 2. 趋势主导因子（大幅提高权重）
-        let trend_bias = trend_analysis.trend_strength * 0.012; // 略降映射强度
-        let trend_factor = trend_bias * trend_analysis.bias_multiplier * 0.5; // 降低趋势偏置权重
+        let trend_bias = trend_analysis.trend_strength * TREND_STRENGTH_MAPPING;
+        let trend_factor = trend_bias * trend_analysis.bias_multiplier * TREND_BIAS_WEIGHT;
         
-        // 3. 技术指标确认（与趋势配合）
-        let tech_decay = 0.92_f64.powi(day as i32);
+        // 3. 技术指标确认（与趋势配合）：使用配置常量
+        let tech_decay = TECH_DECAY_BASE.powi(day as i32);
         let technical_impact = match trend_analysis.overall_trend {
             TrendState::StrongBullish | TrendState::Bullish => {
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    technical_signals.signal_strength * 0.035 * tech_decay
+                    technical_signals.signal_strength * TECH_STRONG_ALIGNED_WEIGHT * tech_decay
                 } else if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    technical_signals.signal_strength * 0.005 * tech_decay
+                    technical_signals.signal_strength * TECH_STRONG_CONFLICT_WEIGHT * tech_decay
                 } else {
-                    technical_signals.signal_strength * 0.015 * tech_decay
+                    technical_signals.signal_strength * TECH_STRONG_NEUTRAL_WEIGHT * tech_decay
                 }
             },
             TrendState::StrongBearish | TrendState::Bearish => {
                 if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    technical_signals.signal_strength * 0.035 * tech_decay
+                    technical_signals.signal_strength * TECH_STRONG_ALIGNED_WEIGHT * tech_decay
                 } else if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    technical_signals.signal_strength * 0.005 * tech_decay
+                    technical_signals.signal_strength * TECH_STRONG_CONFLICT_WEIGHT * tech_decay
                 } else {
-                    technical_signals.signal_strength * 0.015 * tech_decay
+                    technical_signals.signal_strength * TECH_STRONG_NEUTRAL_WEIGHT * tech_decay
                 }
             },
             TrendState::Neutral => {
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross 
                     || technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    technical_signals.signal_strength * 0.025 * tech_decay
+                    technical_signals.signal_strength * TECH_NEUTRAL_CROSS_WEIGHT * tech_decay
                 } else {
-                    technical_signals.signal_strength * 0.012 * tech_decay
+                    technical_signals.signal_strength * TECH_NEUTRAL_WEIGHT * tech_decay
                 }
             }
         };
@@ -898,33 +1020,33 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
             let ma20 = avg(&prices[n-20..n]);
             let price = last_price;
 
-            // 均线位置与多空排列
-            if price > ma5 { ma_bias += 0.4; } else { ma_bias -= 0.4; }
-            if ma5 > ma10 { ma_bias += 0.3; } else { ma_bias -= 0.3; }
-            if ma10 > ma20 { ma_bias += 0.3; } else { ma_bias -= 0.3; }
+            // 均线位置与多空排列：使用配置常量
+            if price > ma5 { ma_bias += PRICE_VS_MA5_BIAS; } else { ma_bias -= PRICE_VS_MA5_BIAS; }
+            if ma5 > ma10 { ma_bias += MA5_VS_MA10_BIAS; } else { ma_bias -= MA5_VS_MA10_BIAS; }
+            if ma10 > ma20 { ma_bias += MA10_VS_MA20_BIAS; } else { ma_bias -= MA10_VS_MA20_BIAS; }
 
-            // 均线斜率
+            // 均线斜率：使用配置常量
             let prev_ma5 = avg(&prices[n-6..n-1]);
             let prev_ma10 = avg(&prices[n-11..n-1]);
             let prev_ma20 = avg(&prices[n-21..n-1]);
-            if ma5 > prev_ma5 { ma_bias += 0.2; } else { ma_bias -= 0.2; }
-            if ma10 > prev_ma10 { ma_bias += 0.15; } else { ma_bias -= 0.15; }
-            if ma20 > prev_ma20 { ma_bias += 0.1; } else { ma_bias -= 0.1; }
-            ma_bias = ma_bias.clamp(-2.0, 2.0) * 0.01; // 映射到约±1%
+            if ma5 > prev_ma5 { ma_bias += MA5_SLOPE_BIAS; } else { ma_bias -= MA5_SLOPE_BIAS; }
+            if ma10 > prev_ma10 { ma_bias += MA10_SLOPE_BIAS; } else { ma_bias -= MA10_SLOPE_BIAS; }
+            if ma20 > prev_ma20 { ma_bias += MA20_SLOPE_BIAS; } else { ma_bias -= MA20_SLOPE_BIAS; }
+            ma_bias = ma_bias.clamp(-2.0, 2.0) * MA_BIAS_MAPPING;
 
-            // 量能偏置：5日/20日量比
+            // 量能偏置：5日/20日量比：使用配置常量
             let avgv = |slice: &[i64]| slice.iter().map(|&v| v as f64).sum::<f64>() / slice.len() as f64;
             let v5 = avgv(&volumes[n-5..n]);
             let v20 = avgv(&volumes[n-20..n]);
             let vr = if v20 > 0.0 { v5 / v20 } else { 1.0 };
-            if vr > 1.5 { vol_bias += 0.008; }
-            else if vr > 1.2 { vol_bias += 0.004; }
-            if vr < 0.6 { vol_bias -= 0.008; }
-            else if vr < 0.8 { vol_bias -= 0.004; }
+            if vr > HIGH_VOLUME_RATIO_THRESHOLD { vol_bias += HIGH_VOLUME_RATIO_BIAS; }
+            else if vr > MEDIUM_VOLUME_RATIO_THRESHOLD { vol_bias += MEDIUM_VOLUME_RATIO_BIAS; }
+            if vr < VERY_LOW_VOLUME_RATIO_THRESHOLD { vol_bias -= HIGH_VOLUME_RATIO_BIAS; }
+            else if vr < LOW_VOLUME_RATIO_THRESHOLD { vol_bias -= MEDIUM_VOLUME_RATIO_BIAS; }
         }
-        let ma_vol_decay = 0.96_f64.powi(day as i32);
+        let ma_vol_decay = MA_VOLUME_DECAY_BASE.powi(day as i32);
         
-        // 5. 波动率调整（根据趋势一致性调整）
+        // 5. 波动率调整（根据趋势一致性调整）：使用配置常量
         let volatility_factor = historical_volatility.clamp(0.01, 0.08);
         let trend_decay = match trend_analysis.overall_trend {
             TrendState::StrongBullish | TrendState::StrongBearish => {
@@ -932,122 +1054,253 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
                    matches!(trend_analysis.overall_trend, TrendState::StrongBullish) ||
                    (technical_signals.macd_death_cross || technical_signals.kdj_death_cross) && 
                    matches!(trend_analysis.overall_trend, TrendState::StrongBearish) {
-                    0.99_f64.powi(day as i32)
+                    STRONG_ALIGNED_DECAY_BASE.powi(day as i32)
                 } else {
-                    0.97_f64.powi(day as i32)
+                    STRONG_CONFLICT_DECAY_BASE.powi(day as i32)
                 }
             },
-            TrendState::Bullish | TrendState::Bearish => 0.95_f64.powi(day as i32),
-            TrendState::Neutral => 0.90_f64.powi(day as i32),
+            TrendState::Bullish | TrendState::Bearish => NORMAL_TREND_DECAY_BASE.powi(day as i32),
+            TrendState::Neutral => NEUTRAL_TREND_DECAY_BASE.powi(day as i32),
         };
         
-        // 6. 随机扰动（轻微减小幅度，避免噪声将方向推向上涨）
+        // 6. 随机扰动（轻微减小幅度，避免噪声将方向推向上涨）：使用配置常量
         let noise_amplitude = match trend_analysis.overall_trend {
             TrendState::StrongBullish | TrendState::StrongBearish => {
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross || 
                     technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    volatility_factor * 0.5
+                    volatility_factor * STRONG_ALIGNED_VOLATILITY_FACTOR
                 } else {
-                    volatility_factor * 0.7
+                    volatility_factor * STRONG_CONFLICT_VOLATILITY_FACTOR
                 }
             },
-            TrendState::Bullish | TrendState::Bearish => volatility_factor * 0.9,
-            TrendState::Neutral => volatility_factor * 1.1,
+            TrendState::Bullish | TrendState::Bearish => volatility_factor * NORMAL_TREND_VOLATILITY_FACTOR,
+            TrendState::Neutral => volatility_factor * NEUTRAL_TREND_VOLATILITY_FACTOR,
         };
         
-        // 使用确定性的市场波动（基于历史波动率和预测天数）
+        // 使用确定性的市场波动（基于历史波动率和预测天数）：使用配置常量
         // 金融逻辑：市场总有波动，但波动是确定性的（基于历史数据）
         let market_fluctuation = {
             // 基于预测天数的确定性波动因子
-            let day_factor = (day as f64 * 0.618).sin() * 0.5 + 0.5; // 0.0-1.0的确定性波动
-            noise_amplitude * (day_factor - 0.5) * 2.0 // 转换为±noise_amplitude范围
+            let day_factor = (day as f64 * GOLDEN_RATIO_OSCILLATION).sin() * VOLATILITY_NORMALIZATION + VOLATILITY_NORMALIZATION;
+            noise_amplitude * (day_factor - VOLATILITY_NORMALIZATION) * 2.0
         };
         
-        // 7. 综合预测变化率（下调趋势正偏权重，增加空头趋势权重对称性）
-        let mut predicted_change_rate = base_model_prediction * 0.10
-            + trend_factor * trend_decay * 0.40
-            + technical_impact * 0.30
-            + (ma_bias + vol_bias) * ma_vol_decay * 0.20
-            + market_fluctuation * 0.12;
+        // 7. 综合预测变化率：使用配置常量
+        let mut predicted_change_rate = base_model_prediction * PREDICTION_BASE_MODEL_RATIO
+            + trend_factor * trend_decay * PREDICTION_TREND_RATIO
+            + technical_impact * PREDICTION_TECHNICAL_RATIO
+            + (ma_bias + vol_bias) * ma_vol_decay * PREDICTION_MA_VOLUME_RATIO
+            + market_fluctuation * PREDICTION_MARKET_FLUCTUATION_RATIO;
         
-        // 8. 趋势一致性增强（特别重视日线金叉死叉）
+        // 8. 趋势一致性增强（特别重视日线金叉死叉）：使用配置常量
         match trend_analysis.overall_trend {
             TrendState::StrongBullish => {
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.25; }
-                    predicted_change_rate += 0.010;
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= STRONG_ALIGNMENT_OPPOSITE_SUPPRESS; }
+                    predicted_change_rate += STRONG_ALIGNMENT_BIAS;
                 } else {
-                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.40; }
-                    predicted_change_rate += 0.006;
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= MEDIUM_ALIGNMENT_OPPOSITE_SUPPRESS; }
+                    predicted_change_rate += MEDIUM_ALIGNMENT_BIAS;
                 }
             },
             TrendState::Bullish => {
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.50; }
-                    predicted_change_rate += 0.005;
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= WEAK_ALIGNMENT_OPPOSITE_SUPPRESS; }
+                    predicted_change_rate += WEAK_ALIGNMENT_BIAS;
                 } else {
-                    if predicted_change_rate < 0.0 { predicted_change_rate *= 0.70; }
-                    predicted_change_rate += 0.003;
+                    if predicted_change_rate < 0.0 { predicted_change_rate *= MINIMAL_ALIGNMENT_OPPOSITE_SUPPRESS; }
+                    predicted_change_rate += MINIMAL_ALIGNMENT_BIAS;
                 }
             },
             TrendState::StrongBearish => {
                 if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.25; }
-                    predicted_change_rate -= 0.010;
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= STRONG_ALIGNMENT_OPPOSITE_SUPPRESS; }
+                    predicted_change_rate -= STRONG_ALIGNMENT_BIAS;
                 } else {
-                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.40; }
-                    predicted_change_rate -= 0.006;
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= MEDIUM_ALIGNMENT_OPPOSITE_SUPPRESS; }
+                    predicted_change_rate -= MEDIUM_ALIGNMENT_BIAS;
                 }
             },
             TrendState::Bearish => {
                 if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.50; }
-                    predicted_change_rate -= 0.005;
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= WEAK_ALIGNMENT_OPPOSITE_SUPPRESS; }
+                    predicted_change_rate -= WEAK_ALIGNMENT_BIAS;
                 } else {
-                    if predicted_change_rate > 0.0 { predicted_change_rate *= 0.70; }
-                    predicted_change_rate -= 0.003;
+                    if predicted_change_rate > 0.0 { predicted_change_rate *= MINIMAL_ALIGNMENT_OPPOSITE_SUPPRESS; }
+                    predicted_change_rate -= MINIMAL_ALIGNMENT_BIAS;
                 }
             },
             TrendState::Neutral => {
                 if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    predicted_change_rate += 0.003;
+                    predicted_change_rate += NEUTRAL_CROSS_BIAS;
                 } else if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
-                    predicted_change_rate -= 0.003;
+                    predicted_change_rate -= NEUTRAL_CROSS_BIAS;
                 }
             }
         };
+        
+        // 9. 支撑压力位调整（新增）- 根据价格位置调整预测强度
+        let price_for_check = last_price * (1.0 + predicted_change_rate);
+        
+        // 检查接近压力位（上涨预测时）
+        if predicted_change_rate > 0.0 && !support_resistance.resistance_levels.is_empty() {
+            let mut resistance_adjustment: f64 = 1.0;
+            
+            for &resistance in &support_resistance.resistance_levels {
+                let distance_pct = (resistance / price_for_check - 1.0).abs();
+                
+                if distance_pct < 0.02 {  // 接近强压力位 (<2%)
+                    resistance_adjustment = f64::min(resistance_adjustment, NEAR_STRONG_RESISTANCE_DECAY);
+                    break;
+                } else if distance_pct < 0.05 {  // 接近普通压力位 (2%-5%)
+                    resistance_adjustment = f64::min(resistance_adjustment, NEAR_RESISTANCE_DECAY);
+                }
+            }
+            
+            // 检查是否突破压力位
+            if prices.len() >= 2 {
+                let prev_price = prices[prices.len() - 1];
+                if let Some(&first_resistance) = support_resistance.resistance_levels.first() {
+                    if prev_price < first_resistance && price_for_check > first_resistance {
+                        // 突破压力位，检查成交量
+                        if volumes.len() >= 5 {
+                            let n = volumes.len();
+                            let recent_volume = volumes[n-1] as f64;
+                            let avg_volume = volumes[n.saturating_sub(5)..n].iter().map(|&v| v as f64).sum::<f64>() / 5.0;
+                            if recent_volume > avg_volume * 1.2 {  // 放量突破
+                                resistance_adjustment = BREAKOUT_ACCELERATION;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            predicted_change_rate *= resistance_adjustment;
+        }
+        
+        // 检查接近支撑位（下跌预测时）
+        if predicted_change_rate < 0.0 && !support_resistance.support_levels.is_empty() {
+            let mut support_adjustment: f64 = 1.0;
+            
+            for &support in &support_resistance.support_levels {
+                let distance_pct = (price_for_check / support - 1.0).abs();
+                
+                if distance_pct < 0.02 {  // 接近强支撑位 (<2%)
+                    support_adjustment = f64::min(support_adjustment, NEAR_STRONG_SUPPORT_PROTECTION);
+                    break;
+                } else if distance_pct < 0.05 {  // 接近普通支撑位 (2%-5%)
+                    support_adjustment = f64::min(support_adjustment, NEAR_SUPPORT_PROTECTION);
+                }
+            }
+            
+            // 检查是否跌破支撑位
+            if prices.len() >= 2 {
+                let prev_price = prices[prices.len() - 1];
+                if let Some(&first_support) = support_resistance.support_levels.first() {
+                    if prev_price > first_support && price_for_check < first_support {
+                        // 跌破支撑位，检查成交量
+                        if volumes.len() >= 5 {
+                            let n = volumes.len();
+                            let recent_volume = volumes[n-1] as f64;
+                            let avg_volume = volumes[n.saturating_sub(5)..n].iter().map(|&v| v as f64).sum::<f64>() / 5.0;
+                            if recent_volume > avg_volume * 1.2 {  // 放量跌破
+                                predicted_change_rate *= BREAKDOWN_ACCELERATION;
+                            } else {
+                                predicted_change_rate *= support_adjustment;
+                            }
+                        } else {
+                            predicted_change_rate *= support_adjustment;
+                        }
+                    } else {
+                        predicted_change_rate *= support_adjustment;
+                    }
+                } else {
+                    predicted_change_rate *= support_adjustment;
+                }
+            } else {
+                predicted_change_rate *= support_adjustment;
+            }
+        }
+        
+        // 10. 多因子评分调整（新增）- 根据综合评分直接影响涨跌幅
+        let score = multi_factor_score.total_score;
+        if score > 75.0 {
+            // 强烈看涨 (评分>75)
+            predicted_change_rate += (score - 75.0) * MULTI_FACTOR_STRONG_BULLISH_IMPACT;
+        } else if score >= 60.0 {
+            // 看涨 (评分60-75)
+            predicted_change_rate += (score - 60.0) * MULTI_FACTOR_BULLISH_IMPACT;
+        } else if score >= 40.0 {
+            // 中性 (评分40-60)
+            predicted_change_rate += MULTI_FACTOR_NEUTRAL_BIAS;
+        } else if score >= 25.0 {
+            // 看跌 (评分25-40)
+            predicted_change_rate -= (40.0 - score) * MULTI_FACTOR_BEARISH_IMPACT;
+        } else {
+            // 强烈看跌 (评分<25)
+            predicted_change_rate -= (0.005 + (25.0 - score) * MULTI_FACTOR_STRONG_BEARISH_IMPACT);
+        }
+        
+        // 11. 波动率调节（新增）- 根据市场波动率调整预测置信度
+        if volatility_pct > 8.0 {
+            // 极高波动率
+            predicted_change_rate *= EXTREME_VOLATILITY_SUPPRESS;
+        } else if volatility_pct > 5.0 {
+            // 高波动率
+            predicted_change_rate *= HIGH_VOLATILITY_SUPPRESS;
+        } else if volatility_pct < 1.5 {
+            // 低波动率
+            predicted_change_rate *= LOW_VOLATILITY_ENHANCE;
+        }
+        
+        // 12. 市场情绪调节（新增）- 根据恐惧贪婪指数调整
+        if market_sentiment.fear_greed_index < 20.0 && predicted_change_rate > 0.0 {
+            // 极度恐慌时的反向买入信号增强
+            predicted_change_rate *= EXTREME_FEAR_CONTRARIAN_BOOST;
+            if market_sentiment.market_phase.contains("恐慌") {
+                predicted_change_rate += PANIC_REVERSAL_BONUS;
+            }
+        } else if market_sentiment.fear_greed_index > 80.0 && predicted_change_rate > 0.0 {
+            // 极度贪婪时的上涨预测抑制
+            predicted_change_rate *= EXTREME_GREED_SUPPRESS;
+        }
+        
+        if market_sentiment.market_phase.contains("过热") && predicted_change_rate < 0.0 {
+            // 过热期的回调机会加成
+            predicted_change_rate -= OVERHEATED_CORRECTION_BONUS;
+        }
 
         // === 新增：方向投票（优先保证涨/跌判断的合理性） ===
         let (direction_prob_up, _direction_score) = {
             let mut score: f64 = 0.0;
 
-            // 趋势权重
+            // 趋势权重：使用配置常量
             score += match trend_analysis.overall_trend {
-                TrendState::StrongBullish => 2.0,
-                TrendState::Bullish => 1.0,
+                TrendState::StrongBullish => STRONG_TREND_VOTE_SCORE,
+                TrendState::Bullish => NORMAL_TREND_VOTE_SCORE,
                 TrendState::Neutral => 0.0,
-                TrendState::Bearish => -1.0,
-                TrendState::StrongBearish => -2.0,
+                TrendState::Bearish => -NORMAL_TREND_VOTE_SCORE,
+                TrendState::StrongBearish => -STRONG_TREND_VOTE_SCORE,
             };
 
-            // MACD 权重（当下日线）
-            if technical_signals.macd_golden_cross { score += 1.2; }
-            if technical_signals.macd_death_cross { score -= 1.2; }
-            if technical_signals.macd_histogram > 0.0 { score += 0.6; } else { score -= 0.6; }
-            if technical_signals.macd_zero_cross_up { score += 0.8; }
-            if technical_signals.macd_zero_cross_down { score -= 0.8; }
+            // MACD 权重（当下日线）：使用配置常量
+            if technical_signals.macd_golden_cross { score += MACD_CROSS_VOTE_SCORE; }
+            if technical_signals.macd_death_cross { score -= MACD_CROSS_VOTE_SCORE; }
+            if technical_signals.macd_histogram > 0.0 { score += MACD_HISTOGRAM_VOTE_SCORE; } else { score -= MACD_HISTOGRAM_VOTE_SCORE; }
+            if technical_signals.macd_zero_cross_up { score += MACD_ZERO_CROSS_VOTE_SCORE; }
+            if technical_signals.macd_zero_cross_down { score -= MACD_ZERO_CROSS_VOTE_SCORE; }
 
-            // KDJ 权重（当下日线）
-            if technical_signals.kdj_golden_cross { score += 0.8; }
-            if technical_signals.kdj_death_cross { score -= 0.8; }
-            if technical_signals.kdj_j > 80.0 { score -= 0.6; }
-            if technical_signals.kdj_j < 20.0 { score += 0.6; }
+            // KDJ 权重（当下日线）：使用配置常量
+            if technical_signals.kdj_golden_cross { score += KDJ_CROSS_VOTE_SCORE; }
+            if technical_signals.kdj_death_cross { score -= KDJ_CROSS_VOTE_SCORE; }
+            if technical_signals.kdj_j > 80.0 { score -= KDJ_EXTREME_VOTE_SCORE; }
+            if technical_signals.kdj_j < 20.0 { score += KDJ_EXTREME_VOTE_SCORE; }
 
-            // RSI 权重（修正：>70 超买应降低上涨概率，<30 超卖应提高上涨概率）
-            if technical_signals.rsi > 70.0 { score -= 0.8; }
-            else if technical_signals.rsi > 55.0 { score -= 0.3; }
-            else if technical_signals.rsi < 30.0 { score += 0.8; }
-            else if technical_signals.rsi < 45.0 { score += 0.3; }
+            // RSI 权重：使用配置常量
+            if technical_signals.rsi > 70.0 { score -= RSI_EXTREME_VOTE_SCORE; }
+            else if technical_signals.rsi > 55.0 { score -= RSI_MODERATE_VOTE_SCORE; }
+            else if technical_signals.rsi < 30.0 { score += RSI_EXTREME_VOTE_SCORE; }
+            else if technical_signals.rsi < 45.0 { score += RSI_MODERATE_VOTE_SCORE; }
 
             // 均线排列与斜率
             if prices.len() >= 21 {
@@ -2105,9 +2358,9 @@ fn generate_prediction_reason(
 async fn generate_price_predictions(
     request: &PredictionRequest,
     prices: &[f64],
-    _highs: &[f64],
-    _lows: &[f64],
-    _volumes: &[i64],
+    highs: &[f64],
+    lows: &[f64],
+    volumes: &[i64],
     dates: &[String],
     current_price: f64,
     multi_timeframe: &MultiTimeframeSignal,
@@ -2120,6 +2373,116 @@ async fn generate_price_predictions(
         dates.last().unwrap_or(&"2023-01-01".to_string()),
         "%Y-%m-%d"
     ).unwrap_or_else(|_| chrono::Local::now().naive_local().date());
+    
+    // ========== 计算多因子评分和市场情绪（影响涨跌幅的核心因子）==========
+    use crate::stock_prediction::technical_indicators::{
+        calculate_market_sentiment, calculate_atr, calculate_dmi_adx
+    };
+    use crate::stock_prediction::candlestick_patterns;
+    use crate::stock_prediction::volume_analysis;
+    use crate::stock_prediction::multi_factor_scoring;
+    
+    let n = prices.len();
+    let calc_ma = |window: usize| -> f64 {
+        if n >= window {
+            prices[n-window..].iter().sum::<f64>() / window as f64
+        } else {
+            current_price
+        }
+    };
+    
+    let ma5 = calc_ma(5);
+    let ma10 = calc_ma(10);
+    let ma20_for_scoring = calc_ma(20);
+    let ma60_for_scoring = calc_ma(60);
+    
+    // RSI
+    let rsi_for_scoring = if n >= 14 {
+        let recent_prices = &prices[n-14..];
+        let mut gains = 0.0;
+        let mut losses = 0.0;
+        for i in 1..recent_prices.len() {
+            let change = recent_prices[i] - recent_prices[i-1];
+            if change > 0.0 { gains += change; } else { losses += -change; }
+        }
+        let avg_gain = gains / 14.0;
+        let avg_loss = losses / 14.0;
+        if avg_loss == 0.0 { 100.0 } else {
+            let rs = avg_gain / avg_loss;
+            100.0 - (100.0 / (1.0 + rs))
+        }
+    } else { 50.0 };
+    
+    // MACD
+    let ema12 = calc_ma(12);
+    let ema26 = calc_ma(26);
+    let macd_dif_for_scoring = ema12 - ema26;
+    let macd_dea_for_scoring = calc_ma(9);
+    
+    // 市场情绪和波动率
+    let market_sentiment = calculate_market_sentiment(prices, volumes, highs, lows);
+    let atr_value = calculate_atr(highs, lows, prices, 14);
+    let volatility_pct_global = (atr_value / current_price) * 100.0;
+    let (_di_plus, _di_minus, adx_global) = calculate_dmi_adx(highs, lows, prices, 14);
+    
+    // 计算KDJ指标（仅用于验证，实际在循环中动态计算）
+    use crate::stock_prediction::technical_indicators::calculate_kdj;
+    let (_kdj_k_global, _kdj_d_global, _kdj_j_global) = calculate_kdj(highs, lows, prices, 9);
+    
+    // K线形态和量价分析
+    let candles: Vec<candlestick_patterns::Candle> = prices.iter().zip(highs.iter()).zip(lows.iter()).zip(volumes.iter())
+        .map(|(((& close, &high), &low), &volume)| {
+            candlestick_patterns::Candle {
+                open: close,
+                high,
+                low,
+                close,
+                volume,
+            }
+        }).collect();
+    let candle_patterns = candlestick_patterns::identify_all_patterns(&candles);
+    let volume_analysis_result = volume_analysis::analyze_volume_price_enhanced(prices, volumes, highs, lows);
+    
+    // 计算各因子得分
+    let trend_factor = multi_factor_scoring::score_trend_factor(ma5, ma10, ma20_for_scoring, ma60_for_scoring, current_price);
+    let obv_last = volume_analysis_result.obv.last().copied().unwrap_or(0.0);
+    let obv_trend_str = if obv_last > 0.0 { "上升".to_string() } else { "下降".to_string() };
+    let volume_factor = multi_factor_scoring::score_volume_factor(
+        &volume_analysis_result.volume_trend,
+        volume_analysis_result.volume_price_sync,
+        volume_analysis_result.accumulation_signal,
+        &obv_trend_str,
+    );
+    let pattern_factor = multi_factor_scoring::score_pattern_factor(&candle_patterns);
+    let momentum_factor = multi_factor_scoring::score_momentum_factor(rsi_for_scoring, macd_dif_for_scoring, macd_dea_for_scoring);
+    let sr_factor = multi_factor_scoring::score_support_resistance_factor(
+        current_price,
+        &support_resistance.support_levels,
+        &support_resistance.resistance_levels,
+    );
+    let mtf_factor = multi_factor_scoring::score_multi_timeframe_factor(
+        multi_timeframe.resonance_level,
+        &multi_timeframe.resonance_direction,
+        multi_timeframe.signal_quality,
+    );
+    let sentiment_factor = multi_factor_scoring::score_sentiment_factor(
+        market_sentiment.sentiment_score,
+        market_sentiment.fear_greed_index,
+        &market_sentiment.market_phase,
+    );
+    let volatility_factor = multi_factor_scoring::score_volatility_factor(atr_value, current_price);
+    
+    let mut factors = vec![
+        trend_factor, volume_factor, pattern_factor, momentum_factor,
+        sr_factor, mtf_factor, sentiment_factor, volatility_factor,
+    ];
+    
+    // 智能权重调整
+    multi_factor_scoring::adjust_factor_weights(&mut factors, &market_sentiment.market_phase, volatility_pct_global, adx_global);
+    let multi_factor_score = multi_factor_scoring::calculate_multi_factor_score(factors);
+    
+    println!("   📊 多因子评分: {:.1}/100 (影响涨跌幅)", multi_factor_score.total_score);
+    // ========== 多因子计算完成 ==========
     
     // 基于共振方向确定趋势偏向
     let trend_bias: f64 = match multi_timeframe.resonance_level {
@@ -2174,8 +2537,10 @@ async fn generate_price_predictions(
         (momentum * 0.5).clamp(-0.015, 0.015)
     };
     
-    // 用于累积预测的向量（动态更新RSI/MACD）
+    // 用于累积预测的向量（动态更新RSI/MACD/KDJ）
     let mut predicted_prices_for_calc = prices.to_vec();
+    let mut predicted_highs_for_calc = highs.to_vec();
+    let mut predicted_lows_for_calc = lows.to_vec();
     
     for day in 1..=request.prediction_days {
         let mut target_date = last_date;
@@ -2184,27 +2549,33 @@ async fn generate_price_predictions(
         }
         let date_str = target_date.format("%Y-%m-%d").to_string();
         
-        // 计算当前的RSI和MACD（基于累积预测价格）
+        // 计算当前的RSI、MACD和KDJ（基于累积预测价格）
         let current_rsi = calculate_rsi(&predicted_prices_for_calc);
         let (_, _, macd_histogram) = calculate_macd_full(&predicted_prices_for_calc);
+        let (current_kdj_k, current_kdj_d, current_kdj_j) = calculate_kdj(
+            &predicted_highs_for_calc, 
+            &predicted_lows_for_calc, 
+            &predicted_prices_for_calc, 
+            9
+        );
         
-        // 趋势衰减（金融逻辑：预测越远衰减越快）
+        // 趋势衰减（金融逻辑：预测越远衰减越快）：使用配置常量
         // 更激进的衰减：第1天100%，第2天81%，第3天66%，第5天44%
-        let trend_decay = 0.90_f64.powi(day as i32);
+        let trend_decay = SIMPLE_TREND_DECAY_BASE.powi(day as i32);
         
-        // 均值回归力量（价格偏离均线越远，回归力量越强）
+        // 均值回归力量（价格偏离均线越远，回归力量越强）：使用配置常量
         let price_deviation_from_ma20 = (last_price - ma20) / ma20;
         let price_deviation_from_ma60 = (last_price - ma60) / ma60;
         
-        // 回归系数：偏离±5%以上时启动回归
+        // 回归系数：偏离±5%以上时启动回归：使用配置常量
         let mean_reversion_force = {
-            let deviation = price_deviation_from_ma20 * 0.6 + price_deviation_from_ma60 * 0.4;
-            if deviation.abs() > 0.05 {
+            let deviation = price_deviation_from_ma20 * MA20_REVERSION_WEIGHT + price_deviation_from_ma60 * MA60_REVERSION_WEIGHT;
+            if deviation.abs() > STRONG_MEAN_REVERSION_THRESHOLD {
                 // 偏离>5%，强制回归
-                -deviation * 0.3  // 30%的回归力量
-            } else if deviation.abs() > 0.03 {
+                -deviation * STRONG_MEAN_REVERSION_FORCE
+            } else if deviation.abs() > MODERATE_MEAN_REVERSION_THRESHOLD {
                 // 偏离>3%，温和回归
-                -deviation * 0.2  // 20%的回归力量
+                -deviation * MODERATE_MEAN_REVERSION_FORCE
             } else {
                 0.0  // 偏离<3%，不回归
             }
@@ -2213,60 +2584,109 @@ async fn generate_price_predictions(
         // 动态调整趋势强度（金融逻辑：根据技术指标和价位调整）
         let mut current_trend_strength = initial_trend_strength;
         
-        // 检查是否接近压力位（上涨时）
+        // 检查是否接近压力位（上涨时）：使用配置常量
         if current_trend_strength > 0.0 {
             for &resistance in &support_resistance.resistance_levels {
-                if (last_price - resistance).abs() / resistance < 0.03 {
+                if (last_price - resistance).abs() / resistance < NEAR_RESISTANCE_DISTANCE {
                     // 接近压力位，减弱上涨趋势
-                    current_trend_strength *= 0.3;
+                    current_trend_strength *= NEAR_RESISTANCE_WEAKEN;
                     break;
                 }
             }
-            // RSI超买，减弱上涨趋势
+            // RSI超买，减弱上涨趋势：使用配置常量
             if current_rsi > 70.0 {
-                current_trend_strength *= 0.4;
-            } else if current_rsi > 65.0 {
-                current_trend_strength *= 0.7;
+                current_trend_strength *= RSI_STRONG_OVERBOUGHT_WEAKEN;
+            } else if current_rsi > RSI_MODERATE_OVERBOUGHT {
+                current_trend_strength *= RSI_MODERATE_OVERBOUGHT_WEAKEN;
             }
         }
         
-        // 检查是否接近支撑位（下跌时）
+        // 检查是否接近支撑位（下跌时）：使用配置常量
         if current_trend_strength < 0.0 {
             for &support in &support_resistance.support_levels {
-                if (last_price - support).abs() / support < 0.03 {
+                if (last_price - support).abs() / support < NEAR_SUPPORT_DISTANCE {
                     // 接近支撑位，减弱下跌趋势
-                    current_trend_strength *= 0.3;
+                    current_trend_strength *= NEAR_SUPPORT_WEAKEN;
                     break;
                 }
             }
-            // RSI超卖，减弱下跌趋势
+            // RSI超卖，减弱下跌趋势：使用配置常量
             if current_rsi < 30.0 {
-                current_trend_strength *= 0.4;
-            } else if current_rsi < 35.0 {
-                current_trend_strength *= 0.7;
+                current_trend_strength *= RSI_STRONG_OVERSOLD_WEAKEN;
+            } else if current_rsi < RSI_MODERATE_OVERSOLD {
+                current_trend_strength *= RSI_MODERATE_OVERSOLD_WEAKEN;
             }
         }
         
-        // 确定性波动调整（金融逻辑：双向波动，不放大趋势）
-        let base_volatility = volatility * 0.25;
+        // 确定性波动调整（金融逻辑：双向波动，不放大趋势）：使用配置常量
+        let base_volatility = volatility * SIMPLE_PREDICTION_BASE_VOLATILITY;
         
-        // 双向波动因子：基于日期的确定性正负波动
-        let oscillation_factor = ((day as f64 * 1.618).sin() * 0.5 + 
-                                   (day as f64 * 0.618).cos() * 0.3) * trend_decay;
+        // 双向波动因子：基于日期的确定性正负波动：使用配置常量
+        let oscillation_factor = ((day as f64 * 1.618).sin() * VOLATILITY_NORMALIZATION + 
+                                   (day as f64 * GOLDEN_RATIO_OSCILLATION).cos() * 0.3) * trend_decay;
         
         let volatility_adjustment = if current_trend_strength.abs() < 0.001 {
-            // 震荡市：纯双向波动
-            base_volatility * oscillation_factor
+            // 震荡市：纯双向波动：使用配置常量
+            base_volatility * oscillation_factor * OSCILLATION_MARKET_VOLATILITY
         } else {
-            // 趋势市：小幅双向波动（不放大趋势，只增加波动性）
-            base_volatility * oscillation_factor * 0.5
+            // 趋势市：小幅双向波动（不放大趋势，只增加波动性）：使用配置常量
+            base_volatility * oscillation_factor * TREND_MARKET_VOLATILITY
         };
         
-        // 综合变化率（金融逻辑：趋势 + 波动 + 均值回归）
+        // 综合变化率（金融逻辑：趋势 + 波动 + 均值回归）：使用配置常量
         // 关键修复：趋势衰减更快，加入均值回归
-        let change_rate = current_trend_strength * trend_decay * 0.7  // 降低趋势权重
-                        + volatility_adjustment                       // 双向波动
-                        + mean_reversion_force;                       // 均值回归
+        let mut change_rate = current_trend_strength * trend_decay * TREND_COMPONENT_WEIGHT
+                        + volatility_adjustment
+                        + mean_reversion_force;
+        
+        // ========== 新增：多因子评分调整（第一层增强）==========
+        let score = multi_factor_score.total_score;
+        if score > 75.0 {
+            // 强烈看涨 (评分>75)
+            change_rate += (score - 75.0) * MULTI_FACTOR_STRONG_BULLISH_IMPACT;
+        } else if score >= 60.0 {
+            // 看涨 (评分60-75)
+            change_rate += (score - 60.0) * MULTI_FACTOR_BULLISH_IMPACT;
+        } else if score >= 40.0 {
+            // 中性 (评分40-60)
+            change_rate += MULTI_FACTOR_NEUTRAL_BIAS;
+        } else if score >= 25.0 {
+            // 看跌 (评分25-40)
+            change_rate -= (40.0 - score) * MULTI_FACTOR_BEARISH_IMPACT;
+        } else {
+            // 强烈看跌 (评分<25)
+            change_rate -= 0.005 + (25.0 - score) * MULTI_FACTOR_STRONG_BEARISH_IMPACT;
+        }
+        
+        // ========== 新增：波动率调节（第二层调节）==========
+        if volatility_pct_global > 8.0 {
+            // 极高波动率
+            change_rate *= EXTREME_VOLATILITY_SUPPRESS;
+        } else if volatility_pct_global > 5.0 {
+            // 高波动率
+            change_rate *= HIGH_VOLATILITY_SUPPRESS;
+        } else if volatility_pct_global < 1.5 {
+            // 低波动率
+            change_rate *= LOW_VOLATILITY_ENHANCE;
+        }
+        
+        // ========== 新增：市场情绪调节（第三层增强）==========
+        if market_sentiment.fear_greed_index < 20.0 && change_rate > 0.0 {
+            // 极度恐慌时的反向买入信号增强
+            change_rate *= EXTREME_FEAR_CONTRARIAN_BOOST;
+            if market_sentiment.market_phase.contains("恐慌") {
+                change_rate += PANIC_REVERSAL_BONUS;
+            }
+        } else if market_sentiment.fear_greed_index > 80.0 && change_rate > 0.0 {
+            // 极度贪婪时的上涨预测抑制
+            change_rate *= EXTREME_GREED_SUPPRESS;
+        }
+        
+        if market_sentiment.market_phase.contains("过热") && change_rate < 0.0 {
+            // 过热期的回调机会加成
+            change_rate -= OVERHEATED_CORRECTION_BONUS;
+        }
+        // ========== 多因子调整完成 ==========
         
         // 确保变化率有最小值（金融逻辑：股价不会完全不动）
         let adjusted_change_rate = if change_rate.abs() < 0.001 {
@@ -2281,8 +2701,8 @@ async fn generate_price_predictions(
         let change_percent = clamp_daily_change(adjusted_change_rate * 100.0);
         let predicted_price = last_price * (1.0 + change_percent / 100.0);
         
-        // 置信度随时间递减
-        let confidence = (0.70 * trend_decay + multi_timeframe.signal_quality * 0.003).clamp(0.40, 0.85);
+        // 置信度随时间递减：使用配置常量
+        let confidence = (PREDICTION_BASE_CONFIDENCE * trend_decay + multi_timeframe.signal_quality * SIGNAL_QUALITY_CONFIDENCE_IMPACT).clamp(PREDICTION_MIN_CONFIDENCE, PREDICTION_MAX_CONFIDENCE);
         
         // 交易信号
         let trading_signal = if current_trend_strength > 0.008 {
@@ -2306,6 +2726,42 @@ async fn generate_price_predictions(
             macd_histogram,
         );
         
+        // 构建技术指标数据
+        use crate::stock_prediction::types::TechnicalIndicatorValues;
+        
+        // 判断KDJ金叉死叉（需要比较当前和前一个值）
+        let kdj_golden_cross = if day > 1 && predicted_prices_for_calc.len() >= 2 {
+            // 简化判断：K上穿D
+            current_kdj_k > current_kdj_d && current_kdj_k > 20.0
+        } else {
+            false
+        };
+        
+        let kdj_death_cross = if day > 1 && predicted_prices_for_calc.len() >= 2 {
+            // 简化判断：K下穿D
+            current_kdj_k < current_kdj_d && current_kdj_k < 80.0
+        } else {
+            false
+        };
+        
+        let tech_indicators = TechnicalIndicatorValues {
+            rsi: current_rsi,
+            macd_histogram,
+            macd_dif: macd_dif_for_scoring,
+            macd_dea: macd_dea_for_scoring,
+            kdj_j: current_kdj_j,
+            kdj_k: current_kdj_k,
+            kdj_d: current_kdj_d,
+            cci: 0.0, // CCI指标后续可补充
+            obv_trend: obv_last,
+            macd_golden_cross: macd_dif_for_scoring > macd_dea_for_scoring && macd_histogram > 0.0,
+            macd_death_cross: macd_dif_for_scoring < macd_dea_for_scoring && macd_histogram < 0.0,
+            kdj_golden_cross,
+            kdj_death_cross,
+            kdj_overbought: current_kdj_k > 80.0 && current_kdj_d > 80.0,
+            kdj_oversold: current_kdj_k < 20.0 && current_kdj_d < 20.0,
+        };
+        
         predictions.push(Prediction {
             target_date: date_str,
             predicted_price,
@@ -2313,13 +2769,20 @@ async fn generate_price_predictions(
             confidence,
             trading_signal: Some(trading_signal),
             signal_strength: Some(multi_timeframe.signal_quality / 100.0),
-            technical_indicators: None,
+            technical_indicators: Some(tech_indicators),
             prediction_reason: Some(prediction_reason),
             key_factors: Some(key_factors),
         });
         
-        // 更新价格向量用于下一轮RSI/MACD计算
+        // 更新价格向量用于下一轮RSI/MACD/KDJ计算
         predicted_prices_for_calc.push(predicted_price);
+        
+        // 估算预测的high和low（基于波动率）
+        let predicted_high = predicted_price * (1.0 + volatility * 0.5);
+        let predicted_low = predicted_price * (1.0 - volatility * 0.5);
+        predicted_highs_for_calc.push(predicted_high);
+        predicted_lows_for_calc.push(predicted_low);
+        
         last_price = predicted_price;
     }
     

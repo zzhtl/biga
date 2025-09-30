@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use super::candlestick_patterns::{PatternRecognition, Direction};
+use super::core_weights::*; // 核心评分权重
+use super::constants::*;    // 技术参数配置
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiFactorScore {
@@ -41,13 +43,15 @@ pub enum SignalQuality {
 
 impl SignalQuality {
     pub fn from_score(score: f64) -> Self {
-        if score >= 85.0 {
+        use crate::stock_prediction::constants::*;
+        
+        if score >= EXCELLENT_SIGNAL_THRESHOLD {
             SignalQuality::Excellent
-        } else if score >= 70.0 {
+        } else if score >= GOOD_SIGNAL_THRESHOLD {
             SignalQuality::Good
-        } else if score >= 55.0 {
+        } else if score >= FAIR_SIGNAL_THRESHOLD {
             SignalQuality::Fair
-        } else if score >= 40.0 {
+        } else if score >= POOR_SIGNAL_THRESHOLD {
             SignalQuality::Poor
         } else {
             SignalQuality::VeryPoor
@@ -76,35 +80,35 @@ pub fn score_trend_factor(
     let mut score: f64 = 50.0; // 基准分
     let mut reasons: Vec<String> = Vec::new();
     
-    // 均线多头排列：+25分 (降低避免超过100)
+    // 均线多头排列：使用配置常量
     if ma5 > ma10 && ma10 > ma20 && ma20 > ma60 {
-        score += 25.0;
+        score += BULLISH_MA_ALIGNMENT_SCORE;
         reasons.push("均线多头排列".to_string());
     }
-    // 均线空头排列：-25分
+    // 均线空头排列：使用配置常量
     else if ma5 < ma10 && ma10 < ma20 && ma20 < ma60 {
-        score -= 25.0;
+        score -= BEARISH_MA_ALIGNMENT_SCORE;
         reasons.push("均线空头排列".to_string());
     }
     
-    // 价格位于均线之上：+12分 (降低)
+    // 价格位于均线之上：使用配置常量
     if current_price > ma5 && current_price > ma20 {
-        score += 12.0;
+        score += PRICE_ABOVE_MA_SCORE;
         reasons.push("价格位于主要均线之上".to_string());
     }
-    // 价格位于均线之下：-12分
+    // 价格位于均线之下：使用配置常量
     else if current_price < ma5 && current_price < ma20 {
-        score -= 12.0;
+        score -= PRICE_BELOW_MA_SCORE;
         reasons.push("价格位于主要均线之下".to_string());
     }
     
-    // 短期均线向上发散：+8分 (降低)
+    // 短期均线向上发散：使用配置常量
     let ma5_slope = (ma5 - ma10) / ma10;
-    if ma5_slope > 0.02 {
-        score += 8.0;
+    if ma5_slope > MA_DIVERGENCE_THRESHOLD {
+        score += MA_UPWARD_DIVERGENCE_SCORE;
         reasons.push("短期均线向上发散".to_string());
-    } else if ma5_slope < -0.02 {
-        score -= 8.0;
+    } else if ma5_slope < -MA_DIVERGENCE_THRESHOLD {
+        score -= MA_UPWARD_DIVERGENCE_SCORE;
         reasons.push("短期均线向下发散".to_string());
     }
     
@@ -126,7 +130,7 @@ pub fn score_trend_factor(
     FactorScore {
         name: "趋势因子".to_string(),
         score,
-        weight: 0.22, // 调整为22%
+        weight: TREND_FACTOR_WEIGHT,
         description: reasons.join("; "),
         status,
     }
@@ -142,39 +146,39 @@ pub fn score_volume_factor(
     let mut score: f64 = 50.0;
     let mut reasons: Vec<String> = Vec::new();
     
-    // 量价配合：+15分 (降低避免超标)
+    // 量价配合：使用配置常量
     if volume_price_sync {
-        score += 15.0;
+        score += VOLUME_PRICE_SYNC_SCORE;
         reasons.push("量价配合良好".to_string());
     } else {
-        score -= 15.0;
+        score -= VOLUME_PRICE_SYNC_SCORE;
         reasons.push("量价背离".to_string());
     }
     
-    // OBV趋势：±12分 (降低)
+    // OBV趋势：使用配置常量
     if obv_trend.contains("上升") {
-        score += 12.0;
+        score += OBV_UPTREND_SCORE;
         reasons.push("OBV上升趋势".to_string());
     } else if obv_trend.contains("下降") {
-        score -= 12.0;
+        score -= OBV_UPTREND_SCORE;
         reasons.push("OBV下降趋势".to_string());
     }
     
-    // 吸筹信号：最高+15分 (降低)
-    if accumulation_signal > 70.0 {
-        score += 15.0;
+    // 吸筹信号：使用配置常量
+    if accumulation_signal > STRONG_ACCUMULATION_THRESHOLD {
+        score += STRONG_ACCUMULATION_SCORE;
         reasons.push("强烈吸筹信号".to_string());
-    } else if accumulation_signal > 50.0 {
-        score += 8.0;
+    } else if accumulation_signal > NORMAL_ACCUMULATION_THRESHOLD {
+        score += NORMAL_ACCUMULATION_SCORE;
         reasons.push("检测到吸筹".to_string());
     }
     
-    // 量能趋势：±8分 (降低)
+    // 量能趋势：使用配置常量
     if volume_trend == "放量" {
-        score += 8.0;
+        score += VOLUME_SURGE_SCORE;
         reasons.push("成交量放大".to_string());
     } else if volume_trend == "缩量" {
-        score -= 5.0;
+        score -= VOLUME_SHRINK_SCORE;
         reasons.push("成交量萎缩".to_string());
     }
     
@@ -196,7 +200,7 @@ pub fn score_volume_factor(
     FactorScore {
         name: "量价因子".to_string(),
         score,
-        weight: 0.18, // 调整为18%
+        weight: VOLUME_PRICE_FACTOR_WEIGHT,
         description: reasons.join("; "),
         status,
     }
@@ -211,7 +215,7 @@ pub fn score_pattern_factor(patterns: &[PatternRecognition]) -> FactorScore {
         return FactorScore {
             name: "形态因子".to_string(),
             score: 50.0,
-            weight: 0.15,
+            weight: PATTERN_FACTOR_WEIGHT,
             description: "未检测到明显K线形态".to_string(),
             status: FactorStatus::Neutral,
         };
@@ -223,16 +227,16 @@ pub fn score_pattern_factor(patterns: &[PatternRecognition]) -> FactorScore {
         
         match pattern.direction {
             Direction::Bullish => {
-                score += pattern_score * 0.5;
+                score += pattern_score * PATTERN_IMPACT_FACTOR;
                 reasons.push(format!("看涨形态: {}", pattern.description));
             }
             Direction::Bearish => {
-                score -= pattern_score * 0.5;
+                score -= pattern_score * PATTERN_IMPACT_FACTOR;
                 reasons.push(format!("看跌形态: {}", pattern.description));
             }
             Direction::Neutral => {
                 // 中性形态，略微降分（不确定性）
-                score -= 5.0;
+                score -= NEUTRAL_PATTERN_PENALTY;
             }
         }
     }
@@ -254,7 +258,7 @@ pub fn score_pattern_factor(patterns: &[PatternRecognition]) -> FactorScore {
     FactorScore {
         name: "形态因子".to_string(),
         score,
-        weight: 0.12, // 调整为12%
+        weight: PATTERN_FACTOR_WEIGHT,
         description: if reasons.is_empty() { 
             "无明显形态".to_string() 
         } else { 
@@ -273,44 +277,44 @@ pub fn score_momentum_factor(
     let mut score: f64 = 50.0;
     let mut reasons: Vec<String> = Vec::new();
     
-    // RSI评分
-    if rsi < 30.0 {
-        score += 20.0;
+    // RSI评分：使用配置常量
+    if rsi < RSI_OVERSOLD_THRESHOLD {
+        score += RSI_OVERSOLD_SCORE;
         reasons.push("RSI超卖".to_string());
-    } else if rsi > 70.0 {
-        score -= 20.0;
+    } else if rsi > RSI_OVERBOUGHT_THRESHOLD {
+        score -= RSI_OVERBOUGHT_SCORE;
         reasons.push("RSI超买".to_string());
     } else if rsi > 45.0 && rsi < 55.0 {
         score += 5.0;
         reasons.push("RSI中性偏强".to_string());
     }
     
-    // MACD评分
+    // MACD评分：使用配置常量
     if macd_dif > macd_dea {
         if macd_dif > 0.0 && macd_dea > 0.0 {
-            score += 20.0;
+            score += MACD_BULLISH_ABOVE_ZERO_SCORE;
             reasons.push("MACD双线上穿零轴".to_string());
         } else {
-            score += 15.0;
+            score += MACD_GOLDEN_CROSS_SCORE;
             reasons.push("MACD金叉".to_string());
         }
     } else {
         if macd_dif < 0.0 && macd_dea < 0.0 {
-            score -= 20.0;
+            score -= MACD_BEARISH_BELOW_ZERO_SCORE;
             reasons.push("MACD双线下穿零轴".to_string());
         } else {
-            score -= 15.0;
+            score -= MACD_DEATH_CROSS_SCORE;
             reasons.push("MACD死叉".to_string());
         }
     }
     
-    // MACD柱状图变化
+    // MACD柱状图变化：使用配置常量
     let macd_bar = macd_dif - macd_dea;
     if macd_bar > 0.0 {
-        score += 10.0;
+        score += MACD_POSITIVE_BAR_SCORE;
         reasons.push("MACD红柱".to_string());
     } else {
-        score -= 10.0;
+        score -= MACD_NEGATIVE_BAR_SCORE;
         reasons.push("MACD绿柱".to_string());
     }
     
@@ -331,7 +335,7 @@ pub fn score_momentum_factor(
     FactorScore {
         name: "动量因子".to_string(),
         score,
-        weight: 0.13, // 调整为13%
+        weight: MOMENTUM_FACTOR_WEIGHT,
         description: reasons.join("; "),
         status,
     }
@@ -346,36 +350,36 @@ pub fn score_support_resistance_factor(
     let mut score: f64 = 50.0;
     let mut reasons: Vec<String> = Vec::new();
     
-    // 计算距离最近支撑位的距离
+    // 计算距离最近支撑位的距离：使用配置常量
     if let Some(&nearest_support) = support_levels.first() {
-        let distance_pct = (current_price - nearest_support) / current_price * 100.0;
+        let distance_pct = (current_price - nearest_support) / current_price;
         
-        if distance_pct < 2.0 {
-            score += 25.0;
+        if distance_pct < STRONG_LEVEL_DISTANCE_THRESHOLD {
+            score += NEAR_STRONG_SUPPORT_SCORE;
             reasons.push(format!("接近强支撑({:.2}元)", nearest_support));
-        } else if distance_pct < 5.0 {
-            score += 15.0;
+        } else if distance_pct < NORMAL_LEVEL_DISTANCE_THRESHOLD {
+            score += NEAR_SUPPORT_SCORE;
             reasons.push("靠近支撑区域".to_string());
         }
     }
     
-    // 计算距离最近压力位的距离
+    // 计算距离最近压力位的距离：使用配置常量
     if let Some(&nearest_resistance) = resistance_levels.first() {
-        let distance_pct = (nearest_resistance - current_price) / current_price * 100.0;
+        let distance_pct = (nearest_resistance - current_price) / current_price;
         
-        if distance_pct < 2.0 {
-            score -= 25.0;
+        if distance_pct < STRONG_LEVEL_DISTANCE_THRESHOLD {
+            score -= NEAR_STRONG_RESISTANCE_SCORE;
             reasons.push(format!("接近强压力({:.2}元)", nearest_resistance));
-        } else if distance_pct < 5.0 {
-            score -= 15.0;
+        } else if distance_pct < NORMAL_LEVEL_DISTANCE_THRESHOLD {
+            score -= NEAR_RESISTANCE_SCORE;
             reasons.push("靠近压力区域".to_string());
-        } else if distance_pct > 10.0 {
-            score += 10.0;
+        } else if distance_pct > UPSIDE_SUFFICIENT_THRESHOLD {
+            score += SUFFICIENT_UPSIDE_SCORE;
             reasons.push("上方空间充足".to_string());
         }
     }
     
-    // 位置评估
+    // 位置评估：使用配置常量
     if !support_levels.is_empty() && !resistance_levels.is_empty() {
         let support = support_levels.first().unwrap();
         let resistance = resistance_levels.first().unwrap();
@@ -383,11 +387,11 @@ pub fn score_support_resistance_factor(
         
         if range > 0.0 {
             let position = (current_price - support) / range;
-            if position < 0.3 {
-                score += 10.0;
+            if position < BOTTOM_ZONE_THRESHOLD {
+                score += BOTTOM_POSITION_SCORE;
                 reasons.push("位于区间底部".to_string());
-            } else if position > 0.7 {
-                score -= 10.0;
+            } else if position > TOP_ZONE_THRESHOLD {
+                score -= TOP_POSITION_SCORE;
                 reasons.push("位于区间顶部".to_string());
             }
         }
@@ -410,7 +414,7 @@ pub fn score_support_resistance_factor(
     FactorScore {
         name: "支撑压力".to_string(),
         score,
-        weight: 0.10,
+        weight: SUPPORT_RESISTANCE_FACTOR_WEIGHT,
         description: if reasons.is_empty() { 
             "位置中性".to_string() 
         } else { 
@@ -429,24 +433,24 @@ pub fn score_multi_timeframe_factor(
     let mut score: f64 = 50.0;
     let mut reasons: Vec<String> = Vec::new();
     
-    // 共振级别评分（0-3级）
-    score += resonance_level as f64 * 12.0; // 每级+12分，最高+36分
+    // 共振级别评分（0-3级）：使用配置常量
+    score += resonance_level as f64 * RESONANCE_LEVEL_SCORE;
     
     if resonance_level >= 2 {
         reasons.push(format!("{}级共振", resonance_level));
     }
     
-    // 共振方向
+    // 共振方向：使用配置常量
     if resonance_direction.contains("多头") {
-        score += 15.0;
+        score += MULTI_BULLISH_RESONANCE_SCORE;
         reasons.push("多周期多头共振".to_string());
     } else if resonance_direction.contains("空头") {
-        score -= 15.0;
+        score -= MULTI_BEARISH_RESONANCE_SCORE;
         reasons.push("多周期空头共振".to_string());
     }
     
-    // 信号质量
-    score += (signal_quality - 50.0) * 0.3; // 信号质量影响
+    // 信号质量：使用配置常量
+    score += (signal_quality - 50.0) * SIGNAL_QUALITY_IMPACT;
     
     score = score.max(0.0).min(100.0);
     
@@ -465,7 +469,7 @@ pub fn score_multi_timeframe_factor(
     FactorScore {
         name: "多周期共振".to_string(),
         score,
-        weight: 0.15,
+        weight: MULTI_TIMEFRAME_FACTOR_WEIGHT,
         description: if reasons.is_empty() { 
             "无明显共振".to_string() 
         } else { 
@@ -510,7 +514,7 @@ pub fn score_sentiment_factor(
     FactorScore {
         name: "市场情绪".to_string(),
         score,
-        weight: 0.07, // 调整为7% (辅助指标,降低权重避免噪音)
+        weight: SENTIMENT_FACTOR_WEIGHT,
         description: reasons.join("; "),
         status,
     }
@@ -525,28 +529,28 @@ pub fn score_volatility_factor(
     let mut reasons: Vec<String> = Vec::new();
     
     // 计算波动率百分比
-    let volatility_pct = (atr / current_price) * 100.0;
+    let volatility_pct = atr / current_price;
     
-    // 金融逻辑: 
-    // - 低波动(< 1.5%): 市场稳定,适合持仓 = +15分
-    // - 中等波动(1.5-3%): 正常波动 = 0分
-    // - 高波动(> 3%): 风险增加 = -15分
-    // - 极高波动(> 5%): 极端风险 = -25分
+    // 金融逻辑：使用配置常量
+    // - 低波动: 市场稳定,适合持仓
+    // - 中等波动: 正常波动
+    // - 高波动: 风险增加
+    // - 极高波动: 极端风险
     
-    if volatility_pct < 1.0 {
-        score += 20.0;
-        reasons.push(format!("极低波动({:.2}%),市场平稳", volatility_pct));
-    } else if volatility_pct < 1.5 {
-        score += 10.0;
-        reasons.push(format!("低波动({:.2}%),适合持仓", volatility_pct));
-    } else if volatility_pct < 3.0 {
-        reasons.push(format!("中等波动({:.2}%),正常范围", volatility_pct));
-    } else if volatility_pct < 5.0 {
-        score -= 15.0;
-        reasons.push(format!("高波动({:.2}%),注意风险", volatility_pct));
+    if volatility_pct < VERY_LOW_VOLATILITY_THRESHOLD {
+        score += VERY_LOW_VOLATILITY_SCORE;
+        reasons.push(format!("极低波动({:.2}%),市场平稳", volatility_pct * 100.0));
+    } else if volatility_pct < LOW_VOLATILITY_THRESHOLD {
+        score += LOW_VOLATILITY_SCORE;
+        reasons.push(format!("低波动({:.2}%),适合持仓", volatility_pct * 100.0));
+    } else if volatility_pct < MEDIUM_VOLATILITY_THRESHOLD {
+        reasons.push(format!("中等波动({:.2}%),正常范围", volatility_pct * 100.0));
+    } else if volatility_pct < HIGH_VOLATILITY_THRESHOLD {
+        score -= HIGH_VOLATILITY_SCORE;
+        reasons.push(format!("高波动({:.2}%),注意风险", volatility_pct * 100.0));
     } else {
-        score -= 25.0;
-        reasons.push(format!("极高波动({:.2}%),极端风险", volatility_pct));
+        score -= VERY_HIGH_VOLATILITY_SCORE;
+        reasons.push(format!("极高波动({:.2}%),极端风险", volatility_pct * 100.0));
     }
     
     score = score.clamp(0.0, 100.0);
@@ -564,7 +568,7 @@ pub fn score_volatility_factor(
     FactorScore {
         name: "波动率".to_string(),
         score,
-        weight: 0.03, // 调整为3% (辅助指标,降低权重)
+        weight: VOLATILITY_FACTOR_WEIGHT,
         description: reasons.join("; "),
         status,
     }
@@ -583,13 +587,13 @@ pub fn adjust_factor_weights(
     volatility_pct: f64,
     adx: f64, // ADX趋势强度指标
 ) {
-    // 根据ADX调整权重 (降低调整幅度)
-    let trend_multiplier = if adx > 40.0 {
-        1.15 // 强趋势,趋势因子权重+15% (原1.3,降低)
-    } else if adx > 25.0 {
-        1.08 // 中等趋势,权重+8% (原1.15,降低)
+    // 根据ADX调整权重：使用配置常量
+    let trend_multiplier = if adx > STRONG_TREND_ADX_THRESHOLD {
+        STRONG_TREND_MULTIPLIER // 强趋势,趋势因子权重增加
+    } else if adx > MEDIUM_TREND_ADX_THRESHOLD {
+        MEDIUM_TREND_MULTIPLIER // 中等趋势,权重适度增加
     } else {
-        0.92 // 弱趋势/震荡,权重-8% (原0.85,缓和)
+        WEAK_TREND_MULTIPLIER // 弱趋势/震荡,权重降低
     };
     
     // 根据市场阶段调整 (降低调整幅度)
@@ -621,11 +625,11 @@ pub fn adjust_factor_weights(
             }
         }
         
-        // 高波动惩罚 - 所有因子权重下降 (降低惩罚力度)
-        if volatility_pct > 5.0 {
-            factor.weight *= 0.90; // 极高波动,权重-10% (原-15%)
-        } else if volatility_pct > 3.0 {
-            factor.weight *= 0.95; // 高波动,权重-5% (原-8%)
+        // 高波动惩罚：使用配置常量
+        if volatility_pct > HIGH_VOLATILITY_THRESHOLD {
+            factor.weight *= HIGH_VOLATILITY_PENALTY; // 极高波动,权重降低
+        } else if volatility_pct > MEDIUM_VOLATILITY_THRESHOLD {
+            factor.weight *= MEDIUM_HIGH_VOLATILITY_PENALTY; // 高波动,权重小幅降低
         }
     }
     
@@ -635,9 +639,8 @@ pub fn adjust_factor_weights(
         for factor in factors.iter_mut() {
             factor.weight /= total_weight;
             
-            // ⭐ 关键修正: 设置权重上下限,避免极端情况
-            // 单个因子权重不超过30%,不低于2%
-            factor.weight = factor.weight.clamp(0.02, 0.30);
+            // ⭐ 关键修正: 设置权重上下限,避免极端情况：使用配置常量
+            factor.weight = factor.weight.clamp(MIN_SINGLE_FACTOR_WEIGHT, MAX_SINGLE_FACTOR_WEIGHT);
         }
     }
     
@@ -659,16 +662,16 @@ pub fn calculate_multi_factor_score(factors: Vec<FactorScore>) -> MultiFactorSco
     
     let signal_quality = SignalQuality::from_score(total_score);
     
-    // 生成操作建议
-    let operation_suggestion = if total_score >= 75.0 {
+    // 生成操作建议：使用配置常量
+    let operation_suggestion = if total_score >= STRONG_BUY_THRESHOLD {
         "强烈建议买入，设置止损位后建仓".to_string()
-    } else if total_score >= 65.0 {
+    } else if total_score >= BUY_THRESHOLD {
         "可以考虑买入，注意控制仓位".to_string()
-    } else if total_score >= 55.0 {
+    } else if total_score >= LIGHT_BUY_THRESHOLD {
         "可以轻仓试探，严格止损".to_string()
-    } else if total_score >= 45.0 {
+    } else if total_score >= HOLD_THRESHOLD {
         "观望为主，等待更好时机".to_string()
-    } else if total_score >= 35.0 {
+    } else if total_score >= CONSIDER_SELL_THRESHOLD {
         "不建议买入，考虑减仓".to_string()
     } else {
         "建议卖出或空仓，规避风险".to_string()

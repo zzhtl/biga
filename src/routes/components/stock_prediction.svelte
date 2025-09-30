@@ -2091,36 +2091,261 @@
     .prediction-results {
         margin-top: 2rem;
         background: rgba(255, 255, 255, 0.05);
-        padding: 1.5rem;
+        padding: 1rem; /* 减小内边距 */
         border-radius: 1rem;
+        width: 100%;
+        box-sizing: border-box;
     }
     
     .prediction-table {
         overflow-x: auto;
+        width: 100%;
+        max-width: 100%;
     }
     
     table {
         width: 100%;
+        min-width: 1200px; /* 设置最小宽度，确保内容不被压缩太多 */
         border-collapse: collapse;
+        table-layout: fixed;
+        font-size: 0.75rem; /* 进一步减小字体 */
     }
     
     th, td {
-        padding: 0.75rem 1rem;
+        padding: 0.4rem 0.5rem; /* 进一步减小padding */
         text-align: left;
         border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        word-wrap: break-word;
+        overflow: hidden;
+        vertical-align: top; /* 顶部对齐 */
     }
+    
+    /* 优化列宽比例 */
+    th:nth-child(1), td:nth-child(1) { width: 80px; } /* 日期 */
+    th:nth-child(2), td:nth-child(2) { width: 70px; } /* 价格 */
+    th:nth-child(3), td:nth-child(3) { width: 65px; } /* 涨跌幅 */
+    th:nth-child(4), td:nth-child(4) { width: 90px; } /* 置信度 */
+    th:nth-child(5), td:nth-child(5) { width: 80px; } /* 交易信号 */
+    th:nth-child(6), td:nth-child(6) { width: 260px; } /* 预测理由 */
+    th:nth-child(7), td:nth-child(7) { width: 280px; } /* 技术指标 */
+    th:nth-child(8), td:nth-child(8) { width: 70px; } /* 风险评级 */
     
     th {
         background: rgba(255, 255, 255, 0.05);
         font-weight: 600;
+        font-size: 0.75rem; /* 更小的标题字体 */
+        white-space: nowrap; /* 标题不换行 */
+    }
+    
+    /* 技术指标紧凑显示 */
+    .tech-indicators {
+        font-size: 0.65rem; /* 更小 */
+        line-height: 1.3;
+    }
+    
+    .tech-detail-indicator {
+        margin-bottom: 0.2rem;
+    }
+    
+    .tech-label {
+        font-weight: 600;
+        display: inline-block;
+        min-width: 40px;
+        font-size: 0.65rem;
+    }
+    
+    .tech-values {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 0.15rem;
+        font-size: 0.6rem; /* 更小 */
+    }
+    
+    .tech-value {
+        padding: 0.05rem 0.25rem;
+        border-radius: 0.2rem;
+        background: rgba(255, 255, 255, 0.05);
+        white-space: nowrap;
+    }
+    
+    .tech-value.positive {
+        color: #10b981;
+    }
+    
+    .tech-value.negative {
+        color: #ef4444;
+    }
+    
+    .tech-value.overbought {
+        color: #fbbf24;
+    }
+    
+    .tech-value.oversold {
+        color: #3b82f6;
+    }
+    
+    .tech-signal {
+        font-size: 0.6rem; /* 更小 */
+        padding: 0.05rem 0.3rem;
+        border-radius: 0.2rem;
+        margin-left: 0.2rem;
+        display: inline-block;
+        white-space: nowrap;
+    }
+    
+    .tech-signal.buy-signal {
+        background: rgba(16, 185, 129, 0.2);
+        color: #10b981;
+    }
+    
+    .tech-signal.sell-signal {
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+    }
+    
+    .tech-signal.overbought-signal {
+        background: rgba(251, 191, 36, 0.2);
+        color: #fbbf24;
+    }
+    
+    .tech-signal.oversold-signal {
+        background: rgba(59, 130, 246, 0.2);
+        color: #3b82f6;
+    }
+    
+    /* 预测理由紧凑显示 */
+    .prediction-reason-cell {
+        font-size: 0.65rem; /* 更小 */
+    }
+    
+    .reason-text {
+        margin-bottom: 0.2rem;
+        line-height: 1.2;
+    }
+    
+    .key-factors {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.15rem;
+    }
+    
+    .factor-tag {
+        font-size: 0.6rem; /* 更小 */
+        padding: 0.05rem 0.3rem;
+        background: rgba(99, 102, 241, 0.2);
+        color: #6366f1;
+        border-radius: 0.2rem;
+        white-space: nowrap;
+    }
+    
+    /* 置信度条紧凑显示 */
+    .confidence-indicator {
+        font-size: 0.65rem;
+        display: flex;
+        align-items: center;
+        gap: 0.3rem;
+    }
+    
+    .confidence-bar-inline {
+        height: 4px;
+        background: linear-gradient(90deg, #ef4444, #fbbf24, #10b981);
+        border-radius: 2px;
+        min-width: 30px;
+        max-width: 60px;
+    }
+    
+    /* 信号徽章紧凑显示 */
+    .signal-badge {
+        font-size: 0.65rem;
+        padding: 0.15rem 0.4rem;
+        border-radius: 0.25rem;
+        display: inline-block;
+        white-space: nowrap;
+    }
+    
+    .signal-badge.buy-signal {
+        background: rgba(16, 185, 129, 0.2);
+        color: #10b981;
+    }
+    
+    .signal-badge.sell-signal {
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+    }
+    
+    .signal-badge.hold-signal {
+        background: rgba(107, 114, 128, 0.2);
+        color: #9ca3af;
+    }
+    
+    .signal-strength {
+        font-size: 0.6rem;
+        color: rgba(255, 255, 255, 0.6);
+        margin-top: 0.1rem;
+    }
+    
+    /* 风险徽章紧凑显示 */
+    .risk-badge {
+        font-size: 0.65rem;
+        padding: 0.15rem 0.4rem;
+        border-radius: 0.25rem;
+        display: inline-block;
+        white-space: nowrap;
+    }
+    
+    .risk-badge.low-risk {
+        background: rgba(16, 185, 129, 0.2);
+        color: #10b981;
+    }
+    
+    .risk-badge.medium-risk {
+        background: rgba(251, 191, 36, 0.2);
+        color: #fbbf24;
+    }
+    
+    .risk-badge.high-risk {
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+    }
+    
+    /* 无理由文字 */
+    .no-reason {
+        color: rgba(255, 255, 255, 0.4);
+        font-style: italic;
+        font-size: 0.65rem;
     }
     
     tr.positive td:nth-child(3) {
         color: #10b981;
+        font-weight: 600;
     }
     
     tr.negative td:nth-child(3) {
         color: #ef4444;
+        font-weight: 600;
+    }
+    
+    /* 价格涨跌样式 */
+    .price-up {
+        color: #10b981 !important;
+        font-weight: 600;
+    }
+    
+    .price-down {
+        color: #ef4444 !important;
+        font-weight: 600;
+    }
+    
+    /* 日期列紧凑显示 */
+    td:nth-child(1) {
+        font-size: 0.7rem;
+        white-space: nowrap;
+    }
+    
+    /* 价格列紧凑显示 */
+    td:nth-child(2) {
+        font-weight: 600;
+        white-space: nowrap;
     }
     
     .training-progress {

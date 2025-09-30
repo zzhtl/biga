@@ -1,6 +1,12 @@
 // 数据类型和结构定义
 pub mod types;
 
+// 核心权重配置（最重要的预测权重）
+pub mod core_weights;
+
+// 技术参数配置（阈值、周期等）
+pub mod constants;
+
 // 数据库操作
 pub mod database;
 

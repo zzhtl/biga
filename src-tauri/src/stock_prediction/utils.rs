@@ -1,5 +1,6 @@
 use chrono::{Weekday, Datelike};
 use crate::stock_prediction::types::{HistoricalVolatilityFeatures, Direction, TechnicalSignals, Prediction};
+use crate::stock_prediction::core_weights::*; // 引入核心权重配置
 
 // A股交易规则工具函数 - 改进版本，包含节假日判断
 pub fn is_trading_day(date: chrono::NaiveDate) -> bool {
@@ -245,8 +246,8 @@ pub fn calculate_direction_focused_accuracy(predictions: &[f64], actuals: &[f64]
     let direction_accuracy = direction_correct as f64 / len as f64;
     let price_accuracy = (1.0 - (abs_change_diff_sum / len as f64)).max(0.0);
 
-    // 方向准确率权重提高到70%，价格准确率30%
-    let combined_accuracy = direction_accuracy * 0.7 + price_accuracy * 0.3;
+    // 方向准确率权重提高到70%，价格准确率30%：使用配置常量
+    let combined_accuracy = direction_accuracy * DIRECTION_ACCURACY_WEIGHT + price_accuracy * PRICE_ACCURACY_WEIGHT;
 
     (direction_accuracy, combined_accuracy.min(0.85)) // 限制最高准确率保持现实性
 }
@@ -978,22 +979,22 @@ pub fn predict_with_volume_price(
         key_factors.push("连续下跌".to_string());
     }
     
-    // === 6. 综合判断 ===
+    // === 6. 综合判断 ===：使用配置常量
     let (predicted_direction, direction_confidence, suggested_range) = if bullish_score >= bearish_score + 3 {
         // 明确看涨
-        let confidence = (0.7 + (bullish_score - bearish_score) as f64 * 0.05).min(0.95);
+        let confidence = (STRONG_SIGNAL_BASE_CONFIDENCE + (bullish_score - bearish_score) as f64 * SIGNAL_DIFF_CONFIDENCE_BOOST).min(0.95);
         ("上涨".to_string(), confidence, (0.8, 6.0))
     } else if bearish_score >= bullish_score + 3 {
         // 明确看跌
-        let confidence = (0.7 + (bearish_score - bullish_score) as f64 * 0.05).min(0.95);
+        let confidence = (STRONG_SIGNAL_BASE_CONFIDENCE + (bearish_score - bullish_score) as f64 * SIGNAL_DIFF_CONFIDENCE_BOOST).min(0.95);
         ("下跌".to_string(), confidence, (-6.0, -0.8))
     } else if bullish_score > bearish_score {
         // 轻微看涨
-        let confidence = 0.55 + (bullish_score - bearish_score) as f64 * 0.03;
+        let confidence = WEAK_SIGNAL_BASE_CONFIDENCE + (bullish_score - bearish_score) as f64 * WEAK_SIGNAL_DIFF_CONFIDENCE_BOOST;
         ("上涨".to_string(), confidence, (0.3, 3.5))
     } else if bearish_score > bullish_score {
         // 轻微看跌
-        let confidence = 0.55 + (bearish_score - bullish_score) as f64 * 0.03;
+        let confidence = WEAK_SIGNAL_BASE_CONFIDENCE + (bearish_score - bullish_score) as f64 * WEAK_SIGNAL_DIFF_CONFIDENCE_BOOST;
         ("下跌".to_string(), confidence, (-3.5, -0.3))
     } else {
         // 横盘
