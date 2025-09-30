@@ -12,7 +12,7 @@ use crate::stock_prediction::utils::{
     get_next_trading_day, clamp_daily_change, calculate_historical_volatility,
     calculate_recent_trend, calculate_support_resistance, analyze_historical_volatility_pattern,
     print_last_real_vs_prediction, analyze_stock_trend, TrendState, predict_with_volume_price, 
-    calculate_volume_price_change, VolumePricePredictionStrategy
+    calculate_volume_price_change
 };
 use crate::stock_prediction::technical_analysis::analyze_technical_signals;
 use crate::stock_prediction::technical_indicators::{get_feature_required_days, calculate_feature_value};
@@ -96,7 +96,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     let metadata = if let Some(model_name) = &request.model_name {
         model_list.iter()
             .find(|m| m.name == *model_name)
-            .ok_or_else(|| format!("找不到名为 {} 的模型", model_name))?
+            .ok_or_else(|| format!("找不到名为 {model_name} 的模型"))?
             .clone()
     } else {
         // 如果没有指定模型名称，使用最新的模型
@@ -121,14 +121,14 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     let mut varmap = VarMap::new();
     
     let (_, model) = create_model(&config, &device)
-        .map_err(|e| format!("模型创建失败: {}", e))?;
+        .map_err(|e| format!("模型创建失败: {e}"))?;
     
     let model_path = get_model_file_path(&metadata.id);
-    varmap.load(&model_path).map_err(|e| format!("模型加载失败: {}", e))?;
+    varmap.load(&model_path).map_err(|e| format!("模型加载失败: {e}"))?;
     
     // 获取最近的真实市场数据
     let (current_price, current_change_percent, dates, mut prices, mut volumes, mut highs, mut lows) = get_recent_market_data(&request.stock_code, 60).await
-        .map_err(|e| format!("获取市场数据失败: {}", e))?;
+        .map_err(|e| format!("获取市场数据失败: {e}"))?;
     
     if prices.len() < 20 {
         return Err("历史数据不足，无法进行预测，需要至少20天数据".to_string());
@@ -172,7 +172,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
                 lookback_window,
                 Some(&highs),
                 Some(&lows),
-            ).map_err(|e| format!("计算特征 '{}' 失败: {}", feature_name, e))?;
+            ).map_err(|e| format!("计算特征 '{feature_name}' 失败: {e}"))?;
             feature_vector.push(value);
         }
         features_matrix.push(feature_vector);
@@ -188,21 +188,21 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     // 创建输入张量
     let features_f32: Vec<f32> = last_normalized_row.iter().map(|&x| x as f32).collect();
     let input_tensor = Tensor::from_slice(&features_f32, &[1, metadata.features.len()], &device)
-        .map_err(|e| format!("创建输入张量失败: {}", e))?;
+        .map_err(|e| format!("创建输入张量失败: {e}"))?;
     
     // 进行预测（基础模型输出变化率）
     let output = model.forward(&input_tensor)
-        .map_err(|e| format!("预测失败: {}", e))?;
+        .map_err(|e| format!("预测失败: {e}"))?;
     
     let raw_change_rate = match output.dims() {
         [_] => {
-            output.to_vec1::<f32>().map_err(|e| format!("获取预测结果失败: {}", e))?[0] as f64
+            output.to_vec1::<f32>().map_err(|e| format!("获取预测结果失败: {e}"))?[0] as f64
         },
         [_, n] => {
             if *n == 1 {
-                output.to_vec2::<f32>().map_err(|e| format!("获取预测结果失败: {}", e))?[0][0] as f64
+                output.to_vec2::<f32>().map_err(|e| format!("获取预测结果失败: {e}"))?[0][0] as f64
             } else {
-                output.to_vec2::<f32>().map_err(|e| format!("获取预测结果失败: {}", e))?[0][0] as f64
+                output.to_vec2::<f32>().map_err(|e| format!("获取预测结果失败: {e}"))?[0][0] as f64
             }
         },
         _ => {
@@ -221,7 +221,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
     let mut predictions: Vec<Prediction> = Vec::new();
     let mut last_price = current_price;
     
-    let last_date = chrono::NaiveDate::parse_from_str(&dates.last().unwrap_or(&"2023-01-01".to_string()), "%Y-%m-%d")
+    let last_date = chrono::NaiveDate::parse_from_str(dates.last().unwrap_or(&"2023-01-01".to_string()), "%Y-%m-%d")
         .unwrap_or_else(|_| chrono::Local::now().naive_local().date());
     
     for day in 1..=request.prediction_days {
@@ -263,9 +263,8 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
                 }
             },
             TrendState::Neutral => {
-                if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross {
-                    technical_signals.signal_strength * 0.025 * tech_decay
-                } else if technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
+                if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross 
+                    || technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
                     technical_signals.signal_strength * 0.025 * tech_decay
                 } else {
                     technical_signals.signal_strength * 0.012 * tech_decay
@@ -330,8 +329,8 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         // 6. 随机扰动（轻微减小幅度，避免噪声将方向推向上涨）
         let noise_amplitude = match trend_analysis.overall_trend {
             TrendState::StrongBullish | TrendState::StrongBearish => {
-                if (technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross || 
-                    technical_signals.macd_death_cross || technical_signals.kdj_death_cross) {
+                if technical_signals.macd_golden_cross || technical_signals.kdj_golden_cross || 
+                    technical_signals.macd_death_cross || technical_signals.kdj_death_cross {
                     volatility_factor * 0.5
                 } else {
                     volatility_factor * 0.7
@@ -711,7 +710,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
 pub async fn predict_with_simple_strategy(request: PredictionRequest) -> std::result::Result<PredictionResponse, String> {
     // 获取最近的真实市场数据
     let (current_price, current_change_percent, dates, prices, volumes, highs, lows) = get_recent_market_data(&request.stock_code, 60).await
-        .map_err(|e| format!("获取市场数据失败: {}", e))?;
+        .map_err(|e| format!("获取市场数据失败: {e}"))?;
     
     if prices.len() < 10 {
         return Err("历史数据不足，无法进行预测，需要至少10天数据".to_string());
@@ -719,7 +718,7 @@ pub async fn predict_with_simple_strategy(request: PredictionRequest) -> std::re
     
     println!("🎯 使用量价关系策略进行预测:");
     println!("   📊 历史数据: {}天", prices.len());
-    println!("   💰 当前价格: {:.2}元", current_price);
+    println!("   💰 当前价格: {current_price:.2}元");
     
     // 使用量价关系预测策略
     let volume_price_strategy = predict_with_volume_price(&prices, &highs, &lows, &volumes, current_price);
@@ -731,7 +730,7 @@ pub async fn predict_with_simple_strategy(request: PredictionRequest) -> std::re
     let mut predictions: Vec<Prediction> = Vec::new();
     let mut last_price = current_price;
     
-    let last_date = chrono::NaiveDate::parse_from_str(&dates.last().unwrap_or(&"2023-01-01".to_string()), "%Y-%m-%d")
+    let last_date = chrono::NaiveDate::parse_from_str(dates.last().unwrap_or(&"2023-01-01".to_string()), "%Y-%m-%d")
         .unwrap_or_else(|_| chrono::Local::now().naive_local().date());
     
     // 为每一天生成预测

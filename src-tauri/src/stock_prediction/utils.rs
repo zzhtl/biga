@@ -31,7 +31,7 @@ pub fn is_trading_day(date: chrono::NaiveDate) -> bool {
     match year {
         2024 => {
             // 2024年春节: 2月10-17日
-            if month == 2 && day >= 10 && day <= 17 {
+            if month == 2 && (10..=17).contains(&day) {
                 return false;
             }
         },
@@ -43,7 +43,7 @@ pub fn is_trading_day(date: chrono::NaiveDate) -> bool {
         },
         2023 => {
             // 2023年春节: 1月21-27日
-            if month == 1 && day >= 21 && day <= 27 {
+            if month == 1 && (21..=27).contains(&day) {
                 return false;
             }
         },
@@ -374,8 +374,8 @@ pub fn print_last_real_vs_prediction(
 
     println!("\n📊 真实数据与预测对比:");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("📅 最后一条真实数据 ({}):", last_date);
-    println!("   价格: {:.2}, 涨跌幅: {:.2}%", last_price, last_change_percent);
+    println!("📅 最后一条真实数据 ({last_date}):");
+    println!("   价格: {last_price:.2}, 涨跌幅: {last_change_percent:.2}%");
     println!("   MACD: DIF={:.4}, DEA={:.4}, HIST={:.4}, 金叉={}, 死叉={}", 
              technical_signals.macd_dif, technical_signals.macd_dea, 
              technical_signals.macd_histogram, 
@@ -748,11 +748,11 @@ pub fn analyze_stock_trend(
     };
     
     println!("📈 股票趋势分析 (日线主导):");
-    println!("   📊 日线趋势: {:?} (主要信号)", daily_trend);
-    println!("   📅 月线趋势: {:?} (背景确认)", monthly_trend);
+    println!("   📊 日线趋势: {daily_trend:?} (主要信号)");
+    println!("   📅 月线趋势: {monthly_trend:?} (背景确认)");
     println!("   🎯 综合趋势: {:?} (强度: {:.2}, 置信度: {:.0}%)", overall_trend, trend_strength, trend_confidence * 100.0);
-    println!("   ⚖️  预测偏向: {:.2} (日线权重更大)", bias_multiplier);
-    println!("   📝 {}", trend_description);
+    println!("   ⚖️  预测偏向: {bias_multiplier:.2} (日线权重更大)");
+    println!("   📝 {trend_description}");
     
     TrendAnalysis {
         daily_trend,
@@ -841,13 +841,12 @@ pub fn predict_with_volume_price(
         "横盘震荡"
     };
     
-    println!("   💰 价格趋势: {}", price_trend);
-    println!("   📈 5日动量: {:.2}%", price_momentum_5d);
-    println!("   📈 3日动量: {:.2}%", price_momentum_3d);
+    println!("   💰 价格趋势: {price_trend}");
+    println!("   📈 5日动量: {price_momentum_5d:.2}%");
+    println!("   📈 3日动量: {price_momentum_3d:.2}%");
     
     // === 2. 成交量趋势分析 ===
     let recent_5_vol_avg = volumes[len.saturating_sub(5)..].iter().sum::<i64>() as f64 / 5.0;
-    let recent_10_vol_avg = volumes[len.saturating_sub(10)..].iter().sum::<i64>() as f64 / 10.0;
     let latest_volume = *volumes.last().unwrap() as f64;
     let prev_volume = volumes[len-2] as f64;
     
@@ -866,9 +865,9 @@ pub fn predict_with_volume_price(
         "量能平稳"
     };
     
-    println!("   📊 成交量趋势: {}", volume_trend);
-    println!("   📊 量能变化: {:.0}% (vs前日)", volume_change);
-    println!("   📊 相对5日: {:.0}%", volume_vs_5d);
+    println!("   📊 成交量趋势: {volume_trend}");
+    println!("   📊 量能变化: {volume_change:.0}% (vs前日)");
+    println!("   📊 相对5日: {volume_vs_5d:.0}%");
     
     // === 3. 核心量价关系判断 ===
     let mut bullish_score = 0;
@@ -1009,10 +1008,10 @@ pub fn predict_with_volume_price(
         _ => "持有".to_string(),
     };
     
-    println!("   🎯 看涨信号: {} 分", bullish_score);
-    println!("   🎯 看跌信号: {} 分", bearish_score);
+    println!("   🎯 看涨信号: {bullish_score} 分");
+    println!("   🎯 看跌信号: {bearish_score} 分");
     println!("   🎯 预测方向: {} (置信度: {:.0}%)", predicted_direction, direction_confidence * 100.0);
-    println!("   🎯 交易信号: {}", volume_price_signal);
+    println!("   🎯 交易信号: {volume_price_signal}");
     println!("   📋 关键因素: {}", key_factors.join(", "));
     
     VolumePricePredictionStrategy {

@@ -391,7 +391,7 @@ pub fn analyze_technical_signals(
         cci,
         obv,
         signal,
-        signal_strength: signal_strength.max(-1.0).min(1.0),
+        signal_strength: signal_strength.clamp(-1.0, 1.0),
         buy_signals,
         sell_signals,
         // 交叉信号

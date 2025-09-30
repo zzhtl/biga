@@ -52,7 +52,7 @@ pub async fn evaluate_candle_model(stock_code: String, model_name: Option<String
     let metadata = if let Some(model_name) = &model_name {
         model_list.iter()
             .find(|m| m.name == *model_name)
-            .ok_or_else(|| format!("找不到名为 {} 的模型", model_name))?
+            .ok_or_else(|| format!("找不到名为 {model_name} 的模型"))?
             .clone()
     } else {
         // 如果没有指定模型名称，使用最新的模型
@@ -77,14 +77,14 @@ pub async fn evaluate_candle_model(stock_code: String, model_name: Option<String
     let mut varmap = VarMap::new();
     
     let (_, model) = create_model(&config, &device)
-        .map_err(|e| format!("模型创建失败: {}", e))?;
+        .map_err(|e| format!("模型创建失败: {e}"))?;
     
     let model_path = get_model_file_path(&metadata.id);
     if !model_path.exists() {
-        return Err(format!("模型文件不存在: {:?}", model_path));
+        return Err(format!("模型文件不存在: {model_path:?}"));
     }
     
-    varmap.load(&model_path).map_err(|e| format!("模型加载失败: {}", e))?;
+    varmap.load(&model_path).map_err(|e| format!("模型加载失败: {e}"))?;
     
     // 获取测试数据
     let end_date = chrono::Local::now().naive_local().date();
@@ -93,11 +93,11 @@ pub async fn evaluate_candle_model(stock_code: String, model_name: Option<String
     let start_date_str = start_date.format("%Y-%m-%d").to_string();
     let end_date_str = end_date.format("%Y-%m-%d").to_string();
     
-    println!("评估数据范围: {} 到 {}", start_date_str, end_date_str);
+    println!("评估数据范围: {start_date_str} 到 {end_date_str}");
     
     // 从数据库获取历史数据
     let historical_data = get_historical_data_from_db(&stock_code, &start_date_str, &end_date_str).await
-        .map_err(|e| format!("获取历史数据失败: {}", e))?;
+        .map_err(|e| format!("获取历史数据失败: {e}"))?;
     
     if historical_data.len() < 30 {
         return Err("评估数据不足，需要至少30天数据".to_string());
@@ -200,22 +200,22 @@ pub async fn evaluate_candle_model(stock_code: String, model_name: Option<String
         // 创建输入张量
         let features_f32: Vec<f32> = features.iter().map(|&x| x as f32).collect();
         let input_tensor = Tensor::from_slice(&features_f32, &[1, features.len()], &device)
-            .map_err(|e| format!("创建输入张量失败: {}", e))?;
+            .map_err(|e| format!("创建输入张量失败: {e}"))?;
         
         // 进行预测
         let output = model.forward(&input_tensor)
-            .map_err(|e| format!("预测失败: {}", e))?;
+            .map_err(|e| format!("预测失败: {e}"))?;
         
         // 获取预测结果
         let predicted_change_rate = match output.dims() {
             [_] => {
-                output.to_vec1::<f32>().map_err(|e| format!("获取预测结果失败: {}", e))?[0] as f64
+                output.to_vec1::<f32>().map_err(|e| format!("获取预测结果失败: {e}"))?[0] as f64
             },
             [_, n] => {
                 if *n == 1 {
-                    output.to_vec2::<f32>().map_err(|e| format!("获取预测结果失败: {}", e))?[0][0] as f64
+                    output.to_vec2::<f32>().map_err(|e| format!("获取预测结果失败: {e}"))?[0][0] as f64
                 } else {
-                    output.to_vec2::<f32>().map_err(|e| format!("获取预测结果失败: {}", e))?[0][0] as f64
+                    output.to_vec2::<f32>().map_err(|e| format!("获取预测结果失败: {e}"))?[0][0] as f64
                 }
             },
             _ => {
@@ -265,9 +265,9 @@ pub async fn evaluate_candle_model(stock_code: String, model_name: Option<String
     println!("  方向预测准确率: {:.2}%", direction_accuracy * 100.0);
     println!("  综合准确率: {:.2}%", combined_accuracy * 100.0);
     println!("  简单方向准确率: {:.2}%", direction_accuracy_simple * 100.0);
-    println!("  均方误差 (MSE): {:.6}", mse);
-    println!("  平均绝对误差 (MAE): {:.6}", mae);
-    println!("  均方根误差 (RMSE): {:.6}", rmse);
+    println!("  均方误差 (MSE): {mse:.6}");
+    println!("  平均绝对误差 (MAE): {mae:.6}");
+    println!("  均方根误差 (RMSE): {rmse:.6}");
     
     Ok(EvaluationResult {
         model_id: metadata.id.clone(),

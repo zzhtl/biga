@@ -41,14 +41,14 @@ fn parse_stock_info(items: Vec<StockInfoItem>) -> Result<Vec<StockInfo>, AppErro
 }
 
 pub async fn fetch_historical_data(symbol: &str) -> Result<Vec<HistoricalData>, AppError> {
-    println!("开始获取股票 {} 的历史数据...", symbol);
+    println!("开始获取股票 {symbol} 的历史数据...");
     
     // 使用更稳定的token，或者从环境变量读取
     let token = std::env::var("STOCK_API_TOKEN")
         .unwrap_or_else(|_| "DDE0C310-D0DE-4767-9712-A424BAC4326D".to_string());
     
-    let url = format!("{}/{}/d/n?token={}", HISTORY_API, symbol, token);
-    println!("请求URL: {}", url);
+    let url = format!("{HISTORY_API}/{symbol}/d/n?token={token}");
+    println!("请求URL: {url}");
     
     let response = reqwest::Client::new()
         .get(&url)
@@ -67,9 +67,9 @@ pub async fn fetch_historical_data(symbol: &str) -> Result<Vec<HistoricalData>, 
     // 尝试解析JSON
     let historical_items: Vec<HistoricalDataItem> = serde_json::from_str(&response_text)
         .map_err(|e| {
-            println!("JSON解析失败: {}", e);
+            println!("JSON解析失败: {e}");
             println!("响应内容: {}", &response_text[..std::cmp::min(500, response_text.len())]);
-            AppError::DeserializationError(format!("JSON解析失败: {}", e))
+            AppError::DeserializationError(format!("JSON解析失败: {e}"))
         })?;
     
     println!("解析到 {} 条历史数据", historical_items.len());
@@ -87,12 +87,12 @@ fn parse_historical_data(
             // 解析日期 - 支持两种格式
             let date = if item.date.contains(" ") {
                 // 格式：2002-10-24 00:00:00
-                NaiveDate::parse_from_str(&item.date.split(' ').next().unwrap_or(&item.date), "%Y-%m-%d")
+                NaiveDate::parse_from_str(item.date.split(' ').next().unwrap_or(&item.date), "%Y-%m-%d")
             } else {
                 // 格式：2002-10-24
                 NaiveDate::parse_from_str(&item.date, "%Y-%m-%d")
             }
-            .map_err(|e| AppError::InvalidInput(format!("日期解析失败: {}", e)))?;
+            .map_err(|e| AppError::InvalidInput(format!("日期解析失败: {e}")))?;
             
             // 计算涨跌额
             let change = item.close - item.pre_close;

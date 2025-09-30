@@ -20,7 +20,7 @@ async fn main() {
             }
         }
         Err(err) => {
-            eprintln!("获取历史数据失败: {}", err);
+            eprintln!("获取历史数据失败: {err}");
         }
     }
 } 

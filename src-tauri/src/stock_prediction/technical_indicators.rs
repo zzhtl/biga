@@ -1,4 +1,3 @@
-use crate::db::models::HistoricalData;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -547,7 +546,7 @@ pub fn calculate_feature_value(
         "macd_dif" | "macd_dea" | "macd_histogram" => {
             // 完整MACD指标
             if index >= 26 {
-                let (dif, dea, histogram) = calculate_macd_full(&prices);
+                let (dif, dea, histogram) = calculate_macd_full(prices);
                 let normalized = match feature_name {
                     "macd_dif" => dif / prices[index],
                     "macd_dea" => dea / prices[index],

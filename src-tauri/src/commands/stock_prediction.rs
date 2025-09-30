@@ -13,7 +13,7 @@ pub async fn list_stock_prediction_models(symbol: String) -> Result<Vec<ModelInf
 #[tauri::command]
 pub async fn delete_stock_prediction_model(model_id: String) -> Result<(), String> {
     crate::stock_prediction::delete_model(&model_id)
-        .map_err(|e| format!("删除模型失败: {}", e))
+        .map_err(|e| format!("删除模型失败: {e}"))
 }
 
 // 使用Candle训练股票预测模型
@@ -79,12 +79,12 @@ pub async fn get_optimization_suggestions(
 ) -> Result<OptimizationSuggestions, String> {
     // 1. 特征优化分析
     let feature_optimization = analyze_feature_importance(&backtest_report, &current_features)
-        .map_err(|e| format!("特征分析失败: {}", e))?;
+        .map_err(|e| format!("特征分析失败: {e}"))?;
     
     // 2. 超参数优化建议
     let mut hyperparameter_optimizer = HyperparameterOptimizer::new(current_config);
     let hyperparameter_optimization = hyperparameter_optimizer.suggest_optimization(&backtest_report)
-        .map_err(|e| format!("超参数优化失败: {}", e))?;
+        .map_err(|e| format!("超参数优化失败: {e}"))?;
     
     // 3. 生成综合优化建议
     let suggestions = OptimizationSuggestions {
@@ -195,7 +195,7 @@ fn calculate_overall_improvement(backtest_report: &crate::stock_prediction::back
 
 #[tauri::command]
 pub async fn get_multi_timeframe_signals(symbol: String) -> Result<Vec<MultiTimeframeSignal>, String> {
-    use crate::stock_prediction::multi_timeframe_analysis::{generate_multi_timeframe_signals, MultiTimeframeSignal};
+    use crate::stock_prediction::multi_timeframe_analysis::generate_multi_timeframe_signals;
     use crate::db::models::HistoricalData;
     use sqlx::Row;
     
@@ -207,19 +207,17 @@ pub async fn get_multi_timeframe_signals(symbol: String) -> Result<Vec<MultiTime
         .max_connections(1)
         .connect(&connection_string)
         .await
-        .map_err(|e| format!("数据库连接失败: {}", e))?;
+        .map_err(|e| format!("数据库连接失败: {e}"))?;
     
     // 查询历史数据
-    let rows = sqlx::query(&format!(
-        "SELECT symbol, date, open, high, low, close, volume, amount, amplitude, turnover_rate, change_percent, change 
+    let rows = sqlx::query("SELECT symbol, date, open, high, low, close, volume, amount, amplitude, turnover_rate, change_percent, change 
          FROM historical_data 
          WHERE symbol = ? 
-         ORDER BY date ASC"
-    ))
+         ORDER BY date ASC")
     .bind(&symbol)
     .fetch_all(&db)
     .await
-    .map_err(|e| format!("查询历史数据失败: {}", e))?;
+    .map_err(|e| format!("查询历史数据失败: {e}"))?;
     
     if rows.is_empty() {
         return Err("未找到该股票的历史数据".to_string());
@@ -230,7 +228,7 @@ pub async fn get_multi_timeframe_signals(symbol: String) -> Result<Vec<MultiTime
     for row in rows {
         let date_str: String = row.get("date");
         let date = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-            .map_err(|e| format!("日期解析失败: {}", e))?;
+            .map_err(|e| format!("日期解析失败: {e}"))?;
         
         historical_data.push(HistoricalData {
             symbol: row.get("symbol"),
@@ -256,7 +254,7 @@ pub async fn get_multi_timeframe_signals(symbol: String) -> Result<Vec<MultiTime
 
 #[tauri::command]
 pub async fn get_latest_multi_timeframe_signal(symbol: String) -> Result<Option<MultiTimeframeSignal>, String> {
-    use crate::stock_prediction::multi_timeframe_analysis::{get_latest_multi_timeframe_signal, MultiTimeframeSignal};
+    use crate::stock_prediction::multi_timeframe_analysis::get_latest_multi_timeframe_signal;
     use crate::db::models::HistoricalData;
     use sqlx::Row;
     
@@ -268,20 +266,18 @@ pub async fn get_latest_multi_timeframe_signal(symbol: String) -> Result<Option<
         .max_connections(1)
         .connect(&connection_string)
         .await
-        .map_err(|e| format!("数据库连接失败: {}", e))?;
+        .map_err(|e| format!("数据库连接失败: {e}"))?;
     
     // 查询最近60天的历史数据（确保有足够数据计算技术指标）
-    let rows = sqlx::query(&format!(
-        "SELECT symbol, date, open, high, low, close, volume, amount, amplitude, turnover_rate, change_percent, change 
+    let rows = sqlx::query("SELECT symbol, date, open, high, low, close, volume, amount, amplitude, turnover_rate, change_percent, change 
          FROM historical_data 
          WHERE symbol = ? 
          ORDER BY date DESC 
-         LIMIT 60"
-    ))
+         LIMIT 60")
     .bind(&symbol)
     .fetch_all(&db)
     .await
-    .map_err(|e| format!("查询历史数据失败: {}", e))?;
+    .map_err(|e| format!("查询历史数据失败: {e}"))?;
     
     if rows.is_empty() {
         return Err("未找到该股票的历史数据".to_string());
@@ -292,7 +288,7 @@ pub async fn get_latest_multi_timeframe_signal(symbol: String) -> Result<Option<
     for row in rows.iter().rev() {
         let date_str: String = row.get("date");
         let date = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-            .map_err(|e| format!("日期解析失败: {}", e))?;
+            .map_err(|e| format!("日期解析失败: {e}"))?;
         
         historical_data.push(HistoricalData {
             symbol: row.get("symbol"),
@@ -330,19 +326,17 @@ pub async fn analyze_multi_timeframe_prediction_value(symbol: String) -> Result<
         .max_connections(1)
         .connect(&connection_string)
         .await
-        .map_err(|e| format!("数据库连接失败: {}", e))?;
+        .map_err(|e| format!("数据库连接失败: {e}"))?;
     
     // 查询历史数据
-    let rows = sqlx::query(&format!(
-        "SELECT symbol, date, open, high, low, close, volume, amount, amplitude, turnover_rate, change_percent, change 
+    let rows = sqlx::query("SELECT symbol, date, open, high, low, close, volume, amount, amplitude, turnover_rate, change_percent, change 
          FROM historical_data 
          WHERE symbol = ? 
-         ORDER BY date ASC"
-    ))
+         ORDER BY date ASC")
     .bind(&symbol)
     .fetch_all(&db)
     .await
-    .map_err(|e| format!("查询历史数据失败: {}", e))?;
+    .map_err(|e| format!("查询历史数据失败: {e}"))?;
     
     if rows.is_empty() {
         return Err("未找到该股票的历史数据".to_string());
@@ -353,7 +347,7 @@ pub async fn analyze_multi_timeframe_prediction_value(symbol: String) -> Result<
     for row in rows {
         let date_str: String = row.get("date");
         let date = chrono::NaiveDate::parse_from_str(&date_str, "%Y-%m-%d")
-            .map_err(|e| format!("日期解析失败: {}", e))?;
+            .map_err(|e| format!("日期解析失败: {e}"))?;
         
         historical_data.push(HistoricalData {
             symbol: row.get("symbol"),

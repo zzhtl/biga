@@ -10,7 +10,7 @@ pub async fn get_realtime_data(
     sort: String,
     pool: State<'_, SqlitePool>,
 ) -> Result<Vec<RealtimeData>, AppError> {
-    let order_by = format!("{} {}", column, sort);
+    let order_by = format!("{column} {sort}");
     let records = if search.trim().is_empty() {
         sqlx::query_as::<_, RealtimeData>(&format!(
             r#"
@@ -25,14 +25,13 @@ pub async fn get_realtime_data(
                 COALESCE(turnover_rate, 0.00) as turnover_rate,
                 COALESCE(change_percent, 0.00) as change_percent,
                 COALESCE(change, 0.00) as change
-                FROM realtime_data ORDER BY {}
-                "#,
-            order_by
+                FROM realtime_data ORDER BY {order_by}
+                "#
         ))
         .fetch_all(&*pool)
         .await?
     } else {
-        let search_pattern = format!("%{}%", search);
+        let search_pattern = format!("%{search}%");
         sqlx::query_as::<_, RealtimeData>(&format!(
             r#"
                 SELECT
@@ -48,9 +47,8 @@ pub async fn get_realtime_data(
                 COALESCE(change, 0.00) as change
                 FROM realtime_data
                 WHERE symbol LIKE ? OR name LIKE ?
-                ORDER BY {}
-                "#,
-            order_by
+                ORDER BY {order_by}
+                "#
         ))
         .bind(search_pattern.clone())
         .bind(search_pattern)

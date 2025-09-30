@@ -68,9 +68,9 @@ pub struct DailyAccuracy {
 pub async fn run_backtest(request: BacktestRequest) -> Result<BacktestReport, String> {
     // 1. 验证参数
     let start_date = NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d")
-        .map_err(|e| format!("开始日期解析失败: {}", e))?;
+        .map_err(|e| format!("开始日期解析失败: {e}"))?;
     let end_date = NaiveDate::parse_from_str(&request.end_date, "%Y-%m-%d")
-        .map_err(|e| format!("结束日期解析失败: {}", e))?;
+        .map_err(|e| format!("结束日期解析失败: {e}"))?;
     
     if start_date >= end_date {
         return Err("开始日期必须早于结束日期".to_string());
@@ -85,7 +85,7 @@ pub async fn run_backtest(request: BacktestRequest) -> Result<BacktestReport, St
     let model_info = if let Some(model_name) = &request.model_name {
         model_list.iter()
             .find(|m| m.name == *model_name)
-            .ok_or_else(|| format!("找不到名为 {} 的模型", model_name))?
+            .ok_or_else(|| format!("找不到名为 {model_name} 的模型"))?
             .clone()
     } else {
         model_list[0].clone()
@@ -102,7 +102,7 @@ pub async fn run_backtest(request: BacktestRequest) -> Result<BacktestReport, St
         &request.stock_code,
         &data_start_date.format("%Y-%m-%d").to_string(),
         &data_end_date.format("%Y-%m-%d").to_string()
-    ).await.map_err(|e| format!("获取历史数据失败: {}", e))?;
+    ).await.map_err(|e| format!("获取历史数据失败: {e}"))?;
     
     if historical_data.is_empty() {
         return Err("历史数据为空".to_string());
@@ -175,7 +175,7 @@ pub async fn run_backtest(request: BacktestRequest) -> Result<BacktestReport, St
             }
         }
         
-        current_date = current_date + Duration::days(interval_days as i64);
+        current_date += Duration::days(interval_days as i64);
     }
     
     if backtest_entries.is_empty() {

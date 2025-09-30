@@ -52,32 +52,10 @@ pub fn run() {
                 let pool = create_optimized_pool().await
                     .expect("Failed to create database pool");
                 
-                // 确保应用数据目录存在 - 简化处理
-                let app_dir = Path::new("./data").to_path_buf();
-                
-                // 确保 migrations 目录存在且存放迁移脚本
-                let migrations_dir = app_dir.join("migrations");
-                if !migrations_dir.exists() {
-                    fs::create_dir_all(&migrations_dir)
-                        .expect("Failed to create migrations directory");
-                }
-
-                // 复制迁移文件
+                // 执行迁移脚本
                 let migration_files = ["01_create_tables.sql", "02_stock_prediction_model.sql"];
                 for file in &migration_files {
-                    let source_path = Path::new("migrations").join(file);
-                    if source_path.exists() {
-                        let target_path = migrations_dir.join(file);
-                        if !target_path.exists() {
-                            fs::copy(&source_path, &target_path)
-                                .expect("Failed to copy migration file");
-                        }
-                    }
-                }
-
-                // 执行迁移脚本
-                for file in &migration_files {
-                    let path = migrations_dir.join(file);
+                    let path = Path::new("migrations").join(file);
                     if path.exists() {
                         let sql = fs::read_to_string(&path)
                             .expect("Failed to read migration file");
@@ -97,7 +75,7 @@ pub fn run() {
 async fn create_optimized_pool() -> Result<Pool<Sqlite>, sqlx::Error> {
     // 获取当前工作目录并构建数据库路径
     let current_dir = std::env::current_dir()
-        .map_err(|e| sqlx::Error::Io(e))?;
+        .map_err(sqlx::Error::Io)?;
     
     // 尝试多个可能的数据库路径
     let possible_paths = [
@@ -131,7 +109,7 @@ async fn create_optimized_pool() -> Result<Pool<Sqlite>, sqlx::Error> {
             // 确保db目录存在
             if let Some(parent) = preferred_path.parent() {
                 fs::create_dir_all(parent)
-                    .map_err(|e| sqlx::Error::Io(e))?;
+                    .map_err(sqlx::Error::Io)?;
             }
             
             println!("📁 创建新数据库文件: {}", preferred_path.display());
@@ -140,7 +118,7 @@ async fn create_optimized_pool() -> Result<Pool<Sqlite>, sqlx::Error> {
     };
     
     let connection_string = format!("sqlite://{}", final_db_path.display());
-    println!("🔗 数据库连接字符串: {}", connection_string);
+    println!("🔗 数据库连接字符串: {connection_string}");
     
     let pool = SqlitePoolOptions::new()
         .max_connections(5) // 最大连接数

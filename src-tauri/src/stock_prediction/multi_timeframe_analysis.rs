@@ -216,12 +216,10 @@ pub fn calculate_macd_signal(data: &[StockData], fast_period: usize, slow_period
             } else {
                 "弱势上涨".to_string()
             }
+        } else if current.histogram < previous.histogram {
+            "强势下跌".to_string()
         } else {
-            if current.histogram < previous.histogram {
-                "强势下跌".to_string()
-            } else {
-                "弱势下跌".to_string()
-            }
+            "弱势下跌".to_string()
         };
         
         signals.push(MacdSignal {
@@ -338,7 +336,7 @@ pub fn calculate_kdj_signal(data: &[StockData], k_period: usize, d_period: usize
 }
 
 /// 计算完整的KDJ指标序列
-fn calculate_kdj_full(data: &[StockData], k_period: usize, d_period: usize, j_period: usize) -> Vec<KdjData> {
+fn calculate_kdj_full(data: &[StockData], k_period: usize, d_period: usize, _j_period: usize) -> Vec<KdjData> {
     if data.len() < k_period {
         return Vec::new();
     }
@@ -420,22 +418,22 @@ pub fn generate_multi_timeframe_signals(symbol: &str, historical_data: &[Histori
         let weekly_macd = weekly_index
             .and_then(|idx| weekly_macd_signals.get(idx))
             .cloned()
-            .unwrap_or_else(|| create_default_macd_signal());
+            .unwrap_or_else(create_default_macd_signal);
             
         let monthly_macd = monthly_index
             .and_then(|idx| monthly_macd_signals.get(idx))
             .cloned()
-            .unwrap_or_else(|| create_default_macd_signal());
+            .unwrap_or_else(create_default_macd_signal);
             
         let weekly_kdj = weekly_index
             .and_then(|idx| weekly_kdj_signals.get(idx))
             .cloned()
-            .unwrap_or_else(|| create_default_kdj_signal());
+            .unwrap_or_else(create_default_kdj_signal);
             
         let monthly_kdj = monthly_index
             .and_then(|idx| monthly_kdj_signals.get(idx))
             .cloned()
-            .unwrap_or_else(|| create_default_kdj_signal());
+            .unwrap_or_else(create_default_kdj_signal);
         
         // 计算综合信号强度
         let combined_signal_strength = calculate_combined_signal_strength(

@@ -31,7 +31,7 @@ pub async fn refresh_stock_infos(pool: State<'_, SqlitePool>) -> Result<bool, Ap
     batch_insert_stock_info(&pool, api_data).await?;
 
     // 3. 读取csv文件保存股票详细数据
-    let stocks = read_csv_to_struct("data/stock_basic.csv").unwrap_or(Vec::new());
+    let stocks = read_csv_to_struct("data/stock_basic.csv").unwrap_or_default();
     batch_insert_stock(&pool, stocks).await?;
 
     Ok(true)

@@ -24,10 +24,10 @@ mod tests {
         let result = read_csv_to_struct("data/stock_basic.csv");
         match result {
             Ok(stocks) => {
-                println!("{:?}", stocks.get(0).unwrap_or(&Stock::default()));
+                println!("{:?}", stocks.first().unwrap_or(&Stock::default()));
             }
             Err(err) => {
-                panic!("Failed to read CSV: {}", err);
+                panic!("Failed to read CSV: {err}");
             }
         }
     }

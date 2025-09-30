@@ -113,8 +113,8 @@ async fn prepare_stock_data(
     let historical_data = match get_historical_data_from_db(symbol, &start_date_str, &end_date_str).await {
         Ok(data) => data,
         Err(e) => {
-            eprintln!("从数据库获取数据失败: {}", e);
-            return Err(candle_core::Error::Msg(format!("获取历史数据失败: {}", e)));
+            eprintln!("从数据库获取数据失败: {e}");
+            return Err(candle_core::Error::Msg(format!("获取历史数据失败: {e}")));
         }
     };
     
@@ -291,8 +291,7 @@ async fn prepare_stock_data(
     let x_test = Tensor::from_slice(&x_test_f32, &[test_size, features_len], &device)?;
     let y_test = Tensor::from_slice(&y_test_f32, &[test_size, 1], &device)?;
     
-    println!("数据预处理完成: 训练集{}样本, 测试集{}样本, 特征维度{}", 
-             train_size, test_size, features_len);
+    println!("数据预处理完成: 训练集{train_size}样本, 测试集{test_size}样本, 特征维度{features_len}");
     
     Ok((x_train, y_train, x_test, y_test, dates))
 }
@@ -334,7 +333,7 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
     
     // 准备数据
     let (x_train, y_train, x_test, y_test, _) = prepare_stock_data(&request).await
-        .map_err(|e| format!("数据准备失败: {}", e))?;
+        .map_err(|e| format!("数据准备失败: {e}"))?;
     
     // 设置设备
     let device = Device::Cpu;
@@ -354,11 +353,11 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
     
     // 创建模型
     let (varmap, model) = create_model(&config, &device)
-        .map_err(|e| format!("模型创建失败: {}", e))?;
+        .map_err(|e| format!("模型创建失败: {e}"))?;
     
     // 创建优化器
     let mut optimizer = AdamW::new_lr(varmap.all_vars(), request.learning_rate)
-        .map_err(|e| format!("优化器创建失败: {}", e))?;
+        .map_err(|e| format!("优化器创建失败: {e}"))?;
     
     // 训练模型
     let batch_size = request.batch_size;
@@ -370,13 +369,13 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
         for batch_idx in 0..num_batches {
             let batch_start = batch_idx * batch_size;
             let x_batch = x_train.narrow(0, batch_start, batch_size)
-                .map_err(|e| format!("批次数据准备失败: {}", e))?;
+                .map_err(|e| format!("批次数据准备失败: {e}"))?;
             let y_batch = y_train.narrow(0, batch_start, batch_size)
-                .map_err(|e| format!("批次数据准备失败: {}", e))?;
+                .map_err(|e| format!("批次数据准备失败: {e}"))?;
             
             // 前向传播
             let output = model.forward(&x_batch)
-                .map_err(|e| format!("前向传播失败: {}", e))?;
+                .map_err(|e| format!("前向传播失败: {e}"))?;
             
             // 计算损失 (均方误差)
             // 确保输出和目标张量的形状匹配
@@ -387,7 +386,7 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
                 if output.dim(0).unwrap() == y_batch.dim(0).unwrap() {
                     // 如果批次大小相同但输出维度不同，尝试reshape
                     output.reshape(&[output.dim(0).unwrap(), 1])
-                        .map_err(|e| format!("调整输出形状失败: {}", e))?
+                        .map_err(|e| format!("调整输出形状失败: {e}"))?
                 } else {
                     return Err(format!("输出形状 {:?} 和目标形状 {:?} 不兼容", output.dims(), y_batch.dims()));
                 }
@@ -395,13 +394,13 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
                 output
             };
             
-            let loss = reshaped_output.sub(&y_batch).map_err(|e| format!("计算损失失败: {}", e))?;
-            let loss_squared = loss.sqr().map_err(|e| format!("计算平方失败: {}", e))?;
-            let loss = loss_squared.mean_all().map_err(|e| format!("计算均值失败: {}", e))?;
+            let loss = reshaped_output.sub(&y_batch).map_err(|e| format!("计算损失失败: {e}"))?;
+            let loss_squared = loss.sqr().map_err(|e| format!("计算平方失败: {e}"))?;
+            let loss = loss_squared.mean_all().map_err(|e| format!("计算均值失败: {e}"))?;
             
             // 反向传播
             optimizer.backward_step(&loss)
-                .map_err(|e| format!("反向传播失败: {}", e))?;
+                .map_err(|e| format!("反向传播失败: {e}"))?;
             
             epoch_loss += loss.to_scalar::<f32>().unwrap() as f64;
         }
@@ -414,23 +413,23 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
     
     // 评估模型
     let y_pred = model.forward(&x_test)
-        .map_err(|e| format!("预测失败: {}", e))?;
+        .map_err(|e| format!("预测失败: {e}"))?;
     
     // 转换为Vec用于准确率计算 - 处理不同维度的张量
     let predictions_vec = match y_pred.dims() {
         // 如果是1维张量 [n]
         [_] => {
-            y_pred.to_vec1::<f32>().map_err(|e| format!("转换1维预测结果失败: {}", e))?
+            y_pred.to_vec1::<f32>().map_err(|e| format!("转换1维预测结果失败: {e}"))?
                 .into_iter().map(|x| x as f64).collect::<Vec<f64>>()
         },
         // 如果是2维张量 [n, 1] 
         [_, 1] => {
-            y_pred.to_vec2::<f32>().map_err(|e| format!("转换2维预测结果失败: {}", e))?
+            y_pred.to_vec2::<f32>().map_err(|e| format!("转换2维预测结果失败: {e}"))?
                 .into_iter().map(|row| row[0] as f64).collect::<Vec<f64>>()
         },
         // 如果是其他2维张量 [n, m]
         [_, _] => {
-            let vec2d = y_pred.to_vec2::<f32>().map_err(|e| format!("转换2维预测结果失败: {}", e))?;
+            let vec2d = y_pred.to_vec2::<f32>().map_err(|e| format!("转换2维预测结果失败: {e}"))?;
             vec2d.into_iter().map(|row| row[0] as f64).collect::<Vec<f64>>() // 取第一列
         },
         // 其他维度
@@ -442,17 +441,17 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
     let actuals_vec = match y_test.dims() {
         // 如果是1维张量 [n]
         [_] => {
-            y_test.to_vec1::<f32>().map_err(|e| format!("转换1维实际结果失败: {}", e))?
+            y_test.to_vec1::<f32>().map_err(|e| format!("转换1维实际结果失败: {e}"))?
                 .into_iter().map(|x| x as f64).collect::<Vec<f64>>()
         },
         // 如果是2维张量 [n, 1]
         [_, 1] => {
-            y_test.to_vec2::<f32>().map_err(|e| format!("转换2维实际结果失败: {}", e))?
+            y_test.to_vec2::<f32>().map_err(|e| format!("转换2维实际结果失败: {e}"))?
                 .into_iter().map(|row| row[0] as f64).collect::<Vec<f64>>()
         },
         // 如果是其他2维张量 [n, m]
         [_, _] => {
-            let vec2d = y_test.to_vec2::<f32>().map_err(|e| format!("转换2维实际结果失败: {}", e))?;
+            let vec2d = y_test.to_vec2::<f32>().map_err(|e| format!("转换2维实际结果失败: {e}"))?;
             vec2d.into_iter().map(|row| row[0] as f64).collect::<Vec<f64>>() // 取第一列
         },
         // 其他维度
@@ -465,21 +464,21 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
     let (direction_accuracy, combined_accuracy) = calculate_direction_focused_accuracy(&predictions_vec, &actuals_vec);
     
     // 计算MSE和RMSE用于日志显示
-    let diff = y_pred.sub(&y_test).map_err(|e| format!("计算MSE失败: {}", e))?;
-    let squared_diff = diff.sqr().map_err(|e| format!("计算平方失败: {}", e))?;
-    let mse = squared_diff.mean_all().map_err(|e| format!("计算均值失败: {}", e))?;
+    let diff = y_pred.sub(&y_test).map_err(|e| format!("计算MSE失败: {e}"))?;
+    let squared_diff = diff.sqr().map_err(|e| format!("计算平方失败: {e}"))?;
+    let mse = squared_diff.mean_all().map_err(|e| format!("计算均值失败: {e}"))?;
     let mse = mse.to_scalar::<f32>().unwrap() as f64;
     let rmse = mse.sqrt();
     
-    println!("评估结果: MSE = {:.4}, RMSE = {:.4}", mse, rmse);
+    println!("评估结果: MSE = {mse:.4}, RMSE = {rmse:.4}");
     println!("🎯 方向预测准确率: {:.2}% | 综合准确率: {:.2}%", 
              direction_accuracy * 100.0, combined_accuracy * 100.0);
     println!("📊 预测张量维度: {:?}, 实际张量维度: {:?}", y_pred.dims(), y_test.dims());
     
     // 保存模型
     let model_path = get_model_file_path(&model_id);
-    fs::create_dir_all(model_path.parent().unwrap()).map_err(|e| format!("创建模型目录失败: {}", e))?;
-    save_model(&varmap, &model_path).map_err(|e| format!("模型保存失败: {}", e))?;
+    fs::create_dir_all(model_path.parent().unwrap()).map_err(|e| format!("创建模型目录失败: {e}"))?;
+    save_model(&varmap, &model_path).map_err(|e| format!("模型保存失败: {e}"))?;
     
     // 保存模型元数据
     let metadata = ModelInfo {
@@ -494,7 +493,7 @@ pub async fn train_candle_model(request: TrainingRequest) -> std::result::Result
         accuracy: combined_accuracy,
     };
     
-    save_model_metadata(&metadata).map_err(|e| format!("元数据保存失败: {}", e))?;
+    save_model_metadata(&metadata).map_err(|e| format!("元数据保存失败: {e}"))?;
     
     Ok(TrainingResult {
         metadata,

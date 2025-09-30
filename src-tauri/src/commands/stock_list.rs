@@ -9,7 +9,7 @@ pub async fn get_stock_list(
     search: String,
 ) -> Result<Vec<Stock>, AppError> {
     let search = search.trim();
-    let search_pattern = format!("%{}%", search);
+    let search_pattern = format!("%{search}%");
 
     let records = sqlx::query_as::<_, Stock>(
         r#"

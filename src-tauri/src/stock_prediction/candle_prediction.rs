@@ -24,8 +24,8 @@ pub async fn evaluate_candle_model(model_id: String) -> std::result::Result<Eval
     let model = match load_model_metadata(&model_id) {
         Ok(metadata) => metadata,
         Err(e) => {
-            eprintln!("加载模型元数据失败: {}", e);
-            return Err(format!("找不到模型ID: {}", model_id));
+            eprintln!("加载模型元数据失败: {e}");
+            return Err(format!("找不到模型ID: {model_id}"));
         }
     };
     
@@ -60,15 +60,15 @@ pub async fn retrain_candle_model(
     let model = match load_model_metadata(&model_id) {
         Ok(metadata) => metadata,
         Err(e) => {
-            eprintln!("加载模型元数据失败: {}", e);
-            return Err(format!("找不到模型ID: {}", model_id));
+            eprintln!("加载模型元数据失败: {e}");
+            return Err(format!("找不到模型ID: {model_id}"));
         }
     };
     
     println!("🔄 开始重新训练模型: {} ({})", model.name, model.stock_code);
     
     // 删除旧模型
-    delete_model(&model_id).map_err(|e| format!("删除旧模型失败: {}", e))?;
+    delete_model(&model_id).map_err(|e| format!("删除旧模型失败: {e}"))?;
     
     // 创建重新训练请求，使用现有模型的配置
     let retrain_request = TrainingRequest {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::stock_prediction::backtest::BacktestReport;
-use crate::stock_prediction::multi_timeframe_analysis::{generate_multi_timeframe_signals, MultiTimeframeSignal};
+use crate::stock_prediction::multi_timeframe_analysis::generate_multi_timeframe_signals;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureImportance {
@@ -434,11 +434,10 @@ fn analyze_rsi_correlation(backtest_report: &BacktestReport) -> f64 {
             if let Some(tech_indicators) = &prediction.technical_indicators {
                 total_count += 1;
                 // RSI在30-70区间时准确率通常更高
-                if tech_indicators.rsi > 30.0 && tech_indicators.rsi < 70.0 {
-                    if entry.price_accuracy > 0.7 {
+                if tech_indicators.rsi > 30.0 && tech_indicators.rsi < 70.0
+                    && entry.price_accuracy > 0.7 {
                         high_accuracy_count += 1;
                     }
-                }
             }
         }
     }

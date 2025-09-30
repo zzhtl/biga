@@ -44,7 +44,7 @@ pub async fn batch_insert_stock(pool: &SqlitePool, data_list: Vec<Stock>) -> Res
             "INSERT INTO stock (symbol, name, area, industry, market, exchange, list_date, act_name, act_ent_type) ",
         );
         query_builder.push_values(chunk, |mut b, data| {
-            let exchange = data.exchange.split('.').last().unwrap_or("").to_lowercase();
+            let exchange = data.exchange.split('.').next_back().unwrap_or("").to_lowercase();
             b.push_bind(&data.symbol)
                 .push_bind(&data.name)
                 .push_bind(&data.area)
@@ -85,17 +85,17 @@ pub async fn batch_insert_historical_data(
         );
         query_builder.push_values(chunk, |mut b, data| {
             b.push_bind(&data.symbol)
-                .push_bind(&data.date)
-                .push_bind(&data.open)
-                .push_bind(&data.close)
-                .push_bind(&data.high)
-                .push_bind(&data.low)
-                .push_bind(&data.volume)
-                .push_bind(&data.amount)
-                .push_bind(&data.amplitude)
-                .push_bind(&data.turnover_rate)
-                .push_bind(&data.change)
-                .push_bind(&data.change_percent);
+                .push_bind(data.date)
+                .push_bind(data.open)
+                .push_bind(data.close)
+                .push_bind(data.high)
+                .push_bind(data.low)
+                .push_bind(data.volume)
+                .push_bind(data.amount)
+                .push_bind(data.amplitude)
+                .push_bind(data.turnover_rate)
+                .push_bind(data.change)
+                .push_bind(data.change_percent);
         });
 
         query_builder.push(" ON CONFLICT(symbol, date) DO NOTHING");
@@ -111,14 +111,14 @@ pub async fn batch_insert_historical_data(
     realtime_builder.push_values(&[last_history], |mut b, data| {
         b.push_bind(&data.symbol)
             .push_bind(&stock_info.name)
-            .push_bind(&data.date)
-            .push_bind(&data.close)
-            .push_bind(&data.volume)
-            .push_bind(&data.amount)
-            .push_bind(&data.amplitude)
-            .push_bind(&data.turnover_rate)
-            .push_bind(&data.change)
-            .push_bind(&data.change_percent);
+            .push_bind(data.date)
+            .push_bind(data.close)
+            .push_bind(data.volume)
+            .push_bind(data.amount)
+            .push_bind(data.amplitude)
+            .push_bind(data.turnover_rate)
+            .push_bind(data.change)
+            .push_bind(data.change_percent);
     });
     // 添加 ON CONFLICT 更新逻辑
     realtime_builder.push(

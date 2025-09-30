@@ -37,7 +37,7 @@ pub async fn get_historical_data_from_db(symbol: &str, start_date: &str, end_dat
         .max_connections(1)
         .connect(&connection_string)
         .await
-        .map_err(|e| format!("连接数据库失败: {}", e))?;
+        .map_err(|e| format!("连接数据库失败: {e}"))?;
     
     let records = sqlx::query_as::<_, HistoricalDataType>(
         r#"SELECT * FROM historical_data 
@@ -49,7 +49,7 @@ pub async fn get_historical_data_from_db(symbol: &str, start_date: &str, end_dat
     .bind(end_date)
     .fetch_all(&pool)
     .await
-    .map_err(|e| format!("查询历史数据失败: {}", e))?;
+    .map_err(|e| format!("查询历史数据失败: {e}"))?;
     
     Ok(records)
 }
@@ -72,7 +72,7 @@ pub async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, f
         .max_connections(1)
         .connect(&connection_string)
         .await
-        .map_err(|e| format!("连接数据库失败: {}", e))?;
+        .map_err(|e| format!("连接数据库失败: {e}"))?;
     
     // 修改查询，获取更多历史数据但保持合理的限制
     let limit = std::cmp::max(300, days * 2); // 至少300条记录，或者请求天数的2倍
@@ -88,10 +88,10 @@ pub async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, f
     .bind(limit as i32)
     .fetch_all(&pool)
     .await
-    .map_err(|e| format!("查询历史数据失败: {}", e))?;
+    .map_err(|e| format!("查询历史数据失败: {e}"))?;
     
     if records.is_empty() {
-        return Err(format!("未找到股票代码 {} 的历史数据", symbol));
+        return Err(format!("未找到股票代码 {symbol} 的历史数据"));
     }
     
     // 反向排序以获取时间顺序（从旧到新）
@@ -125,7 +125,7 @@ pub async fn get_recent_market_data(symbol: &str, days: usize) -> Result<(f64, f
              sorted_records.len(),
              sorted_records.first().map(|r| &r.date).unwrap_or(&"未知".to_string()),
              sorted_records.last().map(|r| &r.date).unwrap_or(&"未知".to_string()));
-    println!("📈 最新价格: {:.2}, 涨跌幅: {:.2}%", current_price, current_change_percent);
+    println!("📈 最新价格: {current_price:.2}, 涨跌幅: {current_change_percent:.2}%");
     
     Ok((current_price, current_change_percent, dates, prices, volumes, highs, lows))
 }
