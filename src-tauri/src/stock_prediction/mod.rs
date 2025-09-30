@@ -40,6 +40,12 @@ pub mod hyperparameter_optimization;
 // 多时间周期分析
 pub mod multi_timeframe_analysis;
 
+// 量价关系深度分析
+pub mod volume_analysis;
+
+// K线形态识别
+pub mod candlestick_patterns;
+
 // 重新导出主要的公共类型和函数
 pub use types::{
     ModelConfig, ModelInfo, Prediction, TechnicalIndicatorValues,

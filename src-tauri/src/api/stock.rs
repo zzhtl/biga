@@ -45,7 +45,7 @@ pub async fn fetch_historical_data(symbol: &str) -> Result<Vec<HistoricalData>, 
     
     // 使用更稳定的token，或者从环境变量读取
     let token = std::env::var("STOCK_API_TOKEN")
-        .unwrap_or_else(|_| "DDE0C310-D0DE-4767-9712-A424BAC4326D".to_string());
+        .unwrap_or_else(|_| "5E1C3717-F301-4761-B8F9-7ED7FF186381".to_string());
     
     let url = format!("{HISTORY_API}/{symbol}/d/n?token={token}");
     println!("请求URL: {url}");

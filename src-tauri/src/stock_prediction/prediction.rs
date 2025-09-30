@@ -19,6 +19,615 @@ use crate::stock_prediction::technical_indicators::{get_feature_required_days, c
 use crate::stock_prediction::multi_timeframe_analysis::{
     StockData, convert_to_weekly, convert_to_monthly, calculate_macd_signal, calculate_kdj_signal
 };
+use crate::stock_prediction::volume_analysis;
+use crate::stock_prediction::candlestick_patterns;
+
+// ==================== 金融级预测策略系统 ====================
+
+/// 买卖点信号
+/// 金融术语规范：
+/// - 止损位：价格跌到此位置时卖出止损（止损位 < 当前价）
+/// - 止盈位：价格涨到此位置时卖出获利（止盈位 > 当前价）
+/// - 无论买入点还是卖出点，止损位永远 < 当前价 < 止盈位
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BuySellPoint {
+    pub point_type: String,           // "买入点" 或 "卖出点"
+    pub signal_strength: f64,         // 信号强度 0-100
+    pub price_level: f64,             // 建议操作价格
+    pub stop_loss: f64,               // 止损位（跌到此价位卖出止损）
+    pub take_profit: Vec<f64>,        // 止盈位（涨到此价位卖出获利，可多个目标）
+    pub risk_reward_ratio: f64,       // 风险收益比 = 潜在收益/潜在风险
+    pub reasons: Vec<String>,         // 信号产生原因
+    pub confidence: f64,              // 信号置信度 0-1
+    pub accuracy_rate: Option<f64>,   // 历史准确率（如有回测数据）
+}
+
+/// 支撑压力位
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SupportResistance {
+    pub support_levels: Vec<f64>,     // 支撑位（从强到弱）
+    pub resistance_levels: Vec<f64>,  // 压力位（从强到弱）
+    pub current_position: String,     // 当前位置描述
+}
+
+/// 多周期共振分析结果
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MultiTimeframeSignal {
+    pub daily_trend: String,          // 日线趋势
+    pub weekly_trend: String,         // 周线趋势
+    pub monthly_trend: String,        // 月线趋势
+    pub resonance_level: i32,         // 共振级别 0-3
+    pub resonance_direction: String,  // 共振方向
+    pub signal_quality: f64,          // 信号质量 0-100
+}
+
+/// 量价背离分析
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VolumePriceDivergence {
+    pub has_bullish_divergence: bool, // 底背离（看涨）
+    pub has_bearish_divergence: bool, // 顶背离（看跌）
+    pub divergence_strength: f64,     // 背离强度
+    pub warning_message: String,      // 预警信息
+}
+
+/// 金融级预测结果
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProfessionalPrediction {
+    pub buy_points: Vec<BuySellPoint>,
+    pub sell_points: Vec<BuySellPoint>,
+    pub support_resistance: SupportResistance,
+    pub multi_timeframe: MultiTimeframeSignal,
+    pub divergence: VolumePriceDivergence,
+    pub current_advice: String,
+    pub risk_level: String,
+    pub candle_patterns: Vec<candlestick_patterns::PatternRecognition>, // K线形态
+    pub volume_analysis: VolumeAnalysisInfo,  // 量价分析结果
+}
+
+/// 量价分析信息（用于序列化）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VolumeAnalysisInfo {
+    pub volume_trend: String,        // 量能趋势
+    pub volume_price_sync: bool,     // 量价配合
+    pub accumulation_signal: f64,    // 吸筹信号强度
+    pub obv_trend: String,          // OBV趋势
+}
+
+// ==================== 核心策略函数 ====================
+
+/// 计算支撑压力位
+fn calculate_support_resistance_levels(
+    prices: &[f64], 
+    highs: &[f64], 
+    lows: &[f64], 
+    current_price: f64
+) -> SupportResistance {
+    let mut support_levels = Vec::new();
+    let mut resistance_levels = Vec::new();
+    
+    if prices.len() < 20 {
+        return SupportResistance {
+            support_levels,
+            resistance_levels,
+            current_position: "数据不足".to_string(),
+        };
+    }
+    
+    let n = prices.len();
+    
+    // 1. 计算均线支撑/压力
+    let calc_ma = |window: usize| -> f64 {
+        if n >= window {
+            prices[n-window..].iter().sum::<f64>() / window as f64
+        } else {
+            current_price
+        }
+    };
+    
+    let ma5 = calc_ma(5);
+    let ma10 = calc_ma(10);
+    let ma20 = calc_ma(20);
+    let ma60 = calc_ma(60);
+    
+    // 2. 历史高低点（60日内）
+    let lookback = n.min(60);
+    let recent_high = highs[n-lookback..].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let recent_low = lows[n-lookback..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    
+    // 3. 斐波那契回撤位
+    let fib_range = recent_high - recent_low;
+    let fib_382 = recent_high - fib_range * 0.382;
+    let fib_500 = recent_high - fib_range * 0.500;
+    let fib_618 = recent_high - fib_range * 0.618;
+    
+    // 分类支撑和压力
+    let mut all_levels = vec![
+        ma5, ma10, ma20, ma60,
+        recent_high, recent_low,
+        fib_382, fib_500, fib_618,
+    ];
+    
+    // 去重并排序
+    all_levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    all_levels.dedup_by(|a, b| (*a - *b).abs() < current_price * 0.01);
+    
+    for &level in &all_levels {
+        if level < current_price && level > current_price * 0.85 {
+            support_levels.push(level);
+        } else if level > current_price && level < current_price * 1.15 {
+            resistance_levels.push(level);
+        }
+    }
+    
+    // 按距离当前价格排序
+    support_levels.sort_by(|a, b| (current_price - a).partial_cmp(&(current_price - b)).unwrap());
+    resistance_levels.sort_by(|a, b| (a - current_price).partial_cmp(&(b - current_price)).unwrap());
+    
+    // 限制数量
+    support_levels.truncate(5);
+    resistance_levels.truncate(5);
+    
+    let current_position = if !support_levels.is_empty() && !resistance_levels.is_empty() {
+        let to_support = ((current_price - support_levels[0]) / current_price * 100.0).abs();
+        let to_resistance = ((resistance_levels[0] - current_price) / current_price * 100.0).abs();
+        
+        if to_support < 2.0 {
+            "接近关键支撑".to_string()
+        } else if to_resistance < 2.0 {
+            "接近关键压力".to_string()
+        } else if to_support < to_resistance {
+            format!("中性偏下，距支撑{:.2}%", to_support)
+        } else {
+            format!("中性偏上，距压力{:.2}%", to_resistance)
+        }
+    } else {
+        "中性区域".to_string()
+    };
+    
+    SupportResistance {
+        support_levels,
+        resistance_levels,
+        current_position,
+    }
+}
+
+/// 多周期共振分析
+fn analyze_multi_timeframe_resonance(
+    daily_data: &[StockData],
+) -> MultiTimeframeSignal {
+    let weekly_data = convert_to_weekly(daily_data);
+    let monthly_data = convert_to_monthly(daily_data);
+    
+    // 计算各周期MACD和趋势
+    let daily_macd = calculate_macd_signal(daily_data, 12, 26, 9);
+    let weekly_macd = calculate_macd_signal(&weekly_data, 12, 26, 9);
+    let monthly_macd = calculate_macd_signal(&monthly_data, 12, 26, 9);
+    
+    let trend_from_macd = |signals: &[crate::stock_prediction::multi_timeframe_analysis::MacdSignal]| -> (String, i32) {
+        if let Some(last) = signals.last() {
+            if last.is_golden_cross {
+                ("多头".to_string(), 1)
+            } else if last.is_death_cross {
+                ("空头".to_string(), -1)
+            } else if last.histogram > 0.0 {
+                ("偏多".to_string(), 1)
+            } else {
+                ("偏空".to_string(), -1)
+            }
+        } else {
+            ("中性".to_string(), 0)
+        }
+    };
+    
+    let (daily_trend, daily_score) = trend_from_macd(&daily_macd);
+    let (weekly_trend, weekly_score) = trend_from_macd(&weekly_macd);
+    let (monthly_trend, monthly_score) = trend_from_macd(&monthly_macd);
+    
+    // 计算共振
+    let resonance_score = daily_score + weekly_score + monthly_score;
+    let (resonance_level, resonance_direction) = match resonance_score {
+        3 => (3, "强烈多头共振".to_string()),
+        2 => (2, "多头共振".to_string()),
+        1 => (1, "偏多".to_string()),
+        -1 => (1, "偏空".to_string()),
+        -2 => (2, "空头共振".to_string()),
+        -3 => (3, "强烈空头共振".to_string()),
+        _ => (0, "无明显共振".to_string()),
+    };
+    
+    // 信号质量评分
+    let signal_quality = match resonance_level {
+        3 => 95.0,
+        2 => 80.0,
+        1 => 60.0,
+        _ => 40.0,
+    };
+    
+    MultiTimeframeSignal {
+        daily_trend,
+        weekly_trend,
+        monthly_trend,
+        resonance_level,
+        resonance_direction,
+        signal_quality,
+    }
+}
+
+/// 量价背离分析
+fn analyze_volume_price_divergence(
+    prices: &[f64],
+    volumes: &[i64],
+    highs: &[f64],
+    lows: &[f64],
+) -> VolumePriceDivergence {
+    if prices.len() < 20 {
+        return VolumePriceDivergence {
+            has_bullish_divergence: false,
+            has_bearish_divergence: false,
+            divergence_strength: 0.0,
+            warning_message: "数据不足".to_string(),
+        };
+    }
+    
+    let n = prices.len();
+    let lookback = 20.min(n);
+    
+    // 寻找价格的高点和低点
+    let mut price_peaks = Vec::new();
+    let mut price_troughs = Vec::new();
+    
+    for i in 1..lookback-1 {
+        let idx = n - lookback + i;
+        if highs[idx] > highs[idx-1] && highs[idx] > highs[idx+1] {
+            price_peaks.push((idx, highs[idx]));
+        }
+        if lows[idx] < lows[idx-1] && lows[idx] < lows[idx+1] {
+            price_troughs.push((idx, lows[idx]));
+        }
+    }
+    
+    let mut has_bullish_divergence = false;
+    let mut has_bearish_divergence = false;
+    let mut divergence_strength = 0.0;
+    let mut warning_message = "无明显背离".to_string();
+    
+    // 底背离检测（价格新低，指标未新低）
+    if price_troughs.len() >= 2 {
+        let last_trough = price_troughs[price_troughs.len()-1];
+        let prev_trough = price_troughs[price_troughs.len()-2];
+        
+        if last_trough.1 < prev_trough.1 {
+            // 价格创新低，检查成交量是否萎缩
+            let last_vol = volumes[last_trough.0];
+            let prev_vol = volumes[prev_trough.0];
+            
+            if last_vol < prev_vol {
+                has_bullish_divergence = true;
+                divergence_strength = (prev_vol as f64 - last_vol as f64) / prev_vol as f64;
+                warning_message = "检测到底背离信号，可能即将反弹".to_string();
+            }
+        }
+    }
+    
+    // 顶背离检测（价格新高，指标未新高）
+    if price_peaks.len() >= 2 {
+        let last_peak = price_peaks[price_peaks.len()-1];
+        let prev_peak = price_peaks[price_peaks.len()-2];
+        
+        if last_peak.1 > prev_peak.1 {
+            // 价格创新高，检查成交量是否萎缩
+            let last_vol = volumes[last_peak.0];
+            let prev_vol = volumes[prev_peak.0];
+            
+            if last_vol < prev_vol {
+                has_bearish_divergence = true;
+                divergence_strength = (prev_vol as f64 - last_vol as f64) / prev_vol as f64;
+                warning_message = "检测到顶背离信号，注意回调风险".to_string();
+            }
+        }
+    }
+    
+    VolumePriceDivergence {
+        has_bullish_divergence,
+        has_bearish_divergence,
+        divergence_strength,
+        warning_message,
+    }
+}
+
+/// 识别买入点
+fn identify_buy_points(
+    prices: &[f64],
+    volumes: &[i64],
+    _highs: &[f64],
+    _lows: &[f64],
+    current_price: f64,
+    support_resistance: &SupportResistance,
+    multi_timeframe: &MultiTimeframeSignal,
+    divergence: &VolumePriceDivergence,
+) -> Vec<BuySellPoint> {
+    let mut buy_points = Vec::new();
+    
+    if prices.len() < 20 {
+        return buy_points;
+    }
+    
+    let n = prices.len();
+    
+    // 计算技术指标
+    let calc_ma = |window: usize| -> f64 {
+        if n >= window {
+            prices[n-window..].iter().sum::<f64>() / window as f64
+        } else {
+            current_price
+        }
+    };
+    
+    let ma5 = calc_ma(5);
+    let ma10 = calc_ma(10);
+    let ma20 = calc_ma(20);
+    
+    // 买点1：多周期共振 + 均线多头排列
+    if multi_timeframe.resonance_level >= 2 
+       && multi_timeframe.resonance_direction.contains("多头")
+       && ma5 > ma10 && ma10 > ma20 {
+        let mut reasons = vec![
+            "多周期共振向上".to_string(),
+            "均线呈多头排列".to_string(),
+        ];
+        
+        let nearest_support = support_resistance.support_levels.first().copied().unwrap_or(current_price * 0.95);
+        let nearest_resistance = support_resistance.resistance_levels.first().copied().unwrap_or(current_price * 1.10);
+        
+        let stop_loss = nearest_support * 0.97;
+        let take_profit1 = nearest_resistance;
+        let take_profit2 = current_price + (nearest_resistance - current_price) * 1.5;
+        
+        let risk = current_price - stop_loss;
+        let reward = take_profit1 - current_price;
+        let risk_reward_ratio = if risk > 0.0 { reward / risk } else { 0.0 };
+        
+        if divergence.has_bullish_divergence {
+            reasons.push("底部背离确认".to_string());
+        }
+        
+        let signal_strength = 70.0 + multi_timeframe.signal_quality * 0.2;
+        
+        buy_points.push(BuySellPoint {
+            point_type: "买入点".to_string(),
+            signal_strength,
+            price_level: current_price,
+            stop_loss,
+            take_profit: vec![take_profit1, take_profit2],
+            risk_reward_ratio,
+            reasons,
+            confidence: 0.75 + multi_timeframe.resonance_level as f64 * 0.05,
+            accuracy_rate: None,  // 待回测统计
+        });
+    }
+    
+    // 买点2：突破压力位 + 放量
+    if let Some(&first_resistance) = support_resistance.resistance_levels.first() {
+        if current_price > first_resistance * 0.99 && current_price < first_resistance * 1.02 {
+            // 检查是否放量
+            if volumes.len() >= 5 {
+                let recent_vol = volumes[n-1];
+                let avg_vol = volumes[n-5..n-1].iter().map(|&v| v as f64).sum::<f64>() / 4.0;
+                
+                if recent_vol as f64 > avg_vol * 1.3 {
+                    let stop_loss = first_resistance * 0.96;
+                    let take_profit1 = current_price * 1.08;
+                    
+                    let risk = current_price - stop_loss;
+                    let reward = take_profit1 - current_price;
+                    let risk_reward_ratio = if risk > 0.0 { reward / risk } else { 0.0 };
+                    
+                    buy_points.push(BuySellPoint {
+                        point_type: "突破买入点".to_string(),
+                        signal_strength: 75.0,
+                        price_level: current_price,
+                        stop_loss,
+                        take_profit: vec![take_profit1],
+                        risk_reward_ratio,
+                        reasons: vec![
+                            "突破关键压力位".to_string(),
+                            "放量确认突破有效".to_string(),
+                        ],
+                        confidence: 0.70,
+                        accuracy_rate: None,  // 待回测统计
+                    });
+                }
+            }
+        }
+    }
+    
+    // 买点3：回踩支撑位 + 缩量
+    if let Some(&first_support) = support_resistance.support_levels.first() {
+        if current_price < first_support * 1.02 && current_price > first_support * 0.98 {
+            if volumes.len() >= 5 {
+                let recent_vol = volumes[n-1];
+                let avg_vol = volumes[n-5..n-1].iter().map(|&v| v as f64).sum::<f64>() / 4.0;
+                
+                if (recent_vol as f64) < avg_vol * 0.8 {
+                    let stop_loss = first_support * 0.95;
+                    let take_profit1 = current_price * 1.05;
+                    
+                    let risk = current_price - stop_loss;
+                    let reward = take_profit1 - current_price;
+                    let risk_reward_ratio = if risk > 0.0 { reward / risk } else { 0.0 };
+                    
+                    buy_points.push(BuySellPoint {
+                        point_type: "回踩支撑买入点".to_string(),
+                        signal_strength: 65.0,
+                        price_level: current_price,
+                        stop_loss,
+                        take_profit: vec![take_profit1],
+                        risk_reward_ratio,
+                        reasons: vec![
+                            "回踩关键支撑位".to_string(),
+                            "缩量显示抛压减弱".to_string(),
+                        ],
+                        confidence: 0.65,
+                        accuracy_rate: None,  // 待回测统计
+                    });
+                }
+            }
+        }
+    }
+    
+    // 过滤掉风险收益比不佳的信号
+    buy_points.retain(|bp| bp.risk_reward_ratio >= 1.5);
+    
+    // 按信号强度排序
+    buy_points.sort_by(|a, b| b.signal_strength.partial_cmp(&a.signal_strength).unwrap());
+    
+    buy_points
+}
+
+/// 识别卖出点
+fn identify_sell_points(
+    prices: &[f64],
+    volumes: &[i64],
+    _highs: &[f64],
+    _lows: &[f64],
+    current_price: f64,
+    support_resistance: &SupportResistance,
+    multi_timeframe: &MultiTimeframeSignal,
+    divergence: &VolumePriceDivergence,
+) -> Vec<BuySellPoint> {
+    let mut sell_points = Vec::new();
+    
+    if prices.len() < 20 {
+        return sell_points;
+    }
+    
+    let n = prices.len();
+    
+    let calc_ma = |window: usize| -> f64 {
+        if n >= window {
+            prices[n-window..].iter().sum::<f64>() / window as f64
+        } else {
+            current_price
+        }
+    };
+    
+    let ma5 = calc_ma(5);
+    let ma10 = calc_ma(10);
+    let ma20 = calc_ma(20);
+    
+    // 卖点1：多周期共振向下 + 均线空头排列
+    // 建议持仓者现在卖出，如果不卖则设置防护止损止盈
+    if multi_timeframe.resonance_level >= 2 
+       && multi_timeframe.resonance_direction.contains("空头")
+       && ma5 < ma10 && ma10 < ma20 {
+        let mut reasons = vec![
+            "多周期共振向下".to_string(),
+            "均线呈空头排列".to_string(),
+        ];
+        
+        if divergence.has_bearish_divergence {
+            reasons.push("顶部背离确认".to_string());
+        }
+        
+        let signal_strength = 75.0 + multi_timeframe.signal_quality * 0.2;
+        
+        // 止损位：跌3%止损（防止进一步下跌损失）
+        let stop_loss = current_price * 0.97;
+        // 止盈位：如果判断错误反弹，涨3-5%止盈
+        let take_profit = vec![current_price * 1.03, current_price * 1.05];
+        
+        // 风险收益比：如果不卖出，向下风险vs向上机会
+        let downside_risk = current_price * 0.10;  // 预期下跌10%的风险
+        let upside_potential = current_price * 0.03;  // 反弹3%的可能
+        let risk_reward_ratio = downside_risk / upside_potential;
+        
+        sell_points.push(BuySellPoint {
+            point_type: "卖出点".to_string(),
+            signal_strength,
+            price_level: current_price,
+            stop_loss,
+            take_profit,
+            risk_reward_ratio,
+            reasons,
+            confidence: 0.75 + multi_timeframe.resonance_level as f64 * 0.05,
+            accuracy_rate: None,  // 待回测统计
+        });
+    }
+    
+    // 卖点2：跌破关键支撑
+    // 破位信号，建议立即止损出局
+    if let Some(&first_support) = support_resistance.support_levels.first() {
+        if current_price < first_support * 0.99 {
+            if volumes.len() >= 5 {
+                let recent_vol = volumes[n-1];
+                let avg_vol = volumes[n-5..n-1].iter().map(|&v| v as f64).sum::<f64>() / 4.0;
+                
+                if recent_vol as f64 > avg_vol * 1.2 {
+                    // 止损位：再跌5%必须走（已经破位，快速止损）
+                    let stop_loss = current_price * 0.95;
+                    // 止盈位：反弹2-3%离场（破位后很难快速修复）
+                    let take_profit = vec![current_price * 1.02, current_price * 1.03];
+                    
+                    // 风险收益比：破位后继续下跌风险大
+                    let downside_risk = current_price * 0.10;  // 破位后可能再跌10%
+                    let upside_potential = current_price * 0.02;  // 反弹空间有限
+                    let risk_reward_ratio = downside_risk / upside_potential;
+                    
+                    sell_points.push(BuySellPoint {
+                        point_type: "破位卖出点".to_string(),
+                        signal_strength: 85.0,  // 破位信号强度很高
+                        price_level: current_price,
+                        stop_loss,
+                        take_profit,
+                        risk_reward_ratio,
+                        reasons: vec![
+                            "跌破关键支撑位".to_string(),
+                            "放量下跌确认破位".to_string(),
+                        ],
+                        confidence: 0.80,  // 破位信号可信度高
+                        accuracy_rate: None,
+                    });
+                }
+            }
+        }
+    }
+    
+    // 卖点3：触及压力位 + 顶背离
+    // 高位风险信号，建议止盈离场
+    if let Some(&first_resistance) = support_resistance.resistance_levels.first() {
+        if current_price > first_resistance * 0.98 && divergence.has_bearish_divergence {
+            // 止损位：跌5%止损（高位回落）
+            let stop_loss = current_price * 0.95;
+            // 止盈位：如果突破压力位，涨2%离场
+            let take_profit = vec![current_price * 1.02];
+            
+            // 风险收益比：高位风险大于机会
+            let downside_risk = current_price * 0.08;  // 高位回落风险8%
+            let upside_potential = current_price * 0.02;  // 突破后空间有限
+            let risk_reward_ratio = downside_risk / upside_potential;
+            
+            sell_points.push(BuySellPoint {
+                point_type: "高位卖出点".to_string(),
+                signal_strength: 75.0,  // 提高强度
+                price_level: current_price,
+                stop_loss,
+                take_profit,
+                risk_reward_ratio,
+                reasons: vec![
+                    "触及关键压力位".to_string(),
+                    "顶部背离预警".to_string(),
+                    "建议止盈离场".to_string(),
+                ],
+                confidence: 0.70,
+                accuracy_rate: None,
+            });
+        }
+    }
+    
+    sell_points.sort_by(|a, b| b.signal_strength.partial_cmp(&a.signal_strength).unwrap());
+    
+    sell_points
+}
 
 // 简化的模型创建函数（与training.rs中的相同，用于加载模型）
 fn create_model(config: &ModelConfig, device: &Device) -> Result<(VarMap, Box<dyn Module + Send + Sync>), candle_core::Error> {
@@ -806,4 +1415,437 @@ pub async fn predict_with_simple_strategy(request: PredictionRequest) -> std::re
         predictions,
         last_real_data,
     })
+} 
+
+// ==================== 金融级预测主函数 ====================
+
+/// 金融级预测策略 - 提供买卖点和专业分析
+pub async fn predict_with_professional_strategy(
+    request: PredictionRequest
+) -> std::result::Result<(PredictionResponse, ProfessionalPrediction), String> {
+    println!("\n🎯 ========== 金融级策略分析 ==========");
+    
+    // 获取最近的真实市场数据
+    let (current_price, current_change_percent, dates, prices, volumes, highs, lows) = 
+        get_recent_market_data(&request.stock_code, 120).await
+        .map_err(|e| format!("获取市场数据失败: {e}"))?;
+    
+    if prices.len() < 60 {
+        return Err("历史数据不足，需要至少60天数据进行专业分析".to_string());
+    }
+    
+    println!("📊 数据加载完成: {}天历史数据", prices.len());
+    println!("💰 当前价格: {:.2}元 ({:+.2}%)\n", current_price, current_change_percent);
+    
+    // 1. 计算支撑压力位
+    let support_resistance = calculate_support_resistance_levels(
+        &prices, &highs, &lows, current_price
+    );
+    
+    println!("📍 ========== 支撑压力位分析 ==========");
+    println!("   当前位置: {}", support_resistance.current_position);
+    if !support_resistance.support_levels.is_empty() {
+        println!("   🟢 关键支撑位:");
+        for (i, &level) in support_resistance.support_levels.iter().enumerate() {
+            let distance = (current_price - level) / current_price * 100.0;
+            println!("      {}. {:.2}元 (距离-{:.2}%)", i+1, level, distance);
+        }
+    }
+    if !support_resistance.resistance_levels.is_empty() {
+        println!("   🔴 关键压力位:");
+        for (i, &level) in support_resistance.resistance_levels.iter().enumerate() {
+            let distance = (level - current_price) / current_price * 100.0;
+            println!("      {}. {:.2}元 (距离+{:.2}%)", i+1, level, distance);
+        }
+    }
+    
+    // 2. 构建多周期数据
+    let mut daily_data: Vec<StockData> = Vec::with_capacity(prices.len());
+    for (i, date) in dates.iter().enumerate() {
+        daily_data.push(StockData {
+            symbol: request.stock_code.clone(),
+            date: date.clone(),
+            open: prices[i],
+            high: highs.get(i).copied().unwrap_or(prices[i]),
+            low: lows.get(i).copied().unwrap_or(prices[i]),
+            close: prices[i],
+            volume: volumes.get(i).copied().unwrap_or(0) as f64,
+        });
+    }
+    
+    // 3. 多周期共振分析
+    let multi_timeframe = analyze_multi_timeframe_resonance(&daily_data);
+    
+    println!("\n🔄 ========== 多周期共振分析 ==========");
+    println!("   📈 日线趋势: {}", multi_timeframe.daily_trend);
+    println!("   📊 周线趋势: {}", multi_timeframe.weekly_trend);
+    println!("   📉 月线趋势: {}", multi_timeframe.monthly_trend);
+    println!("   ⚡ 共振级别: {} ({})", 
+             multi_timeframe.resonance_level,
+             multi_timeframe.resonance_direction);
+    println!("   ✨ 信号质量: {:.0}分", multi_timeframe.signal_quality);
+    
+    // 4. 量价背离分析
+    let divergence = analyze_volume_price_divergence(&prices, &volumes, &highs, &lows);
+    
+    println!("\n⚠️  ========== 量价背离分析 ==========");
+    if divergence.has_bullish_divergence {
+        println!("   🟢 检测到底背离 (强度: {:.0}%)", divergence.divergence_strength * 100.0);
+    }
+    if divergence.has_bearish_divergence {
+        println!("   🔴 检测到顶背离 (强度: {:.0}%)", divergence.divergence_strength * 100.0);
+    }
+    println!("   💡 {}", divergence.warning_message);
+    
+    // 5. 识别买卖点
+    let buy_points = identify_buy_points(
+        &prices, &volumes, &highs, &lows, 
+        current_price, &support_resistance, 
+        &multi_timeframe, &divergence
+    );
+    
+    let sell_points = identify_sell_points(
+        &prices, &volumes, &highs, &lows,
+        current_price, &support_resistance,
+        &multi_timeframe, &divergence
+    );
+    
+    println!("\n💎 ========== 买卖点信号 ==========");
+    if !buy_points.is_empty() {
+        println!("   🟢 买入信号 ({} 个):", buy_points.len());
+        for (i, bp) in buy_points.iter().enumerate() {
+            println!("      {}. {} (信号强度: {:.0}分)", i+1, bp.point_type, bp.signal_strength);
+            println!("         建议价格: {:.2}元", bp.price_level);
+            println!("         止损位: {:.2}元 ({:.2}%)", 
+                     bp.stop_loss, 
+                     (bp.stop_loss - bp.price_level) / bp.price_level * 100.0);
+            println!("         止盈位: {}", 
+                     bp.take_profit.iter()
+                       .map(|&p| format!("{:.2}元({:+.2}%)", p, (p - bp.price_level) / bp.price_level * 100.0))
+                       .collect::<Vec<_>>()
+                       .join(", "));
+            println!("         风险收益比: 1:{:.2}", bp.risk_reward_ratio);
+            println!("         置信度: {:.0}%", bp.confidence * 100.0);
+            println!("         理由: {}", bp.reasons.join("; "));
+        }
+    } else {
+        println!("   🟡 暂无明确买入信号");
+    }
+    
+    if !sell_points.is_empty() {
+        println!("   🔴 卖出信号 ({} 个):", sell_points.len());
+        for (i, sp) in sell_points.iter().enumerate() {
+            println!("      {}. {} (信号强度: {:.0}分)", i+1, sp.point_type, sp.signal_strength);
+            println!("         建议价格: {:.2}元", sp.price_level);
+            println!("         止损位: {:.2}元 ({:+.2}%)", 
+                     sp.stop_loss,
+                     (sp.stop_loss - sp.price_level) / sp.price_level * 100.0);
+            println!("         目标位: {}", 
+                     sp.take_profit.iter()
+                       .map(|&p| format!("{:.2}元({:.2}%)", p, (p - sp.price_level) / sp.price_level * 100.0))
+                       .collect::<Vec<_>>()
+                       .join(", "));
+            println!("         置信度: {:.0}%", sp.confidence * 100.0);
+            println!("         理由: {}", sp.reasons.join("; "));
+        }
+    } else {
+        println!("   🟡 暂无明确卖出信号");
+    }
+    
+    // 6. K线形态识别
+    let candles: Vec<candlestick_patterns::Candle> = daily_data.iter().map(|d| {
+        candlestick_patterns::Candle {
+            open: d.open,
+            high: d.high,
+            low: d.low,
+            close: d.close,
+            volume: d.volume as i64,
+        }
+    }).collect();
+    
+    let candle_patterns = candlestick_patterns::identify_all_patterns(&candles);
+    
+    println!("\n📊 ========== K线形态识别 ==========");
+    if !candle_patterns.is_empty() {
+        for pattern in &candle_patterns {
+            let direction_str = match pattern.direction {
+                candlestick_patterns::Direction::Bullish => "🟢 看涨",
+                candlestick_patterns::Direction::Bearish => "🔴 看跌",
+                candlestick_patterns::Direction::Neutral => "🟡 中性",
+            };
+            println!("   {} - {} (强度: {:.0}%, 可靠性: {:.0}%)", 
+                     direction_str,
+                     pattern.description,
+                     pattern.strength * 100.0,
+                     pattern.reliability * 100.0);
+        }
+    } else {
+        println!("   未检测到明显的K线形态信号");
+    }
+    
+    // 7. 量价关系深度分析
+    let volume_analysis_raw = volume_analysis::analyze_volume_price(&prices, &volumes);
+    
+    println!("\n📈 ========== 量价关系分析 ==========");
+    println!("   量能趋势: {}", volume_analysis_raw.volume_trend);
+    println!("   量价配合: {}", if volume_analysis_raw.volume_price_sync { "✅ 良好" } else { "⚠️ 背离" });
+    println!("   吸筹信号: {:.0}分", volume_analysis_raw.accumulation_signal);
+    
+    if volume_analysis_raw.accumulation_signal > 60.0 {
+        println!("   💡 检测到主力吸筹信号！");
+    }
+    
+    if !volume_analysis_raw.abnormal_volume_days.is_empty() {
+        println!("   ⚡ 异常放量: 最近{}天有{}次异常放量", 
+                 volume_analysis_raw.volume_ratio.len(),
+                 volume_analysis_raw.abnormal_volume_days.len());
+    }
+    
+    // OBV趋势判断
+    let obv_trend = if volume_analysis_raw.obv.len() >= 10 {
+        let recent_obv = &volume_analysis_raw.obv[volume_analysis_raw.obv.len()-10..];
+        if recent_obv.last().unwrap() > recent_obv.first().unwrap() {
+            "上升趋势".to_string()
+        } else {
+            "下降趋势".to_string()
+        }
+    } else {
+        "数据不足".to_string()
+    };
+    
+    let volume_analysis = VolumeAnalysisInfo {
+        volume_trend: volume_analysis_raw.volume_trend.clone(),
+        volume_price_sync: volume_analysis_raw.volume_price_sync,
+        accumulation_signal: volume_analysis_raw.accumulation_signal,
+        obv_trend,
+    };
+    
+    // 8. 生成当前操作建议
+    let (current_advice, risk_level) = generate_trading_advice(
+        &buy_points,
+        &sell_points,
+        &multi_timeframe,
+        &support_resistance,
+        &divergence,
+        current_price,
+    );
+    
+    println!("\n📋 ========== 操作建议 ==========");
+    println!("   {}", current_advice);
+    println!("   风险等级: {}", risk_level);
+    
+    // 7. 生成未来价格预测（基于趋势延续）
+    let predictions = generate_price_predictions(
+        &request,
+        &prices,
+        &highs,
+        &lows,
+        &volumes,
+        &dates,
+        current_price,
+        &multi_timeframe,
+        &support_resistance,
+    ).await?;
+    
+    let last_real_data = Some(LastRealData {
+        date: dates.last().unwrap().clone(),
+        price: current_price,
+        change_percent: current_change_percent,
+    });
+    
+    let professional_prediction = ProfessionalPrediction {
+        buy_points,
+        sell_points,
+        support_resistance,
+        multi_timeframe,
+        divergence,
+        current_advice,
+        risk_level,
+        candle_patterns,
+        volume_analysis,
+    };
+    
+    println!("\n✅ 金融级策略分析完成！\n");
+    
+    Ok((
+        PredictionResponse {
+            predictions,
+            last_real_data,
+        },
+        professional_prediction,
+    ))
+}
+
+/// 生成交易建议
+fn generate_trading_advice(
+    buy_points: &[BuySellPoint],
+    sell_points: &[BuySellPoint],
+    multi_timeframe: &MultiTimeframeSignal,
+    support_resistance: &SupportResistance,
+    divergence: &VolumePriceDivergence,
+    current_price: f64,
+) -> (String, String) {
+    let mut advice_parts = Vec::new();
+    let mut risk_score = 5; // 1-10，5为中性
+    
+    // 基于买卖点信号
+    if !buy_points.is_empty() && sell_points.is_empty() {
+        let best_buy = &buy_points[0];
+        advice_parts.push(format!(
+            "💚 建议{}，目标价{:.2}元，止损{:.2}元",
+            best_buy.point_type,
+            best_buy.take_profit[0],
+            best_buy.stop_loss
+        ));
+        risk_score = 4; // 买入信号，风险较低
+    } else if !sell_points.is_empty() && buy_points.is_empty() {
+        let best_sell = &sell_points[0];
+        advice_parts.push(format!(
+            "❤️ 建议{}，目标价{:.2}元，止损{:.2}元",
+            best_sell.point_type,
+            best_sell.take_profit[0],
+            best_sell.stop_loss
+        ));
+        risk_score = 7; // 卖出信号，风险较高
+    } else if !buy_points.is_empty() && !sell_points.is_empty() {
+        let buy_strength = buy_points[0].signal_strength;
+        let sell_strength = sell_points[0].signal_strength;
+        if buy_strength > sell_strength {
+            advice_parts.push("💛 信号矛盾，但买入信号更强，建议谨慎买入或观望".to_string());
+            risk_score = 5;
+        } else {
+            advice_parts.push("💛 信号矛盾，但卖出信号更强，建议减仓或观望".to_string());
+            risk_score = 6;
+        }
+    } else {
+        advice_parts.push("💙 当前无明确买卖信号，建议观望".to_string());
+        risk_score = 5;
+    }
+    
+    // 多周期共振建议
+    if multi_timeframe.resonance_level >= 2 {
+        if multi_timeframe.resonance_direction.contains("多头") {
+            advice_parts.push("多周期共振向上，趋势向好".to_string());
+            risk_score -= 1;
+        } else if multi_timeframe.resonance_direction.contains("空头") {
+            advice_parts.push("多周期共振向下，注意风险".to_string());
+            risk_score += 1;
+        }
+    }
+    
+    // 支撑压力位建议
+    if support_resistance.current_position.contains("接近关键支撑") {
+        advice_parts.push("价格接近支撑位，可关注反弹机会".to_string());
+        risk_score -= 1;
+    } else if support_resistance.current_position.contains("接近关键压力") {
+        advice_parts.push("价格接近压力位，注意回调风险".to_string());
+        risk_score += 1;
+    }
+    
+    // 背离预警
+    if divergence.has_bullish_divergence {
+        advice_parts.push("底部背离，可能即将反弹".to_string());
+        risk_score -= 1;
+    }
+    if divergence.has_bearish_divergence {
+        advice_parts.push("顶部背离，警惕回调".to_string());
+        risk_score += 2;
+    }
+    
+    let risk_level = match risk_score.clamp(1, 10) {
+        1..=3 => "低风险 ✅".to_string(),
+        4..=6 => "中等风险 ⚠️".to_string(),
+        7..=8 => "较高风险 🔶".to_string(),
+        _ => "高风险 ⛔".to_string(),
+    };
+    
+    (advice_parts.join("；"), risk_level)
+}
+
+/// 生成价格预测
+async fn generate_price_predictions(
+    request: &PredictionRequest,
+    prices: &[f64],
+    _highs: &[f64],
+    _lows: &[f64],
+    _volumes: &[i64],
+    dates: &[String],
+    current_price: f64,
+    multi_timeframe: &MultiTimeframeSignal,
+    _support_resistance: &SupportResistance,
+) -> Result<Vec<Prediction>, String> {
+    let mut predictions = Vec::new();
+    let mut last_price = current_price;
+    
+    let last_date = chrono::NaiveDate::parse_from_str(
+        dates.last().unwrap_or(&"2023-01-01".to_string()),
+        "%Y-%m-%d"
+    ).unwrap_or_else(|_| chrono::Local::now().naive_local().date());
+    
+    // 基于共振方向确定趋势偏向
+    let trend_bias = match multi_timeframe.resonance_level {
+        3 => {
+            if multi_timeframe.resonance_direction.contains("多头") { 0.015 }
+            else if multi_timeframe.resonance_direction.contains("空头") { -0.015 }
+            else { 0.0 }
+        },
+        2 => {
+            if multi_timeframe.resonance_direction.contains("多头") { 0.010 }
+            else if multi_timeframe.resonance_direction.contains("空头") { -0.010 }
+            else { 0.0 }
+        },
+        1 => {
+            if multi_timeframe.resonance_direction.contains("多") { 0.005 }
+            else if multi_timeframe.resonance_direction.contains("空") { -0.005 }
+            else { 0.0 }
+        },
+        _ => 0.0,
+    };
+    
+    let volatility = calculate_historical_volatility(prices).clamp(0.01, 0.08);
+    
+    for day in 1..=request.prediction_days {
+        let mut target_date = last_date;
+        for _ in 0..day {
+            target_date = get_next_trading_day(target_date);
+        }
+        let date_str = target_date.format("%Y-%m-%d").to_string();
+        
+        // 趋势衰减
+        let trend_decay = 0.95_f64.powi(day as i32);
+        
+        // 随机波动
+        let noise = (rand::random::<f64>() * 2.0 - 1.0) * volatility * 0.5;
+        
+        // 综合变化率
+        let change_rate = trend_bias * trend_decay + noise;
+        let change_percent = clamp_daily_change(change_rate * 100.0);
+        let predicted_price = last_price * (1.0 + change_percent / 100.0);
+        
+        // 置信度随时间递减
+        let confidence = (0.70 * trend_decay + multi_timeframe.signal_quality * 0.003).clamp(0.40, 0.85);
+        
+        // 交易信号
+        let trading_signal = if trend_bias > 0.008 {
+            "买入"
+        } else if trend_bias < -0.008 {
+            "卖出"
+        } else {
+            "持有"
+        }.to_string();
+        
+        predictions.push(Prediction {
+            target_date: date_str,
+            predicted_price,
+            predicted_change_percent: change_percent,
+            confidence,
+            trading_signal: Some(trading_signal),
+            signal_strength: Some(multi_timeframe.signal_quality / 100.0),
+            technical_indicators: None,
+        });
+        
+        last_price = predicted_price;
+    }
+    
+    Ok(predictions)
 } 

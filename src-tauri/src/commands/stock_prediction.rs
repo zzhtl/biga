@@ -372,4 +372,30 @@ pub async fn analyze_multi_timeframe_prediction_value(symbol: String) -> Result<
     let analysis = analyze_signal_prediction_value(&signals);
     
     Ok(analysis)
+}
+
+// ==================== 金融级预测策略命令 ====================
+
+use crate::stock_prediction::prediction::{
+    ProfessionalPrediction, BuySellPoint, SupportResistance, 
+    MultiTimeframeSignal as ProfMultiTimeframeSignal, VolumePriceDivergence
+};
+
+/// 金融级预测策略 - 提供买卖点和专业分析
+#[tauri::command]
+pub async fn predict_with_professional_strategy(request: CandlePredictionRequest) -> Result<ProfessionalPredictionResponse, String> {
+    let (prediction_response, professional_analysis) = 
+        crate::stock_prediction::prediction::predict_with_professional_strategy(request).await?;
+    
+    Ok(ProfessionalPredictionResponse {
+        predictions: prediction_response,
+        professional_analysis,
+    })
+}
+
+/// 专业预测响应结构（用于序列化）
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProfessionalPredictionResponse {
+    pub predictions: PredictionResponse,
+    pub professional_analysis: ProfessionalPrediction,
 } 

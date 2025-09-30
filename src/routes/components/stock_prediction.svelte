@@ -141,11 +141,67 @@
         };
     }
     
+    // 新增：买卖点信号接口
+    interface BuySellPoint {
+        point_type: string;
+        signal_strength: number;
+        price_level: number;
+        stop_loss: number;
+        take_profit: number[];
+        risk_reward_ratio: number;
+        reasons: string[];
+        confidence: number;
+    }
+    
+    // 新增：支撑压力位接口
+    interface SupportResistance {
+        support_levels: number[];
+        resistance_levels: number[];
+        current_position: string;
+    }
+    
+    // 新增：多周期共振接口
+    interface MultiTimeframeSignalProf {
+        daily_trend: string;
+        weekly_trend: string;
+        monthly_trend: string;
+        resonance_level: number;
+        resonance_direction: string;
+        signal_quality: number;
+    }
+    
+    // 新增：量价背离接口
+    interface VolumePriceDivergence {
+        has_bullish_divergence: boolean;
+        has_bearish_divergence: boolean;
+        divergence_strength: number;
+        warning_message: string;
+    }
+    
+    // 新增：专业预测分析接口
+    interface ProfessionalPrediction {
+        buy_points: BuySellPoint[];
+        sell_points: BuySellPoint[];
+        support_resistance: SupportResistance;
+        multi_timeframe: MultiTimeframeSignalProf;
+        divergence: VolumePriceDivergence;
+        current_advice: string;
+        risk_level: string;
+    }
+    
+    // 新增：专业预测响应接口
+    interface ProfessionalPredictionResponse {
+        predictions: PredictionResult;
+        professional_analysis: ProfessionalPrediction;
+    }
+    
     // 使用类型
     let modelList: ModelInfo[] = [];
     let predictions: Prediction[] = [];
     let modelAccuracy: number | null = null;
     let lastRealData: LastRealData | null = null; // 新增：最新真实数据
+    let professionalAnalysis: ProfessionalPrediction | null = null; // 新增：专业分析结果
+    let showProfessionalAnalysis = false; // 是否显示专业分析
     
     // 模型训练参数
     let newModelName = "模型-" + new Date().toISOString().slice(0, 10);
@@ -364,6 +420,7 @@
         isPredicting = true;
         errorMessage = "";
         predictionChart = null; // 重置图表数据
+        showProfessionalAnalysis = false; // 重置专业分析显示
         
         try {
             const request = {
@@ -411,6 +468,78 @@
             errorMessage = `预测失败: ${error}`;
             predictions = [];
             lastRealData = null;
+            predictionChart = null;
+        } finally {
+            isPredicting = false;
+        }
+    }
+    
+    // 新增：使用专业策略预测
+    async function predictWithProfessionalStrategy() {
+        if (!stockCode) {
+            errorMessage = "请先输入股票代码";
+            return;
+        }
+        
+        if (!selectedModelName && useExistingModel) {
+            errorMessage = "请先选择模型或训练新模型";
+            return;
+        }
+        
+        isPredicting = true;
+        errorMessage = "";
+        predictionChart = null;
+        professionalAnalysis = null;
+        showProfessionalAnalysis = false;
+        
+        try {
+            const request = {
+                stock_code: stockCode,
+                model_name: useExistingModel ? selectedModelName : null,
+                prediction_days: daysToPredict,
+                use_candle: true
+            };
+            
+            console.log("发送专业预测请求:", request);
+            const result = await invoke<ProfessionalPredictionResponse>('predict_with_professional_strategy', { request });
+            console.log("收到专业预测结果:", result);
+            
+            if (result) {
+                // 提取预测数据
+                if (result.predictions) {
+                    if (Array.isArray(result.predictions)) {
+                        predictions = result.predictions;
+                    } else if ('predictions' in result.predictions && Array.isArray(result.predictions.predictions)) {
+                        predictions = result.predictions.predictions;
+                        if (result.predictions.last_real_data) {
+                            lastRealData = {
+                                date: result.predictions.last_real_data.date,
+                                price: result.predictions.last_real_data.price,
+                                change_percent: result.predictions.last_real_data.change_percent
+                            };
+                        }
+                    }
+                }
+                
+                // 提取专业分析结果
+                if (result.professional_analysis) {
+                    professionalAnalysis = result.professional_analysis;
+                    showProfessionalAnalysis = true;
+                    console.log("专业分析结果:", professionalAnalysis);
+                }
+                
+                // 生成图表数据
+                if (predictions && predictions.length > 0) {
+                    generatePredictionChart(predictions);
+                }
+            }
+            
+        } catch (error) {
+            console.error("专业预测失败:", error);
+            errorMessage = `专业预测失败: ${error}`;
+            predictions = [];
+            lastRealData = null;
+            professionalAnalysis = null;
             predictionChart = null;
         } finally {
             isPredicting = false;
@@ -608,7 +737,20 @@
                     {#if isPredicting}
                         <span class="spinner"></span>
                     {:else}
-                        开始预测
+                        快速预测
+                    {/if}
+                </button>
+                
+                <button
+                    on:click={predictWithProfessionalStrategy}
+                    class:loading={isPredicting}
+                    disabled={isPredicting || modelList.length === 0}
+                    style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);"
+                >
+                    {#if isPredicting}
+                        <span class="spinner"></span>
+                    {:else}
+                        💎 金融级预测
                     {/if}
                 </button>
             </div>
@@ -1184,6 +1326,219 @@
                         <div class="real-data-price">{lastRealData.price.toFixed(2)}</div>
                         <div class="real-data-change {lastRealData.change_percent >= 0 ? 'price-up' : 'price-down'}">
                             {lastRealData.change_percent >= 0 ? '+' : ''}{lastRealData.change_percent.toFixed(2)}%
+                        </div>
+                    </div>
+                </div>
+            {/if}
+            
+            <!-- 新增：专业分析结果展示 -->
+            {#if showProfessionalAnalysis && professionalAnalysis}
+                <div class="professional-analysis">
+                    <h3>🎯 金融级策略分析</h3>
+                    
+                    <!-- 操作建议 -->
+                    <div class="advice-card">
+                        <div class="advice-content">
+                            <strong>操作建议：</strong>{professionalAnalysis.current_advice}
+                        </div>
+                        <div class="risk-indicator">
+                            <strong>风险等级：</strong>
+                            <span class="risk-level {professionalAnalysis.risk_level.includes('低') ? 'low' : professionalAnalysis.risk_level.includes('高') ? 'high' : 'medium'}">
+                                {professionalAnalysis.risk_level}
+                            </span>
+                        </div>
+                    </div>
+                    
+                    <!-- 买入点信号 -->
+                    {#if professionalAnalysis.buy_points && professionalAnalysis.buy_points.length > 0}
+                        <div class="buy-sell-section buy-section">
+                            <h4>💚 买入点信号 ({professionalAnalysis.buy_points.length}个)</h4>
+                            <div class="signals-grid">
+                                {#each professionalAnalysis.buy_points as buyPoint, index}
+                                    <div class="signal-card buy-card">
+                                        <div class="signal-header">
+                                            <span class="signal-type">{buyPoint.point_type}</span>
+                                            <span class="signal-strength">强度: {buyPoint.signal_strength.toFixed(0)}分</span>
+                                        </div>
+                                        <div class="signal-body">
+                                            <div class="signal-row">
+                                                <span class="label">💵 建议买入价:</span>
+                                                <span class="value price-value">{buyPoint.price_level.toFixed(2)}元</span>
+                                            </div>
+                                            <div class="signal-row">
+                                                <span class="label">🛡️ 止损位(跌至卖出):</span>
+                                                <span class="value stop-loss">{buyPoint.stop_loss.toFixed(2)}元 (↓{Math.abs((buyPoint.stop_loss - buyPoint.price_level) / buyPoint.price_level * 100).toFixed(2)}%)</span>
+                                            </div>
+                                            <div class="signal-row">
+                                                <span class="label">🎯 止盈位(涨至卖出):</span>
+                                                <span class="value take-profit">
+                                                    {#each buyPoint.take_profit as tp, i}
+                                                        {tp.toFixed(2)}元(↑{((tp - buyPoint.price_level) / buyPoint.price_level * 100).toFixed(2)}%)
+                                                        {#if i < buyPoint.take_profit.length - 1}, {/if}
+                                                    {/each}
+                                                </span>
+                                            </div>
+                                            <div class="signal-row">
+                                                <span class="label">风险收益比:</span>
+                                                <span class="value ratio">1:{buyPoint.risk_reward_ratio.toFixed(2)}</span>
+                                            </div>
+                                            <div class="signal-row">
+                                                <span class="label">置信度:</span>
+                                                <span class="value confidence">{(buyPoint.confidence * 100).toFixed(0)}%</span>
+                                            </div>
+                                            <div class="signal-reasons">
+                                                <strong>理由：</strong>
+                                                <ul>
+                                                    {#each buyPoint.reasons as reason}
+                                                        <li>{reason}</li>
+                                                    {/each}
+                                                </ul>
+                                            </div>
+                                        </div>
+                                    </div>
+                                {/each}
+                            </div>
+                        </div>
+                    {:else}
+                        <div class="no-signal-card">
+                            <p>🟡 当前无明确买入信号，建议观望等待更好机会</p>
+                        </div>
+                    {/if}
+                    
+                    <!-- 卖出点信号 -->
+                    {#if professionalAnalysis.sell_points && professionalAnalysis.sell_points.length > 0}
+                        <div class="buy-sell-section sell-section">
+                            <h4>🔴 卖出点信号 ({professionalAnalysis.sell_points.length}个)</h4>
+                            <div class="signals-grid">
+                                {#each professionalAnalysis.sell_points as sellPoint, index}
+                                    <div class="signal-card sell-card">
+                                        <div class="signal-header">
+                                            <span class="signal-type">{sellPoint.point_type}</span>
+                                            <span class="signal-strength">强度: {sellPoint.signal_strength.toFixed(0)}分</span>
+                                        </div>
+                                        <div class="signal-body">
+                                            <div class="signal-row">
+                                                <span class="label">💰 建议卖出价:</span>
+                                                <span class="value price-value">{sellPoint.price_level.toFixed(2)}元</span>
+                                            </div>
+                                            <div class="signal-row">
+                                                <span class="label">🛡️ 止损位(跌至卖出):</span>
+                                                <span class="value stop-loss">{sellPoint.stop_loss.toFixed(2)}元 (↓{Math.abs((sellPoint.stop_loss - sellPoint.price_level) / sellPoint.price_level * 100).toFixed(2)}%)</span>
+                                            </div>
+                                            <div class="signal-row">
+                                                <span class="label">🎯 止盈位(涨至卖出):</span>
+                                                <span class="value take-profit">
+                                                    {#each sellPoint.take_profit as tp, i}
+                                                        {tp.toFixed(2)}元(↑{((tp - sellPoint.price_level) / sellPoint.price_level * 100).toFixed(2)}%)
+                                                        {#if i < sellPoint.take_profit.length - 1}, {/if}
+                                                    {/each}
+                                                </span>
+                                            </div>
+                                            <div class="signal-row">
+                                                <span class="label">置信度:</span>
+                                                <span class="value confidence">{(sellPoint.confidence * 100).toFixed(0)}%</span>
+                                            </div>
+                                            <div class="signal-reasons">
+                                                <strong>理由：</strong>
+                                                <ul>
+                                                    {#each sellPoint.reasons as reason}
+                                                        <li>{reason}</li>
+                                                    {/each}
+                                                </ul>
+                                            </div>
+                                        </div>
+                                    </div>
+                                {/each}
+                            </div>
+                        </div>
+                    {:else}
+                        <div class="no-signal-card">
+                            <p>🟡 当前无明确卖出信号</p>
+                        </div>
+                    {/if}
+                    
+                    <!-- 支撑压力位 -->
+                    <div class="support-resistance-section">
+                        <h4>📍 支撑压力位分析</h4>
+                        <div class="sr-content">
+                            <div class="sr-position">
+                                当前位置: <strong>{professionalAnalysis.support_resistance.current_position}</strong>
+                            </div>
+                            <div class="sr-levels">
+                                {#if professionalAnalysis.support_resistance.support_levels.length > 0}
+                                    <div class="sr-group support-group">
+                                        <h5>🟢 关键支撑位</h5>
+                                        <ul>
+                                            {#each professionalAnalysis.support_resistance.support_levels as level, i}
+                                                <li>{i + 1}. {level.toFixed(2)}元</li>
+                                            {/each}
+                                        </ul>
+                                    </div>
+                                {/if}
+                                {#if professionalAnalysis.support_resistance.resistance_levels.length > 0}
+                                    <div class="sr-group resistance-group">
+                                        <h5>🔴 关键压力位</h5>
+                                        <ul>
+                                            {#each professionalAnalysis.support_resistance.resistance_levels as level, i}
+                                                <li>{i + 1}. {level.toFixed(2)}元</li>
+                                            {/each}
+                                        </ul>
+                                    </div>
+                                {/if}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 多周期共振 -->
+                    <div class="multi-timeframe-section">
+                        <h4>🔄 多周期共振分析</h4>
+                        <div class="mtf-grid">
+                            <div class="mtf-item">
+                                <span class="mtf-label">日线:</span>
+                                <span class="mtf-value">{professionalAnalysis.multi_timeframe.daily_trend}</span>
+                            </div>
+                            <div class="mtf-item">
+                                <span class="mtf-label">周线:</span>
+                                <span class="mtf-value">{professionalAnalysis.multi_timeframe.weekly_trend}</span>
+                            </div>
+                            <div class="mtf-item">
+                                <span class="mtf-label">月线:</span>
+                                <span class="mtf-value">{professionalAnalysis.multi_timeframe.monthly_trend}</span>
+                            </div>
+                            <div class="mtf-item">
+                                <span class="mtf-label">共振级别:</span>
+                                <span class="mtf-value resonance-level">{professionalAnalysis.multi_timeframe.resonance_level}级</span>
+                            </div>
+                            <div class="mtf-item">
+                                <span class="mtf-label">共振方向:</span>
+                                <span class="mtf-value">{professionalAnalysis.multi_timeframe.resonance_direction}</span>
+                            </div>
+                            <div class="mtf-item">
+                                <span class="mtf-label">信号质量:</span>
+                                <span class="mtf-value quality-score">{professionalAnalysis.multi_timeframe.signal_quality.toFixed(0)}分</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 量价背离 -->
+                    <div class="divergence-section">
+                        <h4>⚠️ 量价背离分析</h4>
+                        <div class="divergence-content">
+                            <div class="divergence-indicators">
+                                {#if professionalAnalysis.divergence.has_bullish_divergence}
+                                    <div class="divergence-badge bullish">
+                                        🟢 底背离 (强度: {(professionalAnalysis.divergence.divergence_strength * 100).toFixed(0)}%)
+                                    </div>
+                                {/if}
+                                {#if professionalAnalysis.divergence.has_bearish_divergence}
+                                    <div class="divergence-badge bearish">
+                                        🔴 顶背离 (强度: {(professionalAnalysis.divergence.divergence_strength * 100).toFixed(0)}%)
+                                    </div>
+                                {/if}
+                            </div>
+                            <div class="divergence-message">
+                                💡 {professionalAnalysis.divergence.warning_message}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -2355,5 +2710,326 @@
     .details-row td {
         background: rgba(255, 255, 255, 0.03);
         padding: 0;
+    }
+    
+    /* ==================== 专业分析样式 ==================== */
+    .professional-analysis {
+        margin: 2rem 0;
+        padding: 1.5rem;
+        background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%);
+        border: 1px solid rgba(102, 126, 234, 0.3);
+        border-radius: 1rem;
+    }
+    
+    .professional-analysis h3 {
+        margin-top: 0;
+        margin-bottom: 1.5rem;
+        font-size: 1.5rem;
+        text-align: center;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }
+    
+    .advice-card {
+        background: rgba(0, 0, 0, 0.3);
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin-bottom: 1.5rem;
+        border-left: 4px solid #667eea;
+    }
+    
+    .advice-content {
+        margin-bottom: 0.5rem;
+        font-size: 1.1rem;
+    }
+    
+    .risk-indicator {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    
+    .risk-level {
+        padding: 0.25rem 0.75rem;
+        border-radius: 0.25rem;
+        font-weight: bold;
+    }
+    
+    .risk-level.low {
+        background: rgba(16, 185, 129, 0.2);
+        color: #10b981;
+        border: 1px solid #10b981;
+    }
+    
+    .risk-level.medium {
+        background: rgba(251, 191, 36, 0.2);
+        color: #fbbf24;
+        border: 1px solid #fbbf24;
+    }
+    
+    .risk-level.high {
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+        border: 1px solid #ef4444;
+    }
+    
+    .buy-sell-section {
+        margin: 1.5rem 0;
+    }
+    
+    .buy-sell-section h4 {
+        margin-bottom: 1rem;
+        font-size: 1.2rem;
+    }
+    
+    .signals-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+        gap: 1rem;
+    }
+    
+    .signal-card {
+        background: rgba(0, 0, 0, 0.3);
+        border-radius: 0.5rem;
+        overflow: hidden;
+        border: 2px solid;
+    }
+    
+    .buy-card {
+        border-color: #10b981;
+    }
+    
+    .sell-card {
+        border-color: #ef4444;
+    }
+    
+    .signal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.75rem 1rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    .buy-card .signal-header {
+        background: rgba(16, 185, 129, 0.1);
+    }
+    
+    .sell-card .signal-header {
+        background: rgba(239, 68, 68, 0.1);
+    }
+    
+    .signal-type {
+        font-weight: bold;
+        font-size: 1.1rem;
+    }
+    
+    .signal-strength {
+        background: rgba(255, 255, 255, 0.1);
+        padding: 0.25rem 0.75rem;
+        border-radius: 0.25rem;
+        font-size: 0.9rem;
+    }
+    
+    .signal-body {
+        padding: 1rem;
+    }
+    
+    .signal-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.5rem 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    
+    .signal-row:last-child {
+        border-bottom: none;
+    }
+    
+    .signal-row .label {
+        color: rgba(255, 255, 255, 0.7);
+        font-size: 0.9rem;
+    }
+    
+    .signal-row .value {
+        font-weight: 600;
+        font-size: 1rem;
+    }
+    
+    .signal-row .price-value {
+        color: #fbbf24;
+        font-size: 1.1rem;
+    }
+    
+    .signal-row .stop-loss {
+        color: #10b981;  /* 止损(下跌)用绿色 - 符合中国股市习惯 */
+    }
+    
+    .signal-row .take-profit {
+        color: #ef4444;  /* 止盈(上涨)用红色 - 符合中国股市习惯 */
+    }
+    
+    .signal-row .ratio {
+        color: #667eea;
+    }
+    
+    .signal-row .confidence {
+        color: #34d399;
+    }
+    
+    .signal-reasons {
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    .signal-reasons ul {
+        margin: 0.5rem 0 0 0;
+        padding-left: 1.5rem;
+        font-size: 0.9rem;
+        color: rgba(255, 255, 255, 0.8);
+    }
+    
+    .signal-reasons li {
+        margin: 0.25rem 0;
+    }
+    
+    .no-signal-card {
+        background: rgba(251, 191, 36, 0.1);
+        border: 1px solid rgba(251, 191, 36, 0.3);
+        border-radius: 0.5rem;
+        padding: 1rem;
+        text-align: center;
+        margin: 1rem 0;
+    }
+    
+    .support-resistance-section,
+    .multi-timeframe-section,
+    .divergence-section {
+        margin: 1.5rem 0;
+        padding: 1rem;
+        background: rgba(0, 0, 0, 0.2);
+        border-radius: 0.5rem;
+    }
+    
+    .support-resistance-section h4,
+    .multi-timeframe-section h4,
+    .divergence-section h4 {
+        margin-top: 0;
+        margin-bottom: 1rem;
+    }
+    
+    .sr-position {
+        margin-bottom: 1rem;
+        padding: 0.75rem;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 0.25rem;
+        text-align: center;
+    }
+    
+    .sr-levels {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem;
+    }
+    
+    .sr-group h5 {
+        margin-top: 0;
+        margin-bottom: 0.5rem;
+    }
+    
+    .sr-group ul {
+        margin: 0;
+        padding-left: 1.5rem;
+        font-size: 0.9rem;
+    }
+    
+    .sr-group li {
+        margin: 0.25rem 0;
+    }
+    
+    .support-group {
+        border-left: 3px solid #10b981;
+        padding-left: 0.75rem;
+    }
+    
+    .resistance-group {
+        border-left: 3px solid #ef4444;
+        padding-left: 0.75rem;
+    }
+    
+    .mtf-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 0.75rem;
+    }
+    
+    .mtf-item {
+        padding: 0.75rem;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 0.25rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+    }
+    
+    .mtf-label {
+        font-size: 0.85rem;
+        color: rgba(255, 255, 255, 0.7);
+    }
+    
+    .mtf-value {
+        font-weight: bold;
+        font-size: 1rem;
+    }
+    
+    .mtf-value.resonance-level {
+        color: #667eea;
+        font-size: 1.2rem;
+    }
+    
+    .mtf-value.quality-score {
+        color: #10b981;
+        font-size: 1.2rem;
+    }
+    
+    .divergence-content {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+    }
+    
+    .divergence-indicators {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+    
+    .divergence-badge {
+        padding: 0.5rem 1rem;
+        border-radius: 0.5rem;
+        font-weight: bold;
+        border: 2px solid;
+    }
+    
+    .divergence-badge.bullish {
+        background: rgba(16, 185, 129, 0.1);
+        border-color: #10b981;
+        color: #10b981;
+    }
+    
+    .divergence-badge.bearish {
+        background: rgba(239, 68, 68, 0.1);
+        border-color: #ef4444;
+        color: #ef4444;
+    }
+    
+    .divergence-message {
+        padding: 0.75rem;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 0.25rem;
+        border-left: 3px solid #fbbf24;
     }
 </style>
