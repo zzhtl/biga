@@ -92,6 +92,7 @@ impl DeepStockPredictor {
     }
     
     /// 设置训练/评估模式
+    #[allow(dead_code)]
     fn set_training(&mut self, training: bool) {
         self.training = training;
     }

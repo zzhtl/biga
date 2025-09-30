@@ -76,39 +76,40 @@ pub fn score_trend_factor(
     let mut score: f64 = 50.0; // 基准分
     let mut reasons: Vec<String> = Vec::new();
     
-    // 均线多头排列：+30分
+    // 均线多头排列：+25分 (降低避免超过100)
     if ma5 > ma10 && ma10 > ma20 && ma20 > ma60 {
-        score += 30.0;
+        score += 25.0;
         reasons.push("均线多头排列".to_string());
     }
-    // 均线空头排列：-30分
+    // 均线空头排列：-25分
     else if ma5 < ma10 && ma10 < ma20 && ma20 < ma60 {
-        score -= 30.0;
+        score -= 25.0;
         reasons.push("均线空头排列".to_string());
     }
     
-    // 价格位于均线之上：+15分
+    // 价格位于均线之上：+12分 (降低)
     if current_price > ma5 && current_price > ma20 {
-        score += 15.0;
+        score += 12.0;
         reasons.push("价格位于主要均线之上".to_string());
     }
-    // 价格位于均线之下：-15分
+    // 价格位于均线之下：-12分
     else if current_price < ma5 && current_price < ma20 {
-        score -= 15.0;
+        score -= 12.0;
         reasons.push("价格位于主要均线之下".to_string());
     }
     
-    // 短期均线向上发散：+10分
+    // 短期均线向上发散：+8分 (降低)
     let ma5_slope = (ma5 - ma10) / ma10;
     if ma5_slope > 0.02 {
-        score += 10.0;
+        score += 8.0;
         reasons.push("短期均线向上发散".to_string());
     } else if ma5_slope < -0.02 {
-        score -= 10.0;
+        score -= 8.0;
         reasons.push("短期均线向下发散".to_string());
     }
     
-    score = score.max(0.0).min(100.0);
+    // 严格限制在5-95分范围
+    score = score.clamp(5.0, 95.0);
     
     let status = if score >= 75.0 {
         FactorStatus::VeryBullish
@@ -125,7 +126,7 @@ pub fn score_trend_factor(
     FactorScore {
         name: "趋势因子".to_string(),
         score,
-        weight: 0.25,
+        weight: 0.22, // 调整为22%
         description: reasons.join("; "),
         status,
     }
@@ -141,43 +142,44 @@ pub fn score_volume_factor(
     let mut score: f64 = 50.0;
     let mut reasons: Vec<String> = Vec::new();
     
-    // 量价配合：+20分
+    // 量价配合：+15分 (降低避免超标)
     if volume_price_sync {
-        score += 20.0;
+        score += 15.0;
         reasons.push("量价配合良好".to_string());
     } else {
         score -= 15.0;
         reasons.push("量价背离".to_string());
     }
     
-    // OBV趋势：±15分
+    // OBV趋势：±12分 (降低)
     if obv_trend.contains("上升") {
-        score += 15.0;
+        score += 12.0;
         reasons.push("OBV上升趋势".to_string());
     } else if obv_trend.contains("下降") {
-        score -= 15.0;
+        score -= 12.0;
         reasons.push("OBV下降趋势".to_string());
     }
     
-    // 吸筹信号：最高+20分
+    // 吸筹信号：最高+15分 (降低)
     if accumulation_signal > 70.0 {
-        score += 20.0;
+        score += 15.0;
         reasons.push("强烈吸筹信号".to_string());
     } else if accumulation_signal > 50.0 {
-        score += 10.0;
+        score += 8.0;
         reasons.push("检测到吸筹".to_string());
     }
     
-    // 量能趋势：±10分
+    // 量能趋势：±8分 (降低)
     if volume_trend == "放量" {
-        score += 10.0;
+        score += 8.0;
         reasons.push("成交量放大".to_string());
     } else if volume_trend == "缩量" {
         score -= 5.0;
         reasons.push("成交量萎缩".to_string());
     }
     
-    score = score.max(0.0).min(100.0);
+    // 严格限制在5-95分范围
+    score = score.clamp(5.0, 95.0);
     
     let status = if score >= 75.0 {
         FactorStatus::VeryBullish
@@ -194,7 +196,7 @@ pub fn score_volume_factor(
     FactorScore {
         name: "量价因子".to_string(),
         score,
-        weight: 0.20,
+        weight: 0.18, // 调整为18%
         description: reasons.join("; "),
         status,
     }
@@ -252,7 +254,7 @@ pub fn score_pattern_factor(patterns: &[PatternRecognition]) -> FactorScore {
     FactorScore {
         name: "形态因子".to_string(),
         score,
-        weight: 0.15,
+        weight: 0.12, // 调整为12%
         description: if reasons.is_empty() { 
             "无明显形态".to_string() 
         } else { 
@@ -329,7 +331,7 @@ pub fn score_momentum_factor(
     FactorScore {
         name: "动量因子".to_string(),
         score,
-        weight: 0.15,
+        weight: 0.13, // 调整为13%
         description: reasons.join("; "),
         status,
     }
@@ -470,6 +472,181 @@ pub fn score_multi_timeframe_factor(
             reasons.join("; ") 
         },
         status,
+    }
+}
+
+/// 市场情绪因子评分
+pub fn score_sentiment_factor(
+    sentiment_score: f64,
+    fear_greed_index: f64,
+    market_phase: &str,
+) -> FactorScore {
+    let mut score = sentiment_score; // 直接使用情绪得分
+    let mut reasons = Vec::new();
+    
+    reasons.push(format!("市场阶段: {}", market_phase));
+    
+    // 根据恐惧贪婪指数调整
+    if fear_greed_index > 75.0 {
+        reasons.push("极度贪婪,警惕回调风险".to_string());
+        score = (score * 0.8).min(70.0); // 限制最高得分,避免追高
+    } else if fear_greed_index < 25.0 {
+        reasons.push("极度恐惧,可能是机会".to_string());
+        score = (score + 10.0).min(75.0); // 恐慌时反而加分(逆向思维)
+    }
+    
+    let status = if score >= 75.0 {
+        FactorStatus::VeryBullish
+    } else if score >= 60.0 {
+        FactorStatus::Bullish
+    } else if score >= 40.0 {
+        FactorStatus::Neutral
+    } else if score >= 25.0 {
+        FactorStatus::Bearish
+    } else {
+        FactorStatus::VeryBearish
+    };
+    
+    FactorScore {
+        name: "市场情绪".to_string(),
+        score,
+        weight: 0.07, // 调整为7% (辅助指标,降低权重避免噪音)
+        description: reasons.join("; "),
+        status,
+    }
+}
+
+/// 波动率因子评分
+pub fn score_volatility_factor(
+    atr: f64,
+    current_price: f64,
+) -> FactorScore {
+    let mut score: f64 = 50.0;
+    let mut reasons: Vec<String> = Vec::new();
+    
+    // 计算波动率百分比
+    let volatility_pct = (atr / current_price) * 100.0;
+    
+    // 金融逻辑: 
+    // - 低波动(< 1.5%): 市场稳定,适合持仓 = +15分
+    // - 中等波动(1.5-3%): 正常波动 = 0分
+    // - 高波动(> 3%): 风险增加 = -15分
+    // - 极高波动(> 5%): 极端风险 = -25分
+    
+    if volatility_pct < 1.0 {
+        score += 20.0;
+        reasons.push(format!("极低波动({:.2}%),市场平稳", volatility_pct));
+    } else if volatility_pct < 1.5 {
+        score += 10.0;
+        reasons.push(format!("低波动({:.2}%),适合持仓", volatility_pct));
+    } else if volatility_pct < 3.0 {
+        reasons.push(format!("中等波动({:.2}%),正常范围", volatility_pct));
+    } else if volatility_pct < 5.0 {
+        score -= 15.0;
+        reasons.push(format!("高波动({:.2}%),注意风险", volatility_pct));
+    } else {
+        score -= 25.0;
+        reasons.push(format!("极高波动({:.2}%),极端风险", volatility_pct));
+    }
+    
+    score = score.clamp(0.0, 100.0);
+    
+    let status = if score >= 70.0 {
+        FactorStatus::Bullish
+    } else if score >= 50.0 {
+        FactorStatus::Neutral
+    } else if score >= 30.0 {
+        FactorStatus::Bearish
+    } else {
+        FactorStatus::VeryBearish
+    };
+    
+    FactorScore {
+        name: "波动率".to_string(),
+        score,
+        weight: 0.03, // 调整为3% (辅助指标,降低权重)
+        description: reasons.join("; "),
+        status,
+    }
+}
+
+/// 智能权重调整 - 根据市场环境动态调整各因子权重
+/// 金融逻辑: 
+/// - 强趋势市场: 趋势因子和多周期共振权重增加
+/// - 震荡市场: 支撑压力和形态因子权重增加
+/// - 高波动市场: 降低所有因子权重,提高风险意识
+/// 
+/// v2修正: 降低调整幅度,避免权重失衡
+pub fn adjust_factor_weights(
+    factors: &mut [FactorScore],
+    market_phase: &str,
+    volatility_pct: f64,
+    adx: f64, // ADX趋势强度指标
+) {
+    // 根据ADX调整权重 (降低调整幅度)
+    let trend_multiplier = if adx > 40.0 {
+        1.15 // 强趋势,趋势因子权重+15% (原1.3,降低)
+    } else if adx > 25.0 {
+        1.08 // 中等趋势,权重+8% (原1.15,降低)
+    } else {
+        0.92 // 弱趋势/震荡,权重-8% (原0.85,缓和)
+    };
+    
+    // 根据市场阶段调整 (降低调整幅度)
+    let phase_adjustments: std::collections::HashMap<&str, Vec<(&str, f64)>> = [
+        ("过热期-注意风险", vec![("情绪", 1.1), ("波动率", 1.15), ("趋势", 0.95)]),
+        ("上升期", vec![("趋势", 1.12), ("多周期", 1.12), ("动量", 1.08)]),
+        ("震荡期", vec![("支撑压力", 1.15), ("形态", 1.1), ("趋势", 0.90)]),
+        ("下跌期", vec![("波动率", 1.1), ("情绪", 1.08), ("支撑压力", 1.12)]),
+        ("恐慌期-机会期", vec![("情绪", 1.15), ("支撑压力", 1.15), ("波动率", 1.1)]),
+    ].iter().cloned().collect();
+    
+    // 应用调整
+    for factor in factors.iter_mut() {
+        let factor_name = factor.name.as_str();
+        
+        // ADX趋势调整
+        if factor_name == "趋势因子" || factor_name == "多周期共振" {
+            factor.weight *= trend_multiplier;
+        } else if factor_name == "支撑压力" || factor_name == "形态因子" {
+            factor.weight *= 2.0 - trend_multiplier; // 反向调整
+        }
+        
+        // 市场阶段调整
+        if let Some(adjustments) = phase_adjustments.get(market_phase) {
+            for (name_keyword, multiplier) in adjustments {
+                if factor_name.contains(name_keyword) {
+                    factor.weight *= multiplier;
+                }
+            }
+        }
+        
+        // 高波动惩罚 - 所有因子权重下降 (降低惩罚力度)
+        if volatility_pct > 5.0 {
+            factor.weight *= 0.90; // 极高波动,权重-10% (原-15%)
+        } else if volatility_pct > 3.0 {
+            factor.weight *= 0.95; // 高波动,权重-5% (原-8%)
+        }
+    }
+    
+    // 权重归一化
+    let total_weight: f64 = factors.iter().map(|f| f.weight).sum();
+    if total_weight > 0.0 {
+        for factor in factors.iter_mut() {
+            factor.weight /= total_weight;
+            
+            // ⭐ 关键修正: 设置权重上下限,避免极端情况
+            // 单个因子权重不超过30%,不低于2%
+            factor.weight = factor.weight.clamp(0.02, 0.30);
+        }
+    }
+    
+    // 再次归一化,确保总和为1.0
+    let final_total: f64 = factors.iter().map(|f| f.weight).sum();
+    if final_total > 0.0 {
+        for factor in factors.iter_mut() {
+            factor.weight /= final_total;
+        }
     }
 }
 

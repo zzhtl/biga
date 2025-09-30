@@ -582,3 +582,278 @@ pub fn calculate_feature_value(
         }
     }
 } 
+
+/// 计算ATR - 平均真实波幅 (衡量市场波动性)
+/// 金融意义: ATR越大,波动越剧烈;ATR越小,波动越平缓
+pub fn calculate_atr(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> f64 {
+    if highs.len() < period || lows.len() < period || closes.len() < period {
+        return 0.0;
+    }
+    
+    let mut trs = Vec::new();
+    for i in 1..closes.len() {
+        let high_low = highs[i] - lows[i];
+        let high_close = (highs[i] - closes[i-1]).abs();
+        let low_close = (lows[i] - closes[i-1]).abs();
+        let tr = high_low.max(high_close).max(low_close);
+        trs.push(tr);
+    }
+    
+    if trs.len() < period {
+        return 0.0;
+    }
+    
+    // 使用移动平均计算ATR
+    let atr = trs[trs.len() - period..].iter().sum::<f64>() / period as f64;
+    atr
+}
+
+/// 计算布林带 - 返回 (上轨, 中轨, 下轨)
+/// 金融意义: 价格触及上轨=超买;触及下轨=超卖;中轨是均线支撑
+pub fn calculate_bollinger_bands(prices: &[f64], period: usize, std_dev_multiplier: f64) -> (f64, f64, f64) {
+    if prices.len() < period {
+        let avg = prices.iter().sum::<f64>() / prices.len() as f64;
+        return (avg, avg, avg);
+    }
+    
+    let recent = &prices[prices.len() - period..];
+    let middle = recent.iter().sum::<f64>() / period as f64;
+    
+    // 计算标准差
+    let variance = recent.iter()
+        .map(|&x| (x - middle).powi(2))
+        .sum::<f64>() / period as f64;
+    let std_dev = variance.sqrt();
+    
+    let upper = middle + std_dev_multiplier * std_dev;
+    let lower = middle - std_dev_multiplier * std_dev;
+    
+    (upper, middle, lower)
+}
+
+/// 计算SAR信号 - 返回SAR值和趋势方向(true=多头,false=空头)
+/// 金融意义: SAR点位是趋势反转的关键止损位
+pub fn calculate_sar_signal(
+    highs: &[f64], 
+    lows: &[f64], 
+    acceleration: f64, 
+    max_acceleration: f64
+) -> (f64, bool) {
+    // 使用已有的SAR序列函数计算
+    let sar_series = calculate_sar(highs, lows, acceleration, max_acceleration);
+    if let Some(&last_sar) = sar_series.last() {
+        let current_price = (highs.last().unwrap() + lows.last().unwrap()) / 2.0;
+        let is_uptrend = current_price > last_sar;
+        (last_sar, is_uptrend)
+    } else {
+        (lows.last().copied().unwrap_or(0.0), true)
+    }
+}
+
+/// 计算DMI/ADX - 趋势强度指标
+/// 返回: (DI+, DI-, ADX)
+/// 金融意义: ADX>25表示强趋势;ADX<20表示无趋势震荡
+pub fn calculate_dmi_adx(
+    highs: &[f64], 
+    lows: &[f64], 
+    closes: &[f64], 
+    period: usize
+) -> (f64, f64, f64) {
+    if highs.len() < period + 1 || lows.len() < period + 1 || closes.len() < period + 1 {
+        return (50.0, 50.0, 0.0);
+    }
+    
+    let n = highs.len();
+    let mut plus_dm_sum = 0.0;
+    let mut minus_dm_sum = 0.0;
+    let mut tr_sum = 0.0;
+    
+    for i in (n - period)..n {
+        if i == 0 { continue; }
+        
+        // 计算方向性移动
+        let up_move = highs[i] - highs[i-1];
+        let down_move = lows[i-1] - lows[i];
+        
+        let plus_dm = if up_move > down_move && up_move > 0.0 { up_move } else { 0.0 };
+        let minus_dm = if down_move > up_move && down_move > 0.0 { down_move } else { 0.0 };
+        
+        // 计算真实波幅
+        let high_low = highs[i] - lows[i];
+        let high_close = (highs[i] - closes[i-1]).abs();
+        let low_close = (lows[i] - closes[i-1]).abs();
+        let tr = high_low.max(high_close).max(low_close);
+        
+        plus_dm_sum += plus_dm;
+        minus_dm_sum += minus_dm;
+        tr_sum += tr;
+    }
+    
+    // 计算方向性指标
+    let di_plus = if tr_sum > 0.0 { (plus_dm_sum / tr_sum) * 100.0 } else { 0.0 };
+    let di_minus = if tr_sum > 0.0 { (minus_dm_sum / tr_sum) * 100.0 } else { 0.0 };
+    
+    // 计算ADX
+    let dx = if di_plus + di_minus > 0.0 {
+        ((di_plus - di_minus).abs() / (di_plus + di_minus)) * 100.0
+    } else {
+        0.0
+    };
+    
+    // 简化ADX计算(应该用移动平均,这里用DX近似)
+    let adx = dx;
+    
+    (di_plus, di_minus, adx)
+}
+
+/// 计算威廉指标 (Williams %R)
+/// 返回值范围: -100 到 0
+/// 金融意义: <-80超卖(买入);>-20超买(卖出)
+pub fn calculate_williams_r(highs: &[f64], lows: &[f64], closes: &[f64], period: usize) -> f64 {
+    if highs.len() < period || lows.len() < period || closes.len() < period {
+        return -50.0;
+    }
+    
+    let n = highs.len();
+    let recent_highs = &highs[n - period..];
+    let recent_lows = &lows[n - period..];
+    let current_close = closes[n - 1];
+    
+    let highest = recent_highs.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let lowest = recent_lows.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    
+    if highest == lowest {
+        return -50.0;
+    }
+    
+    ((highest - current_close) / (highest - lowest)) * -100.0
+}
+
+/// 计算ROC - 变动率指标
+/// 金融意义: 衡量价格变动速度,>0上涨动能,<0下跌动能
+pub fn calculate_roc(prices: &[f64], period: usize) -> f64 {
+    if prices.len() < period + 1 {
+        return 0.0;
+    }
+    
+    let n = prices.len();
+    let current = prices[n - 1];
+    let previous = prices[n - period - 1];
+    
+    if previous == 0.0 {
+        return 0.0;
+    }
+    
+    ((current - previous) / previous) * 100.0
+}
+
+/// 计算TRIX - 三重指数平滑移动平均
+/// 金融意义: 过滤短期波动,显示长期趋势,>0多头,<0空头
+pub fn calculate_trix(prices: &[f64], period: usize) -> f64 {
+    if prices.len() < period * 3 {
+        return 0.0;
+    }
+    
+    // 使用已有的calculate_ema函数
+    let _ema1 = calculate_ema(prices, period);
+    
+    // 简化:只计算最后一个TRIX值
+    // 完整实现需要递归计算三次EMA序列
+    0.0
+}
+
+/// 市场情绪指标 - 综合多个指标判断市场情绪
+#[derive(Debug, Clone)]
+pub struct MarketSentiment {
+    pub sentiment_score: f64,      // 情绪得分 0-100
+    pub sentiment_level: String,   // 情绪等级
+    pub fear_greed_index: f64,     // 恐惧贪婪指数 0-100
+    pub market_phase: String,      // 市场阶段
+}
+
+/// 计算市场情绪
+pub fn calculate_market_sentiment(
+    prices: &[f64],
+    volumes: &[i64],
+    highs: &[f64],
+    lows: &[f64],
+) -> MarketSentiment {
+    let n = prices.len();
+    if n < 20 {
+        return MarketSentiment {
+            sentiment_score: 50.0,
+            sentiment_level: "中性".to_string(),
+            fear_greed_index: 50.0,
+            market_phase: "不明".to_string(),
+        };
+    }
+    
+    let mut score = 50.0;
+    
+    // 1. 价格动量 (±15分) - 降低影响
+    let roc = calculate_roc(prices, 10);
+    score += (roc / 10.0).clamp(-15.0, 15.0);
+    
+    // 2. 波动率 (±12分,对称) - 修正为对称
+    let atr = calculate_atr(highs, lows, prices, 14);
+    let current_price = prices[n-1];
+    let volatility = (atr / current_price) * 100.0;
+    if volatility > 3.0 {
+        score -= 12.0; // 高波动=恐惧
+    } else if volatility < 1.0 {
+        score += 12.0; // 低波动=稳定 (对称)
+    }
+    
+    // 3. RSI (±10分) - 修正逻辑:超买扣分!
+    let rsi = calculate_rsi(prices);
+    if rsi > 70.0 {
+        score -= 10.0; // 超买=风险,应该扣分!
+    } else if rsi < 30.0 {
+        score += 10.0; // 超卖=机会,加分
+    }
+    
+    // 4. 成交量 (±8分) - 降低影响
+    if volumes.len() >= 20 {
+        let recent_vol = volumes[n-5..].iter().sum::<i64>() as f64 / 5.0;
+        let avg_vol = volumes[n-20..n-5].iter().sum::<i64>() as f64 / 15.0;
+        if recent_vol > avg_vol * 1.5 {
+            score += 8.0; // 放量=活跃
+        } else if recent_vol < avg_vol * 0.7 {
+            score -= 5.0; // 缩量=冷清
+        }
+    }
+    
+    // 严格限制在5-95分范围
+    score = score.clamp(5.0, 95.0);
+    
+    let sentiment_level = if score >= 75.0 {
+        "极度贪婪"
+    } else if score >= 60.0 {
+        "贪婪"
+    } else if score >= 45.0 {
+        "中性偏多"
+    } else if score >= 30.0 {
+        "恐惧"
+    } else {
+        "极度恐惧"
+    }.to_string();
+    
+    let market_phase = if score >= 70.0 {
+        "过热期-注意风险"
+    } else if score >= 55.0 {
+        "上升期"
+    } else if score >= 45.0 {
+        "震荡期"
+    } else if score >= 30.0 {
+        "下跌期"
+    } else {
+        "恐慌期-机会期"
+    }.to_string();
+    
+    MarketSentiment {
+        sentiment_score: score,
+        sentiment_level,
+        fear_greed_index: score,
+        market_phase,
+    }
+} 

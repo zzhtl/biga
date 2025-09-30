@@ -376,10 +376,7 @@ pub async fn analyze_multi_timeframe_prediction_value(symbol: String) -> Result<
 
 // ==================== 金融级预测策略命令 ====================
 
-use crate::stock_prediction::prediction::{
-    ProfessionalPrediction, BuySellPoint, SupportResistance, 
-    MultiTimeframeSignal as ProfMultiTimeframeSignal, VolumePriceDivergence
-};
+use crate::stock_prediction::prediction::ProfessionalPrediction;
 
 /// 金融级预测策略 - 提供买卖点和专业分析
 #[tauri::command]

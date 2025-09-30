@@ -959,7 +959,7 @@ pub async fn predict_with_candle(request: PredictionRequest) -> std::result::Res
         // 金融逻辑：市场总有波动，但波动是确定性的（基于历史数据）
         let market_fluctuation = {
             // 基于预测天数的确定性波动因子
-            let day_factor = ((day as f64 * 0.618).sin() * 0.5 + 0.5); // 0.0-1.0的确定性波动
+            let day_factor = (day as f64 * 0.618).sin() * 0.5 + 0.5; // 0.0-1.0的确定性波动
             noise_amplitude * (day_factor - 0.5) * 2.0 // 转换为±noise_amplitude范围
         };
         
@@ -1708,8 +1708,8 @@ pub async fn predict_with_professional_strategy(
         change_percent: current_change_percent,
     });
     
-    // 9. 多因子综合评分
-    println!("\n🎯 ========== 多因子综合评分 ==========");
+    // 9. 多因子综合评分 (增强版 - 加入市场情绪和波动率)
+    println!("\n🎯 ========== 多因子综合评分 (增强版) ==========");
     
     // 计算需要的技术指标
     let n = prices.len();
@@ -1760,6 +1760,35 @@ pub async fn predict_with_professional_strategy(
     let macd_dif = ema12 - ema26;
     let macd_dea = calc_ma(9); // 简化，实际应该是DIF的EMA
     
+    // 新增：计算市场情绪指标
+    use crate::stock_prediction::technical_indicators::{
+        calculate_market_sentiment, calculate_atr, calculate_dmi_adx
+    };
+    
+    let market_sentiment = calculate_market_sentiment(&prices, &volumes, &highs, &lows);
+    println!("   📊 市场情绪: {} (恐惧贪婪指数: {:.0})", 
+             market_sentiment.sentiment_level,
+             market_sentiment.fear_greed_index);
+    println!("   📍 市场阶段: {}", market_sentiment.market_phase);
+    
+    // 新增：计算ATR波动率
+    let atr = calculate_atr(&highs, &lows, &prices, 14);
+    let volatility_pct = (atr / current_price) * 100.0;
+    println!("   📈 ATR波动率: {:.2}% ({})", 
+             volatility_pct,
+             if volatility_pct > 3.0 { "高波动" } 
+             else if volatility_pct < 1.5 { "低波动" } 
+             else { "正常波动" });
+    
+    // 新增：计算ADX趋势强度
+    let (di_plus, di_minus, adx) = calculate_dmi_adx(&highs, &lows, &prices, 14);
+    println!("   💪 ADX趋势强度: {:.1} ({})", 
+             adx,
+             if adx > 40.0 { "强趋势" }
+             else if adx > 25.0 { "中等趋势" }
+             else { "弱趋势/震荡" });
+    println!("   ➕ DI+: {:.1}  ➖ DI-: {:.1}", di_plus, di_minus);
+    
     // 计算各因子得分
     let trend_factor = multi_factor_scoring::score_trend_factor(
         ma5, ma10, ma20, ma60, current_price
@@ -1790,14 +1819,37 @@ pub async fn predict_with_professional_strategy(
         multi_timeframe.signal_quality,
     );
     
-    let factors = vec![
+    // 新增因子
+    let sentiment_factor = multi_factor_scoring::score_sentiment_factor(
+        market_sentiment.sentiment_score,
+        market_sentiment.fear_greed_index,
+        &market_sentiment.market_phase,
+    );
+    
+    let volatility_factor = multi_factor_scoring::score_volatility_factor(
+        atr,
+        current_price,
+    );
+    
+    let mut factors = vec![
         trend_factor,
         volume_factor,
         pattern_factor,
         momentum_factor,
         sr_factor,
         mtf_factor,
+        sentiment_factor,
+        volatility_factor,
     ];
+    
+    // 新增：智能权重调整
+    println!("\n   🔧 智能权重调整中...");
+    multi_factor_scoring::adjust_factor_weights(
+        &mut factors,
+        &market_sentiment.market_phase,
+        volatility_pct,
+        adx,
+    );
     
     let multi_factor_score = multi_factor_scoring::calculate_multi_factor_score(factors);
     
@@ -1854,13 +1906,12 @@ fn generate_trading_advice(
     multi_timeframe: &MultiTimeframeSignal,
     support_resistance: &SupportResistance,
     divergence: &VolumePriceDivergence,
-    current_price: f64,
+    _current_price: f64,
 ) -> (String, String) {
     let mut advice_parts = Vec::new();
-    let mut risk_score = 5; // 1-10，5为中性
     
-    // 基于买卖点信号
-    if !buy_points.is_empty() && sell_points.is_empty() {
+    // 基于买卖点信号计算初始risk_score
+    let mut risk_score = if !buy_points.is_empty() && sell_points.is_empty() {
         let best_buy = &buy_points[0];
         advice_parts.push(format!(
             "💚 建议{}，目标价{:.2}元，止损{:.2}元",
@@ -1868,7 +1919,7 @@ fn generate_trading_advice(
             best_buy.take_profit[0],
             best_buy.stop_loss
         ));
-        risk_score = 4; // 买入信号，风险较低
+        4 // 买入信号，风险较低
     } else if !sell_points.is_empty() && buy_points.is_empty() {
         let best_sell = &sell_points[0];
         advice_parts.push(format!(
@@ -1877,21 +1928,22 @@ fn generate_trading_advice(
             best_sell.take_profit[0],
             best_sell.stop_loss
         ));
-        risk_score = 7; // 卖出信号，风险较高
+        7 // 卖出信号，风险较高
     } else if !buy_points.is_empty() && !sell_points.is_empty() {
         let buy_strength = buy_points[0].signal_strength;
         let sell_strength = sell_points[0].signal_strength;
-        if buy_strength > sell_strength {
+        let score = if buy_strength > sell_strength {
             advice_parts.push("💛 信号矛盾，但买入信号更强，建议谨慎买入或观望".to_string());
-            risk_score = 5;
+            5
         } else {
             advice_parts.push("💛 信号矛盾，但卖出信号更强，建议减仓或观望".to_string());
-            risk_score = 6;
-        }
+            6
+        };
+        score
     } else {
         advice_parts.push("💙 当前无明确买卖信号，建议观望".to_string());
-        risk_score = 5;
-    }
+        5
+    };
     
     // 多周期共振建议
     if multi_timeframe.resonance_level >= 2 {
@@ -1937,7 +1989,7 @@ fn generate_trading_advice(
 /// 生成预测理由和关键因素
 fn generate_prediction_reason(
     predicted_price: f64,
-    current_price: f64,
+    _current_price: f64,
     change_percent: f64,
     day: usize,
     support_resistance: &SupportResistance,

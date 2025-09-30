@@ -552,6 +552,11 @@
         await loadModelList();
     }
     
+    // 监听stockCode变化，自动刷新模型列表
+    $: if (stockCode) {
+        loadModelList();
+    }
+    
     async function deleteModel(modelId: string) {
         // 使用 Tauri 对话框进行确认
         const confirmed = await confirm('确定要删除此模型吗？', { title: '删除模型' });
@@ -569,6 +574,27 @@
     
     // 用于重新训练选定模型
     async function retrainModel(modelId: string, modelName: string) {
+        // 先刷新模型列表，确保模型ID是最新的
+        await loadModelList();
+        
+        // 检查模型是否还存在
+        const modelExists = modelList.some(m => m.id === modelId);
+        if (!modelExists) {
+            errorMessage = `模型 ${modelName} 已不存在，可能已被删除。请刷新页面重试。`;
+            await alert(errorMessage);
+            return;
+        }
+        
+        // 确认重训练
+        const confirmed = await confirm(
+            `确定要重新训练模型 "${modelName}" 吗？\n\n训练参数:\n- 训练轮数: ${epochs}\n- 批次大小: ${batchSize}\n- 学习率: ${learningRate}`,
+            { title: '重新训练模型' }
+        );
+        
+        if (!confirmed) {
+            return;
+        }
+        
         isTraining = true;
         errorMessage = "";
         
@@ -579,10 +605,11 @@
                 batchSize: batchSize,
                 learningRate: learningRate
             });
-            alert(`模型 ${modelName} 重新训练成功`);
+            await alert(`模型 ${modelName} 重新训练成功！`);
             await loadModelList();
         } catch (error) {
             errorMessage = `重新训练失败: ${error}`;
+            await alert(errorMessage);
         } finally {
             isTraining = false;
         }
