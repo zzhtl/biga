@@ -1,69 +1,51 @@
-// 数据类型和结构定义
+// ============================================================================
+// 金融级股票预测系统模块
+// ============================================================================
+
+// 核心模块
 pub mod types;
-
-// 核心权重配置（最重要的预测权重）
-pub mod core_weights;
-
-// 技术参数配置（阈值、周期等）
-pub mod constants;
-
-// 数据库操作
 pub mod database;
-
-// 工具函数
 pub mod utils;
 
-// 技术指标计算
-pub mod technical_indicators;
+// 金融预测引擎（新）
+pub mod financial_prediction_engine;
 
-// 技术分析和信号生成
-pub mod technical_analysis;
+// 风险管理（新）
+pub mod risk_management;
 
-// 模型管理功能
+// 简化的权重系统（新）
+pub mod core_weights_simplified;
+
+// 优化的技术指标（新）
+pub mod technical_indicators_optimized;
+
+// 简化的预测接口（新）
+pub mod prediction_simplified;
+
+// 保留的核心模块
+pub mod prediction;
+pub mod training;
+pub mod evaluation;
 pub mod model_management;
 
-// 训练功能
-pub mod training;
-
-// 预测功能
-pub mod prediction;
-
-// 评估功能
-pub mod evaluation;
-
-// 回测功能
+// 保留的分析模块
+pub mod technical_analysis;
+pub mod volume_analysis;
+pub mod candlestick_patterns;
 pub mod backtest;
 
-// 主要的预测功能（保持向后兼容）
+// 向后兼容
 pub mod candle_prediction;
 
-// 特征优化
+// 以下模块保留但标记为将被替换
+pub mod core_weights;  // 将被 core_weights_simplified 替代
+pub mod technical_indicators;  // 将被 technical_indicators_optimized 替代
+pub mod constants;  // 将被整合到 financial_prediction_engine
+pub mod multi_timeframe_analysis;  // 将被整合
+pub mod multi_factor_scoring;  // 将被整合
+
+// 以下复杂模块暂时保留，后续删除
+pub mod ensemble_learning;
+pub mod advanced_features;
 pub mod feature_optimization;
-
-// 超参数优化
 pub mod hyperparameter_optimization;
-
-// 多时间周期分析
-pub mod multi_timeframe_analysis;
-
-// 量价关系深度分析
-pub mod volume_analysis;
-
-// K线形态识别
-pub mod candlestick_patterns;
-
-// 多因子综合评分
-pub mod multi_factor_scoring;
-
-// 重新导出主要的公共类型和函数
-pub use types::{
-    ModelConfig, ModelInfo, Prediction, TechnicalIndicatorValues,
-    TrainingRequest, PredictionRequest, TrainingResult, EvaluationResult,
-    PredictionResponse, LastRealData
-};
-
-pub use model_management::{list_models, delete_model};
-pub use training::train_candle_model;
-pub use prediction::{predict_with_candle, predict_with_simple_strategy};
-pub use candle_prediction::{evaluate_candle_model, retrain_candle_model};
-pub use backtest::{run_backtest, BacktestRequest, BacktestReport, BacktestEntry, DailyAccuracy}; 
