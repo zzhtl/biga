@@ -1,80 +1,143 @@
+//! 数据模型定义
+
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-#[derive(Debug, Serialize, Deserialize, FromRow)]
+// =============================================================================
+// 股票基本信息
+// =============================================================================
+
+/// 股票基本信息
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct StockInfo {
     #[sqlx(rename = "symbol")]
-    pub symbol: String, // 股票代码(含市场前缀)
-    pub name: String,     // 股票简称
-    pub exchange: String, // 交易所(sh/sz)
+    pub symbol: String,
+    pub name: String,
+    pub exchange: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, FromRow)]
+/// 股票基本信息（API响应格式）
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StockInfoItem {
     #[serde(rename = "dm")]
-    pub symbol: String, // 股票代码(含市场前缀)
+    pub symbol: String,
     #[serde(rename = "mc")]
-    pub name: String, // 股票简称
+    pub name: String,
     #[serde(rename = "jys")]
-    pub exchange: String, // 交易所(sh/sz)
+    pub exchange: String,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, FromRow)]
+impl From<StockInfoItem> for StockInfo {
+    fn from(item: StockInfoItem) -> Self {
+        Self {
+            symbol: item.symbol,
+            name: item.name,
+            exchange: item.exchange,
+        }
+    }
+}
+
+/// 股票详细信息
+#[derive(Default, Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Stock {
     #[sqlx(rename = "symbol")]
-    pub symbol: String, // 股票代码(含市场前缀)
-    pub name: String,     // 股票简称
-    pub area: String,     // 地域
-    pub industry: String, // 所属行业
-    pub market: String,   // 市场类型:主板、创业板、科创板
+    pub symbol: String,
+    pub name: String,
+    pub area: String,
+    pub industry: String,
+    pub market: String,
     #[serde(rename = "ts_code")]
     #[sqlx(rename = "exchange")]
-    pub exchange: String, // 交易所(sh/sz)
-    pub list_date: String, // 上市日期
-    pub act_name: String, // 实控人名称
-    pub act_ent_type: String, // 实控人企业性质
+    pub exchange: String,
+    pub list_date: String,
+    pub act_name: String,
+    pub act_ent_type: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
+// =============================================================================
+// 历史数据
+// =============================================================================
+
+/// 股票历史数据
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct HistoricalData {
     #[sqlx(rename = "symbol")]
     pub symbol: String,
     #[sqlx(rename = "date")]
     pub date: NaiveDate,
-    pub open: f64,           // 开盘价
-    pub close: f64,          // 收盘价
-    pub high: f64,           // 最高价
-    pub low: f64,            // 最低价
-    pub volume: i64,         // 成交量
-    pub amount: f64,         // 成交额（元）
-    pub amplitude: f64,      // 振幅（%）
-    pub turnover_rate: f64,  //换手率（%）
-    pub change_percent: f64, // 涨跌幅（%）
-    pub change: f64,         // 涨跌额（元）
+    pub open: f64,
+    pub close: f64,
+    pub high: f64,
+    pub low: f64,
+    pub volume: i64,
+    pub amount: f64,
+    pub amplitude: f64,
+    pub turnover_rate: f64,
+    pub change_percent: f64,
+    pub change: f64,
 }
 
+/// 历史数据（API响应格式）
 #[derive(Debug, Deserialize)]
 pub struct HistoricalDataItem {
     #[serde(rename = "t")]
-    pub date: String, // 日期
+    pub date: String,
     #[serde(rename = "o")]
-    pub open: f64, // 开盘价
+    pub open: f64,
     #[serde(rename = "h")]
-    pub high: f64, // 最高价（元）
+    pub high: f64,
     #[serde(rename = "l")]
-    pub low: f64, // 最低价（元）
+    pub low: f64,
     #[serde(rename = "c")]
-    pub close: f64, // 收盘价（元）
+    pub close: f64,
     #[serde(rename = "v")]
-    pub volume: f64, // 成交量（手）
+    pub volume: f64,
     #[serde(rename = "a")]
-    pub amount: f64, // 成交额（元）
+    pub amount: f64,
     #[serde(rename = "pc")]
-    pub pre_close: f64, // 前收盘价
+    pub pre_close: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize, FromRow)]
+impl HistoricalDataItem {
+    /// 转换为历史数据模型
+    pub fn to_historical_data(&self, symbol: &str) -> Option<HistoricalData> {
+        let date = chrono::NaiveDate::parse_from_str(&self.date, "%Y-%m-%d").ok()?;
+        let change = self.close - self.pre_close;
+        let change_percent = if self.pre_close > 0.0 {
+            change / self.pre_close * 100.0
+        } else {
+            0.0
+        };
+        let amplitude = if self.pre_close > 0.0 {
+            (self.high - self.low) / self.pre_close * 100.0
+        } else {
+            0.0
+        };
+
+        Some(HistoricalData {
+            symbol: symbol.to_string(),
+            date,
+            open: self.open,
+            close: self.close,
+            high: self.high,
+            low: self.low,
+            volume: (self.volume * 100.0) as i64, // 手转股
+            amount: self.amount,
+            amplitude,
+            turnover_rate: 0.0, // API未提供
+            change_percent,
+            change,
+        })
+    }
+}
+
+// =============================================================================
+// 实时数据
+// =============================================================================
+
+/// 实时行情数据
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct RealtimeData {
     #[sqlx(rename = "symbol")]
     pub symbol: String,
@@ -82,11 +145,29 @@ pub struct RealtimeData {
     pub name: String,
     #[sqlx(rename = "date")]
     pub date: NaiveDate,
-    pub close: f64,          // 收盘价
-    pub volume: i64,         // 成交量
-    pub amount: f64,         // 成交额（元）
-    pub amplitude: f64,      // 振幅（%）
-    pub turnover_rate: f64,  //换手率（%）
-    pub change_percent: f64, // 涨跌幅（%）
-    pub change: f64,         // 涨跌额（元）
+    pub close: f64,
+    pub volume: i64,
+    pub amount: f64,
+    pub amplitude: f64,
+    pub turnover_rate: f64,
+    pub change_percent: f64,
+    pub change: f64,
+}
+
+// =============================================================================
+// 预测模型相关
+// =============================================================================
+
+/// 预测模型信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredictionModelInfo {
+    pub id: String,
+    pub name: String,
+    pub stock_code: String,
+    pub created_at: u64,
+    pub model_type: String,
+    pub features: Vec<String>,
+    pub target: String,
+    pub prediction_days: usize,
+    pub accuracy: f64,
 }
