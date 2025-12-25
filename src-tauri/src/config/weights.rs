@@ -1,36 +1,42 @@
 //! 股票预测系统 - 权重配置
 //! 
 //! 本文件集中管理所有预测权重参数，按功能分组
+//! 
+//! 优化说明 (v2.0 - 华尔街量化策略优化):
+//! - 增强趋势和动量因子在趋势市的权重
+//! - 增强形态和支撑阻力因子在震荡市的权重
+//! - 添加背离检测相关权重
+//! - 优化信号确认阈值
 
 // =============================================================================
-// 一、预测基础权重
+// 一、预测基础权重 (优化版)
 // =============================================================================
 
-/// 趋势因子占比
-pub const PREDICTION_TREND_RATIO: f64 = 0.25;
+/// 趋势因子占比（增强）
+pub const PREDICTION_TREND_RATIO: f64 = 0.28;
 /// 技术指标占比
-pub const PREDICTION_TECHNICAL_RATIO: f64 = 0.35;
+pub const PREDICTION_TECHNICAL_RATIO: f64 = 0.32;
 /// 均线量能占比
-pub const PREDICTION_MA_VOLUME_RATIO: f64 = 0.30;
-/// 市场波动占比
-pub const PREDICTION_MARKET_FLUCTUATION_RATIO: f64 = 0.05;
+pub const PREDICTION_MA_VOLUME_RATIO: f64 = 0.25;
+/// 市场波动占比（增强）
+pub const PREDICTION_MARKET_FLUCTUATION_RATIO: f64 = 0.08;
 /// 基础模型占比
-pub const PREDICTION_BASE_MODEL_RATIO: f64 = 0.05;
+pub const PREDICTION_BASE_MODEL_RATIO: f64 = 0.07;
 
 // =============================================================================
-// 二、多因子评分影响系数
+// 二、多因子评分影响系数 (优化版)
 // =============================================================================
 
-/// 强烈看涨影响系数 (评分>75分)
-pub const MULTI_FACTOR_STRONG_BULLISH_IMPACT: f64 = 0.0015;
-/// 看涨影响系数 (评分60-75分)
-pub const MULTI_FACTOR_BULLISH_IMPACT: f64 = 0.0008;
-/// 看跌影响系数 (评分25-40分)
-pub const MULTI_FACTOR_BEARISH_IMPACT: f64 = 0.0008;
-/// 强烈看跌影响系数 (评分<25分)
-pub const MULTI_FACTOR_STRONG_BEARISH_IMPACT: f64 = 0.0015;
-/// 中性区间基准偏置
-pub const MULTI_FACTOR_NEUTRAL_BIAS: f64 = 0.0;
+/// 强烈看涨影响系数 (评分>78分) - 增强
+pub const MULTI_FACTOR_STRONG_BULLISH_IMPACT: f64 = 0.0022;
+/// 看涨影响系数 (评分60-78分) - 增强
+pub const MULTI_FACTOR_BULLISH_IMPACT: f64 = 0.0012;
+/// 看跌影响系数 (评分22-40分) - 增强
+pub const MULTI_FACTOR_BEARISH_IMPACT: f64 = 0.0012;
+/// 强烈看跌影响系数 (评分<22分) - 增强
+pub const MULTI_FACTOR_STRONG_BEARISH_IMPACT: f64 = 0.0022;
+/// 中性区间基准偏置（轻微看涨偏向，符合长期市场特征）
+pub const MULTI_FACTOR_NEUTRAL_BIAS: f64 = 0.0002;
 
 // =============================================================================
 // 三、趋势一致性增强系数
@@ -123,25 +129,58 @@ pub const DIRECTION_STRONG_CONFIRM_BOOST: f64 = 1.20;
 pub const DIRECTION_WEAK_CONFIRM_SUPPRESS: f64 = 0.85;
 
 // =============================================================================
-// 七、多因子综合评分权重
+// 七、多因子综合评分权重 (优化版 - 华尔街量化策略)
 // =============================================================================
 
-/// 趋势因子权重
-pub const TREND_FACTOR_WEIGHT: f64 = 0.22;
-/// 量价因子权重
-pub const VOLUME_PRICE_FACTOR_WEIGHT: f64 = 0.18;
+/// 趋势因子权重（核心因子，增强）
+pub const TREND_FACTOR_WEIGHT: f64 = 0.24;
+/// 量价因子权重（增强，量价配合很重要）
+pub const VOLUME_PRICE_FACTOR_WEIGHT: f64 = 0.20;
 /// 多周期共振因子权重
-pub const MULTI_TIMEFRAME_FACTOR_WEIGHT: f64 = 0.15;
-/// 动量因子权重
-pub const MOMENTUM_FACTOR_WEIGHT: f64 = 0.13;
+pub const MULTI_TIMEFRAME_FACTOR_WEIGHT: f64 = 0.14;
+/// 动量因子权重（增强）
+pub const MOMENTUM_FACTOR_WEIGHT: f64 = 0.16;
 /// K线形态因子权重
-pub const PATTERN_FACTOR_WEIGHT: f64 = 0.12;
+pub const PATTERN_FACTOR_WEIGHT: f64 = 0.10;
 /// 支撑压力因子权重
-pub const SUPPORT_RESISTANCE_FACTOR_WEIGHT: f64 = 0.10;
+pub const SUPPORT_RESISTANCE_FACTOR_WEIGHT: f64 = 0.08;
 /// 市场情绪因子权重
-pub const SENTIMENT_FACTOR_WEIGHT: f64 = 0.07;
+pub const SENTIMENT_FACTOR_WEIGHT: f64 = 0.05;
 /// 波动率因子权重
 pub const VOLATILITY_FACTOR_WEIGHT: f64 = 0.03;
+
+// =============================================================================
+// 新增：背离检测权重
+// =============================================================================
+
+/// RSI背离权重
+pub const RSI_DIVERGENCE_WEIGHT: f64 = 0.35;
+/// MACD背离权重
+pub const MACD_DIVERGENCE_WEIGHT: f64 = 0.40;
+/// OBV背离权重
+pub const OBV_DIVERGENCE_WEIGHT: f64 = 0.25;
+
+// =============================================================================
+// 新增：信号确认阈值
+// =============================================================================
+
+/// 强确认所需信号数
+pub const STRONG_CONFIRMATION_SIGNALS: i32 = 4;
+/// 中等确认所需信号数
+pub const MODERATE_CONFIRMATION_SIGNALS: i32 = 3;
+/// 弱确认所需信号数
+pub const WEAK_CONFIRMATION_SIGNALS: i32 = 2;
+
+// =============================================================================
+// 新增：市场状态自适应系数
+// =============================================================================
+
+/// 趋势市趋势因子放大系数
+pub const TREND_MARKET_TREND_AMPLIFIER: f64 = 1.4;
+/// 震荡市支撑阻力放大系数
+pub const RANGE_MARKET_SR_AMPLIFIER: f64 = 1.5;
+/// 转折点情绪因子放大系数
+pub const TURNING_POINT_SENTIMENT_AMPLIFIER: f64 = 1.4;
 
 // =============================================================================
 // 八、技术指标影响权重
