@@ -8,6 +8,8 @@ pub mod pattern;
 pub mod support_resistance;
 pub mod market_regime;
 pub mod divergence;
+pub mod signal_confirmation;
+pub mod volatility_forecast;
 
 pub use trend::*;
 pub use volume::*;
@@ -15,4 +17,6 @@ pub use pattern::*;
 pub use support_resistance::*;
 pub use market_regime::*;
 pub use divergence::*;
+pub use signal_confirmation::*;
+pub use volatility_forecast::*;
 

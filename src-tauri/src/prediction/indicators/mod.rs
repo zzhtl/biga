@@ -10,6 +10,11 @@ pub mod obv;
 pub mod cci;
 pub mod dmi;
 pub mod atr;
+pub mod williams;
+pub mod roc;
+pub mod emv;
+pub mod brar;
+pub mod vwap;
 
 // 选择性重导出，避免名称冲突
 pub use macd::{calculate_macd, calculate_macd_full, calculate_macd_data, MacdData};
@@ -22,6 +27,11 @@ pub use obv::calculate_obv;
 pub use cci::calculate_cci;
 pub use dmi::{calculate_dmi, calculate_dmi_data, DmiData};
 pub use atr::calculate_atr;
+pub use williams::{calculate_williams_r, analyze_williams_signal, WilliamsSignal, WilliamsZone};
+pub use roc::{calculate_roc, analyze_roc_signal, analyze_multi_period_roc, RocSignal, MultiPeriodRoc};
+pub use emv::{calculate_emv, analyze_emv_signal, EmvSignal};
+pub use brar::{calculate_brar, analyze_brar_signal, BrarSignal};
+pub use vwap::{calculate_vwap, calculate_rolling_vwap, analyze_vwap_signal, VwapSignal, VwapBands};
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +57,16 @@ pub struct TechnicalIndicatorValues {
     pub kdj_death_cross: bool,
     pub kdj_overbought: bool,
     pub kdj_oversold: bool,
+    // 新增高级指标
+    pub williams_r: f64,
+    pub williams_overbought: bool,
+    pub williams_oversold: bool,
+    pub roc: f64,
+    pub roc_signal: f64,  // 平滑后的ROC
+    pub emv: f64,
+    pub br: f64,
+    pub ar: f64,
+    pub atr: f64,
 }
 
 impl Default for TechnicalIndicatorValues {
@@ -67,6 +87,16 @@ impl Default for TechnicalIndicatorValues {
             kdj_death_cross: false,
             kdj_overbought: false,
             kdj_oversold: false,
+            // 新增指标默认值
+            williams_r: -50.0,
+            williams_overbought: false,
+            williams_oversold: false,
+            roc: 0.0,
+            roc_signal: 0.0,
+            emv: 0.0,
+            br: 100.0,
+            ar: 100.0,
+            atr: 0.0,
         }
     }
 }
@@ -190,6 +220,36 @@ pub fn calculate_all_indicators(
         let obv = obv::calculate_obv(prices, volumes);
         let avg_vol = volumes.iter().sum::<i64>() as f64 / volumes.len() as f64;
         result.obv_trend = obv / (avg_vol * volumes.len() as f64);
+    }
+    
+    // Williams %R
+    if highs.len() >= 14 && lows.len() >= 14 && prices.len() >= 14 {
+        result.williams_r = williams::calculate_williams_r(highs, lows, prices, 14);
+        result.williams_overbought = result.williams_r > -20.0;
+        result.williams_oversold = result.williams_r < -80.0;
+    }
+    
+    // ROC 变动率
+    if prices.len() >= 12 {
+        result.roc = roc::calculate_roc(prices, 12);
+        result.roc_signal = roc::calculate_smoothed_roc(prices, 12, 3);
+    }
+    
+    // EMV 简易波动指标
+    if highs.len() >= 14 && lows.len() >= 14 && volumes.len() >= 14 {
+        result.emv = emv::calculate_emv(highs, lows, volumes, 14);
+    }
+    
+    // BRAR 人气意愿指标 (需要open数据，这里简化处理)
+    if prices.len() >= 26 && highs.len() >= 26 && lows.len() >= 26 {
+        // 使用收盘价作为开盘价的近似（实际应传入opens）
+        result.br = brar::calculate_br(prices, highs, lows, 26);
+        result.ar = brar::calculate_ar(prices, highs, lows, 26);
+    }
+    
+    // ATR 平均真实波幅
+    if highs.len() >= 14 && lows.len() >= 14 && prices.len() >= 14 {
+        result.atr = atr::calculate_atr(highs, lows, prices, 14);
     }
     
     result
