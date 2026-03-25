@@ -192,7 +192,8 @@
         candle_patterns: any[];
         volume_analysis: any;
         multi_factor_score: {
-            total_score: number;
+            // 后端可能在某些场景下不返回 total_score
+            total_score?: number;
             factors: any[];
             signal_quality: any;
             operation_suggestion: string;
@@ -246,6 +247,107 @@
     let technicalHistoryDays = 180; // 使用多少天历史数据
     let technicalPredictionDays = 7; // 预测未来多少天
     let isTechnicalPredicting = false;
+
+    function normalizeNumber(value: any): number {
+        // 将后端可能返回的数字字符串/undefined 统一为 number，
+        // 避免模板渲染阶段直接对 undefined/字符串调用 toFixed / length。
+        return Number(value);
+    }
+
+    function normalizePrediction(raw: any): Prediction {
+        return {
+            ...raw,
+            target_date: String(raw?.target_date ?? ""),
+            predicted_price: normalizeNumber(raw?.predicted_price),
+            predicted_change_percent: normalizeNumber(raw?.predicted_change_percent),
+            confidence: normalizeNumber(raw?.confidence),
+            trading_signal: raw?.trading_signal ?? undefined,
+            signal_strength: raw?.signal_strength != null ? normalizeNumber(raw.signal_strength) : undefined,
+            prediction_reason: raw?.prediction_reason ?? undefined,
+            key_factors: Array.isArray(raw?.key_factors) ? raw.key_factors.map(String) : undefined,
+            technical_indicators: raw?.technical_indicators
+                ? {
+                      rsi: normalizeNumber(raw.technical_indicators.rsi),
+                      macd_histogram: normalizeNumber(raw.technical_indicators.macd_histogram),
+                      kdj_j: normalizeNumber(raw.technical_indicators.kdj_j),
+                      cci: normalizeNumber(raw.technical_indicators.cci),
+                      obv_trend: normalizeNumber(raw.technical_indicators.obv_trend),
+                      macd_dif: normalizeNumber(raw.technical_indicators.macd_dif),
+                      macd_dea: normalizeNumber(raw.technical_indicators.macd_dea),
+                      kdj_k: normalizeNumber(raw.technical_indicators.kdj_k),
+                      kdj_d: normalizeNumber(raw.technical_indicators.kdj_d),
+                      macd_golden_cross: Boolean(raw.technical_indicators.macd_golden_cross),
+                      macd_death_cross: Boolean(raw.technical_indicators.macd_death_cross),
+                      kdj_golden_cross: Boolean(raw.technical_indicators.kdj_golden_cross),
+                      kdj_death_cross: Boolean(raw.technical_indicators.kdj_death_cross),
+                      kdj_overbought: Boolean(raw.technical_indicators.kdj_overbought),
+                      kdj_oversold: Boolean(raw.technical_indicators.kdj_oversold),
+                  }
+                : undefined,
+        };
+    }
+
+    function normalizeLastRealData(raw: any): LastRealData {
+        return {
+            date: String(raw?.date ?? ""),
+            price: normalizeNumber(raw?.price),
+            change_percent: normalizeNumber(raw?.change_percent),
+        };
+    }
+
+    function normalizeBuySellPoint(raw: any): BuySellPoint {
+        return {
+            point_type: String(raw?.point_type ?? ""),
+            signal_strength: normalizeNumber(raw?.signal_strength),
+            price_level: normalizeNumber(raw?.price_level),
+            stop_loss: normalizeNumber(raw?.stop_loss),
+            take_profit: Array.isArray(raw?.take_profit) ? raw.take_profit.map(normalizeNumber) : [],
+            risk_reward_ratio: normalizeNumber(raw?.risk_reward_ratio),
+            reasons: Array.isArray(raw?.reasons) ? raw.reasons.map(String) : [],
+            confidence: normalizeNumber(raw?.confidence),
+        };
+    }
+
+    function normalizeProfessionalPrediction(raw: any): ProfessionalPrediction {
+        const srRaw = raw?.support_resistance ?? {};
+        const mtRaw = raw?.multi_timeframe ?? {};
+        const divRaw = raw?.divergence ?? {};
+        const mfsRaw = raw?.multi_factor_score ?? {};
+
+        return {
+            buy_points: Array.isArray(raw?.buy_points) ? raw.buy_points.map(normalizeBuySellPoint) : [],
+            sell_points: Array.isArray(raw?.sell_points) ? raw.sell_points.map(normalizeBuySellPoint) : [],
+            support_resistance: {
+                support_levels: Array.isArray(srRaw?.support_levels) ? srRaw.support_levels.map(normalizeNumber) : [],
+                resistance_levels: Array.isArray(srRaw?.resistance_levels) ? srRaw.resistance_levels.map(normalizeNumber) : [],
+                current_position: String(srRaw?.current_position ?? ""),
+            },
+            multi_timeframe: {
+                daily_trend: String(mtRaw?.daily_trend ?? ""),
+                weekly_trend: String(mtRaw?.weekly_trend ?? ""),
+                monthly_trend: String(mtRaw?.monthly_trend ?? ""),
+                resonance_level: normalizeNumber(mtRaw?.resonance_level),
+                resonance_direction: String(mtRaw?.resonance_direction ?? ""),
+                signal_quality: normalizeNumber(mtRaw?.signal_quality),
+            },
+            divergence: {
+                has_bullish_divergence: Boolean(divRaw?.has_bullish_divergence),
+                has_bearish_divergence: Boolean(divRaw?.has_bearish_divergence),
+                divergence_strength: normalizeNumber(divRaw?.divergence_strength),
+                warning_message: String(divRaw?.warning_message ?? ""),
+            },
+            current_advice: String(raw?.current_advice ?? ""),
+            risk_level: String(raw?.risk_level ?? ""),
+            candle_patterns: Array.isArray(raw?.candle_patterns) ? raw.candle_patterns : [],
+            volume_analysis: raw?.volume_analysis ?? {},
+            multi_factor_score: {
+                total_score: mfsRaw?.total_score,
+                factors: Array.isArray(mfsRaw?.factors) ? mfsRaw.factors : [],
+                signal_quality: mfsRaw?.signal_quality ?? null,
+                operation_suggestion: String(mfsRaw?.operation_suggestion ?? ""),
+            },
+        };
+    }
     
     // 纯技术分析预测函数
     async function predictWithTechnicalOnly() {
@@ -277,23 +379,19 @@
             // 提取预测数据
             if (result.predictions) {
                 if (Array.isArray(result.predictions)) {
-                    predictions = result.predictions;
+                    predictions = result.predictions.map(normalizePrediction);
                 } else if ('predictions' in result.predictions && Array.isArray(result.predictions.predictions)) {
-                    predictions = result.predictions.predictions;
+                    predictions = result.predictions.predictions.map(normalizePrediction);
                     // 提取最新真实数据
                     if (result.predictions.last_real_data) {
-                        lastRealData = {
-                            date: result.predictions.last_real_data.date,
-                            price: result.predictions.last_real_data.price,
-                            change_percent: result.predictions.last_real_data.change_percent
-                        };
+                        lastRealData = normalizeLastRealData(result.predictions.last_real_data);
                     }
                 }
             }
             
             // 提取专业分析结果
             if (result.professional_analysis) {
-                professionalAnalysis = result.professional_analysis;
+                professionalAnalysis = normalizeProfessionalPrediction(result.professional_analysis);
                 showProfessionalAnalysis = true;
             }
             
@@ -304,7 +402,15 @@
             }
             
             if (predictions.length > 0 && professionalAnalysis) {
-                await alert(`✅ 纯技术分析预测成功！\n基于${technicalHistoryDays}天历史数据\n预测未来${technicalPredictionDays}天走势\n\n综合评分: ${professionalAnalysis.multi_factor_score.total_score.toFixed(1)}/100`);
+                // 后端偶发缺字段/或返回数字字符串，避免在 toFixed 处直接抛异常
+                const totalScoreRaw = (professionalAnalysis.multi_factor_score as any)?.total_score;
+                const totalScoreNum =
+                    typeof totalScoreRaw === "number" ? totalScoreRaw : Number(totalScoreRaw);
+                const totalScoreText = Number.isFinite(totalScoreNum) ? `${totalScoreNum.toFixed(1)}/100` : "—/100";
+
+                await alert(
+                    `✅ 纯技术分析预测成功！\n基于${technicalHistoryDays}天历史数据\n预测未来${technicalPredictionDays}天走势\n\n综合评分: ${totalScoreText}`
+                );
             }
         } catch (error) {
             errorMessage = `纯技术分析预测失败: ${error}`;
@@ -526,16 +632,12 @@
             if (result) {
                 if (Array.isArray(result)) {
                     // 旧格式，只返回预测数组
-                    predictions = result;
+                    predictions = result.map(normalizePrediction);
                 } else if ('predictions' in result && Array.isArray(result.predictions)) {
                     // 新格式，包含预测和最新真实数据
-                    predictions = result.predictions;
+                    predictions = result.predictions.map(normalizePrediction);
                     if (result.last_real_data) {
-                        lastRealData = {
-                            date: result.last_real_data.date,
-                            price: result.last_real_data.price,
-                            change_percent: result.last_real_data.change_percent
-                        };
+                        lastRealData = normalizeLastRealData(result.last_real_data);
                     }
                 }
             } else {
@@ -596,22 +698,18 @@
                 // 提取预测数据
                 if (result.predictions) {
                     if (Array.isArray(result.predictions)) {
-                        predictions = result.predictions;
+                        predictions = result.predictions.map(normalizePrediction);
                     } else if ('predictions' in result.predictions && Array.isArray(result.predictions.predictions)) {
-                        predictions = result.predictions.predictions;
+                        predictions = result.predictions.predictions.map(normalizePrediction);
                         if (result.predictions.last_real_data) {
-                            lastRealData = {
-                                date: result.predictions.last_real_data.date,
-                                price: result.predictions.last_real_data.price,
-                                change_percent: result.predictions.last_real_data.change_percent
-                            };
+                            lastRealData = normalizeLastRealData(result.predictions.last_real_data);
                         }
                     }
                 }
                 
                 // 提取专业分析结果
                 if (result.professional_analysis) {
-                    professionalAnalysis = result.professional_analysis;
+                    professionalAnalysis = normalizeProfessionalPrediction(result.professional_analysis);
                     showProfessionalAnalysis = true;
                     console.log("专业分析结果:", professionalAnalysis);
                 }
