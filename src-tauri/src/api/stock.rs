@@ -1,4 +1,6 @@
-use crate::db::models::{HistoricalData, HistoricalDataItem, StockInfo, StockInfoItem};
+use crate::db::models::{
+    HistoricalData, HistoricalDataItem, RealtimeQuoteItem, StockInfo, StockInfoItem,
+};
 use crate::error::AppError;
 use chrono::NaiveDate;
 
@@ -6,6 +8,13 @@ use chrono::NaiveDate;
 const ALL_SYMBOL_API: &str = "https://api.zhituapi.com/hs/list/all?token=ZHITU_TOKEN_LIMIT_TEST";
 // 查看股票历史
 const HISTORY_API: &str = "https://api.zhituapi.com/hs/history";
+// 实时交易（含流通市值 lt、总市值 sz、换手率 hs、量比 lb）
+const REALTIME_API: &str = "https://api.zhituapi.com/hs/real/ssjy";
+
+fn api_token() -> String {
+    std::env::var("STOCK_API_TOKEN")
+        .unwrap_or_else(|_| "C5BFE522-34E7-4931-8216-CAD281648165".to_string())
+}
 
 pub async fn fetch_stock_infos() -> Result<Vec<StockInfo>, AppError> {
     println!("开始获取股票信息...");
@@ -43,10 +52,7 @@ fn parse_stock_info(items: Vec<StockInfoItem>) -> Result<Vec<StockInfo>, AppErro
 pub async fn fetch_historical_data(symbol: &str) -> Result<Vec<HistoricalData>, AppError> {
     println!("开始获取股票 {symbol} 的历史数据...");
     
-    // 使用更稳定的token，或者从环境变量读取
-    let token = std::env::var("STOCK_API_TOKEN")
-        .unwrap_or_else(|_| "C5BFE522-34E7-4931-8216-CAD281648165".to_string());
-    
+    let token = api_token();
     let url = format!("{HISTORY_API}/{symbol}/d/n?token={token}");
     println!("请求URL: {url}");
     
@@ -111,9 +117,7 @@ fn parse_historical_data(
                 0.0
             };
             
-            // 换手率暂时设为0，需要股本数据才能准确计算
-            let turnover_rate = 0.0;
-                
+            // turnover_rate / volume_ratio 由 backfill_volume_metrics 回填
             Ok(HistoricalData {
                 symbol: symbol.to_string(),
                 date,
@@ -124,12 +128,40 @@ fn parse_historical_data(
                 volume: item.volume as i64,
                 amount: item.amount,
                 amplitude,
-                turnover_rate,
+                turnover_rate: 0.0,
+                volume_ratio: 0.0,
                 change_percent,
                 change,
             })
         })
         .collect()
+}
+
+/// 获取股票实时行情中的股本相关数据（流通市值、总市值、换手率、量比）
+///
+/// 用于推导流通股本以计算历史换手率。网络或解析失败时返回 Err，调用方应优雅降级。
+pub async fn fetch_stock_capital(symbol: &str) -> Result<RealtimeQuoteItem, AppError> {
+    let token = api_token();
+    let url = format!("{REALTIME_API}/{symbol}?token={token}");
+
+    let response = reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(AppError::InvalidInput(format!(
+            "获取股本数据失败: {}",
+            response.status()
+        )));
+    }
+
+    let text = response.text().await?;
+    let quote: RealtimeQuoteItem = serde_json::from_str(&text)
+        .map_err(|e| AppError::DeserializationError(format!("股本数据解析失败: {e}")))?;
+
+    Ok(quote)
 }
 
 #[cfg(test)]

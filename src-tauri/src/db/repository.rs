@@ -5,6 +5,9 @@
 use crate::config::constants::BATCH_SIZE;
 use crate::db::models::*;
 use crate::error::AppError;
+use crate::utils::volume_metrics::{
+    calculate_turnover_rate, calculate_volume_ratio_series, DEFAULT_VOLUME_RATIO_PERIOD,
+};
 use sqlx::{QueryBuilder, sqlite::SqlitePool};
 
 // =============================================================================
@@ -122,7 +125,7 @@ pub async fn batch_insert_historical_data(
     for chunk in data_list.chunks(BATCH_SIZE) {
         let mut query_builder = QueryBuilder::new(
             "INSERT INTO historical_data (symbol, date, open, close, high, low, volume,
-            amount, amplitude, turnover_rate, change, change_percent) ",
+            amount, amplitude, turnover_rate, volume_ratio, change, change_percent) ",
         );
         query_builder.push_values(chunk, |mut b, data| {
             b.push_bind(&data.symbol)
@@ -135,6 +138,7 @@ pub async fn batch_insert_historical_data(
                 .push_bind(data.amount)
                 .push_bind(data.amplitude)
                 .push_bind(data.turnover_rate)
+                .push_bind(data.volume_ratio)
                 .push_bind(data.change)
                 .push_bind(data.change_percent);
         });
@@ -149,7 +153,7 @@ pub async fn batch_insert_historical_data(
         let stock_info = get_stock_info(symbol, pool).await?;
         
         let mut realtime_builder = QueryBuilder::new(
-            "INSERT INTO realtime_data (symbol, name, date, close, volume, amount, amplitude, turnover_rate, change, change_percent) ",
+            "INSERT INTO realtime_data (symbol, name, date, close, volume, amount, amplitude, turnover_rate, volume_ratio, change, change_percent) ",
         );
         realtime_builder.push_values(&[last_history], |mut b, data| {
             b.push_bind(&data.symbol)
@@ -160,10 +164,11 @@ pub async fn batch_insert_historical_data(
                 .push_bind(data.amount)
                 .push_bind(data.amplitude)
                 .push_bind(data.turnover_rate)
+                .push_bind(data.volume_ratio)
                 .push_bind(data.change)
                 .push_bind(data.change_percent);
         });
-        
+
         realtime_builder.push(
             r#" ON CONFLICT(symbol) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -173,6 +178,7 @@ pub async fn batch_insert_historical_data(
                 amount = EXCLUDED.amount,
                 amplitude = EXCLUDED.amplitude,
                 turnover_rate = EXCLUDED.turnover_rate,
+                volume_ratio = EXCLUDED.volume_ratio,
                 change = EXCLUDED.change,
                 change_percent = EXCLUDED.change_percent
             "#,
@@ -194,8 +200,8 @@ pub async fn get_historical_data(
 ) -> Result<Vec<HistoricalData>, AppError> {
     let rows = sqlx::query_as::<_, HistoricalData>(
         r#"
-        SELECT symbol, date, open, high, low, close, volume, amount, 
-               amplitude, turnover_rate, change_percent, change
+        SELECT symbol, date, open, high, low, close, volume, amount,
+               amplitude, turnover_rate, volume_ratio, change_percent, change
         FROM historical_data
         WHERE symbol = ? AND date >= ? AND date <= ?
         ORDER BY date ASC
@@ -218,8 +224,8 @@ pub async fn get_recent_historical_data(
 ) -> Result<Vec<HistoricalData>, AppError> {
     let rows = sqlx::query_as::<_, HistoricalData>(
         r#"
-        SELECT symbol, date, open, high, low, close, volume, amount, 
-               amplitude, turnover_rate, change_percent, change
+        SELECT symbol, date, open, high, low, close, volume, amount,
+               amplitude, turnover_rate, volume_ratio, change_percent, change
         FROM historical_data
         WHERE symbol = ?
         ORDER BY date DESC
@@ -322,7 +328,7 @@ pub async fn get_realtime_list(
         
         let data = sqlx::query_as::<_, RealtimeData>(
             "SELECT symbol, name, date, close, volume, amount, amplitude, 
-                    turnover_rate, change_percent, change 
+                    turnover_rate, volume_ratio, change_percent, change
              FROM realtime_data 
              WHERE symbol LIKE ? OR name LIKE ?
              ORDER BY change_percent DESC LIMIT ? OFFSET ?",
@@ -346,7 +352,7 @@ pub async fn get_realtime_list(
     } else {
         let data = sqlx::query_as::<_, RealtimeData>(
             "SELECT symbol, name, date, close, volume, amount, amplitude, 
-                    turnover_rate, change_percent, change 
+                    turnover_rate, volume_ratio, change_percent, change
              FROM realtime_data ORDER BY change_percent DESC LIMIT ? OFFSET ?",
         )
         .bind(page_size)
@@ -357,10 +363,122 @@ pub async fn get_realtime_list(
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM realtime_data")
             .fetch_one(pool)
             .await?;
-        
+
         (data, count.0)
     };
-    
+
     Ok((data, total))
+}
+
+// =============================================================================
+// 股本与量比/换手率
+// =============================================================================
+
+/// 写入/更新某股票的股本数据（upsert）
+pub async fn upsert_stock_capital(
+    pool: &SqlitePool,
+    capital: &StockCapital,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO stock_capital (symbol, circulating_shares, total_shares, circulating_market_cap, updated_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(symbol) DO UPDATE SET
+            circulating_shares = EXCLUDED.circulating_shares,
+            total_shares = EXCLUDED.total_shares,
+            circulating_market_cap = EXCLUDED.circulating_market_cap,
+            updated_at = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(&capital.symbol)
+    .bind(capital.circulating_shares)
+    .bind(capital.total_shares)
+    .bind(capital.circulating_market_cap)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 读取某股票的股本数据，不存在时返回 None
+pub async fn get_stock_capital(
+    symbol: &str,
+    pool: &SqlitePool,
+) -> Result<Option<StockCapital>, AppError> {
+    let capital = sqlx::query_as::<_, StockCapital>(
+        r#"
+        SELECT symbol, circulating_shares, total_shares, circulating_market_cap
+        FROM stock_capital WHERE symbol = ?
+        "#,
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await?;
+    Ok(capital)
+}
+
+/// 回填某股票全部历史数据的量比与换手率。
+///
+/// 量比始终可算（仅依赖成交量序列）；换手率需要流通股本，若无股本数据则保持 0。
+/// 返回更新的行数。
+pub async fn backfill_volume_metrics(
+    symbol: &str,
+    pool: &SqlitePool,
+) -> Result<u64, AppError> {
+    // 取全部历史数据（按日期正序）
+    let rows = sqlx::query_as::<_, HistoricalData>(
+        r#"
+        SELECT symbol, date, open, high, low, close, volume, amount,
+               amplitude, turnover_rate, volume_ratio, change_percent, change
+        FROM historical_data
+        WHERE symbol = ?
+        ORDER BY date ASC
+        "#,
+    )
+    .bind(symbol)
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let volumes: Vec<f64> = rows.iter().map(|r| r.volume as f64).collect();
+    let volume_ratios = calculate_volume_ratio_series(&volumes, DEFAULT_VOLUME_RATIO_PERIOD);
+    let circulating_shares = get_stock_capital(symbol, pool)
+        .await?
+        .map(|c| c.circulating_shares)
+        .unwrap_or(0.0);
+
+    let mut tx = pool.begin().await?;
+    let mut updated = 0u64;
+    for (i, row) in rows.iter().enumerate() {
+        let turnover = calculate_turnover_rate(row.amount, row.close, circulating_shares);
+        let result = sqlx::query(
+            "UPDATE historical_data SET volume_ratio = ?, turnover_rate = ? WHERE symbol = ? AND date = ?",
+        )
+        .bind(volume_ratios[i])
+        .bind(turnover)
+        .bind(symbol)
+        .bind(row.date)
+        .execute(&mut *tx)
+        .await?;
+        updated += result.rows_affected();
+    }
+    tx.commit().await?;
+
+    // 同步最新一日到 realtime_data
+    if let Some(last) = rows.last() {
+        let last_turnover = calculate_turnover_rate(last.amount, last.close, circulating_shares);
+        sqlx::query(
+            "UPDATE realtime_data SET volume_ratio = ?, turnover_rate = ? WHERE symbol = ?",
+        )
+        .bind(volume_ratios[rows.len() - 1])
+        .bind(last_turnover)
+        .bind(symbol)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(updated)
 }
 

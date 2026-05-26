@@ -86,28 +86,35 @@ pub async fn evaluate_candle_model(model_id: String) -> Result<EvaluationResult,
     inference::evaluate_model(model_id).await
 }
 
-/// 执行回测
+/// 执行回测（真实 walk-forward：逐日仅用历史数据预测并与未来真实涨跌对比）
 #[tauri::command]
 pub async fn run_model_backtest(request: BacktestRequest) -> Result<BacktestReport, String> {
-    // 简化版回测实现
+    use crate::prediction::backtest::{run_backtest, MIN_LOOKBACK};
+
     let pool = create_temp_pool().await?;
-    let historical = get_recent_historical_data(&request.stock_code, 200, &pool)
+    let historical = get_recent_historical_data(&request.stock_code, 400, &pool)
         .await
         .map_err(|e| format!("获取历史数据失败: {e}"))?;
-    
+
     if historical.is_empty() {
         return Err("未找到历史数据".to_string());
     }
-    
-    // 模拟回测结果
+
+    let horizon = request.prediction_days.max(1);
+    let report = run_backtest(&request.stock_code, &historical, MIN_LOOKBACK, horizon, 1)?;
+    let m = &report.metrics;
+
+    // 价格准确率：由平均绝对误差换算的有界评分（误差 10 个百分点对应 0 分）
+    let price_accuracy = (1.0 - m.mean_abs_error / 10.0).clamp(0.0, 1.0);
+
     Ok(BacktestReport {
         stock_code: request.stock_code,
         model_name: request.model_name.unwrap_or_else(|| "default".to_string()),
         backtest_period: format!("{} 至 {}", request.start_date, request.end_date),
-        total_predictions: request.prediction_days,
-        overall_price_accuracy: 0.65,
-        overall_direction_accuracy: 0.70,
-        average_prediction_error: 1.5,
+        total_predictions: m.total,
+        overall_price_accuracy: price_accuracy,
+        overall_direction_accuracy: m.direction_accuracy,
+        average_prediction_error: m.mean_abs_error,
     })
 }
 

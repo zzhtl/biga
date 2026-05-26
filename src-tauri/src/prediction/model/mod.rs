@@ -5,6 +5,9 @@
 pub mod training;
 pub mod inference;
 pub mod management;
+pub mod features;
+pub mod network;
+pub mod ml_inference;
 
 pub use training::*;
 pub use inference::*;

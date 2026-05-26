@@ -11,6 +11,7 @@ pub mod indicators;
 pub mod analysis;
 pub mod strategy;
 pub mod model;
+pub mod backtest;
 
 // 重新导出常用类型
 pub use types::*;

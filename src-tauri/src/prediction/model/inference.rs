@@ -49,113 +49,28 @@ pub async fn predict(request: PredictionRequest) -> Result<PredictionResponse, S
     let last_data = historical.last().unwrap();
     
     // =========================================================================
-    // 第一阶段：市场状态分析（核心创新）
+    // 第一~十阶段：完整分析管线（抽取为 analyze 复用于回测/模型评估）
     // =========================================================================
-    let regime_analysis = market_regime::classify_market_regime(&prices, &highs, &lows);
-    
-    // =========================================================================
-    // 第二阶段：技术分析
-    // =========================================================================
-    let trend_analysis = trend::analyze_trend(&prices, &highs, &lows);
-    let volume_signal = volume::analyze_volume_price(&prices, &highs, &lows, &volumes);
-    let patterns = pattern::recognize_patterns(&opens, &prices, &highs, &lows);
-    let sr = support_resistance::calculate_support_resistance(&prices, &highs, &lows, current_price);
-    let tech_indicators = indicators::calculate_all_indicators(&prices, &highs, &lows, &volumes);
-    
-    // =========================================================================
-    // 第三阶段：增强背离检测（包括隐藏背离和三重背离）
-    // =========================================================================
-    let divergence_analysis = divergence::analyze_all_divergences(&prices, &highs, &lows, &volumes);
-    
-    // =========================================================================
-    // 第四阶段：GARCH波动率预测
-    // =========================================================================
-    let volatility = trend::calculate_historical_volatility(&prices, 20);
-    let vol_forecast = volatility_forecast::GarchForecaster::from_prices(&prices)
-        .forecast(request.prediction_days);
-    
-    // =========================================================================
-    // 第五阶段：信号确认与冲突检测
-    // =========================================================================
-    let signal_confirm = signal_confirmation::analyze_signal_confirmation(
-        &tech_indicators,
-        &trend_analysis.overall_trend,
-        &volume_signal,
-        &regime_analysis.regime,
-        &regime_analysis.volatility_level,
+    let AnalysisBundle {
+        regime_analysis,
+        tech_indicators,
+        divergence_analysis,
+        vol_forecast,
+        signal_confirm,
+        multi_factor_score,
+        enhanced_prediction,
+        professional_result,
+        ..
+    } = analyze(
+        &prices,
+        &highs,
+        &lows,
+        &volumes,
+        &opens,
+        last_data.turnover_rate,
+        request.prediction_days,
     );
-    
-    // =========================================================================
-    // 第六阶段：自适应权重计算
-    // =========================================================================
-    let _dynamic_weights = adaptive_weights::calculate_dynamic_weights(
-        &regime_analysis.regime,
-        regime_analysis.volatility_percentile,
-        trend_analysis.trend_strength,
-    );
-    
-    // =========================================================================
-    // 第七阶段：自适应多因子评分
-    // =========================================================================
-    let multi_factor_score = multi_factor::calculate_adaptive_multi_factor_score(
-        &trend_analysis.overall_trend,
-        &volume_signal,
-        &tech_indicators,
-        &patterns,
-        &sr,
-        volatility,
-        Some(&regime_analysis.regime),
-        Some(&regime_analysis.volatility_level),
-    );
-    
-    // =========================================================================
-    // 第八阶段：VWAP均值回归分析
-    // =========================================================================
-    let vwap_signal = indicators::vwap::analyze_vwap_signal(&highs, &lows, &prices, &volumes, 20);
-    let bb = indicators::bollinger::calculate_bollinger_bands(&prices, 20, 2.0);
-    let bollinger_position = (current_price - bb.middle) / (bb.upper - bb.lower).max(0.001);
-    
-    // =========================================================================
-    // 第九阶段：增强价格预测模型
-    // =========================================================================
-    let recent_momentum = if prices.len() >= 5 {
-        (prices[prices.len() - 1] - prices[prices.len() - 5]) / prices[prices.len() - 5]
-    } else {
-        0.0
-    };
-    
-    let price_ctx = price_model::PricePredictionContext {
-        current_price,
-        volatility,
-        regime: regime_analysis.regime,
-        volatility_level: regime_analysis.volatility_level,
-        trend: trend_analysis.overall_trend.clone(),
-        vwap_deviation: vwap_signal.deviation,
-        bollinger_position,
-        support_resistance: sr.clone(),
-        recent_momentum,
-    };
-    
-    let enhanced_prediction = price_model::calculate_enhanced_price_prediction(&price_ctx);
-    
-    // =========================================================================
-    // 第十阶段：专业预测引擎执行
-    // =========================================================================
-    let prediction_ctx = professional_engine::PredictionContext {
-        current_price,
-        market_regime: regime_analysis.clone(),
-        trend_analysis: trend_analysis.clone(),
-        volume_signal: volume_signal.clone(),
-        divergence: divergence_analysis.clone(),
-        indicators: tech_indicators.clone(),
-        patterns: patterns.clone(),
-        support_resistance: sr.clone(),
-        multi_factor_score: multi_factor_score.clone(),
-        volatility,
-    };
-    
-    let professional_result = professional_engine::execute_professional_prediction(&prediction_ctx);
-    
+
     // =========================================================================
     // 第十一阶段：生成预测序列
     // =========================================================================
@@ -229,6 +144,141 @@ pub async fn predict(request: PredictionRequest) -> Result<PredictionResponse, S
             change_percent: last_data.change_percent,
         }),
     })
+}
+
+/// 完整分析管线产出的中间结果集合
+pub struct AnalysisBundle {
+    pub regime_analysis: market_regime::MarketRegimeAnalysis,
+    pub trend_analysis: trend::TrendAnalysis,
+    pub volume_signal: volume::VolumePriceSignal,
+    pub patterns: Vec<pattern::PatternRecognition>,
+    pub support_resistance: support_resistance::SupportResistance,
+    pub tech_indicators: indicators::TechnicalIndicatorValues,
+    pub divergence_analysis: divergence::DivergenceAnalysis,
+    pub volatility: f64,
+    pub vol_forecast: volatility_forecast::VolatilityForecast,
+    pub signal_confirm: signal_confirmation::SignalConfirmationResult,
+    pub multi_factor_score: multi_factor::MultiFactorScore,
+    pub enhanced_prediction: price_model::PricePredictionResult,
+    pub professional_result: professional_engine::ProfessionalPredictionResult,
+}
+
+/// 执行完整分析管线（不含逐日预测序列生成），供 predict 与回测复用。
+///
+/// 调用方需保证数据长度足够（≥60 个交易日）。
+pub fn analyze(
+    prices: &[f64],
+    highs: &[f64],
+    lows: &[f64],
+    volumes: &[i64],
+    opens: &[f64],
+    turnover_rate: f64,
+    prediction_days: usize,
+) -> AnalysisBundle {
+    let current_price = *prices.last().unwrap();
+
+    // 第一阶段：市场状态
+    let regime_analysis = market_regime::classify_market_regime(prices, highs, lows);
+
+    // 第二阶段：技术分析
+    let trend_analysis = trend::analyze_trend(prices, highs, lows);
+    let volume_signal = volume::analyze_volume_price(prices, highs, lows, volumes);
+    let patterns = pattern::recognize_patterns(opens, prices, highs, lows);
+    let sr = support_resistance::calculate_support_resistance(prices, highs, lows, current_price);
+    let mut tech_indicators = indicators::calculate_all_indicators(prices, highs, lows, volumes);
+    // 换手率来自历史数据回填（量比已在 calculate_all_indicators 内计算）
+    tech_indicators.turnover_rate = turnover_rate;
+
+    // 第三阶段：背离
+    let divergence_analysis = divergence::analyze_all_divergences(prices, highs, lows, volumes);
+
+    // 第四阶段：GARCH 波动率
+    let volatility = trend::calculate_historical_volatility(prices, 20);
+    let vol_forecast =
+        volatility_forecast::GarchForecaster::from_prices(prices).forecast(prediction_days);
+
+    // 第五阶段：信号确认
+    let signal_confirm = signal_confirmation::analyze_signal_confirmation(
+        &tech_indicators,
+        &trend_analysis.overall_trend,
+        &volume_signal,
+        &regime_analysis.regime,
+        &regime_analysis.volatility_level,
+    );
+
+    // 第六阶段：自适应权重（保留以维持原行为）
+    let _dynamic_weights = adaptive_weights::calculate_dynamic_weights(
+        &regime_analysis.regime,
+        regime_analysis.volatility_percentile,
+        trend_analysis.trend_strength,
+    );
+
+    // 第七阶段：自适应多因子评分
+    let multi_factor_score = multi_factor::calculate_adaptive_multi_factor_score(
+        &trend_analysis.overall_trend,
+        &volume_signal,
+        &tech_indicators,
+        &patterns,
+        &sr,
+        volatility,
+        Some(&regime_analysis.regime),
+        Some(&regime_analysis.volatility_level),
+    );
+
+    // 第八阶段：VWAP 与布林带
+    let vwap_signal = indicators::vwap::analyze_vwap_signal(highs, lows, prices, volumes, 20);
+    let bb = indicators::bollinger::calculate_bollinger_bands(prices, 20, 2.0);
+    let bollinger_position = (current_price - bb.middle) / (bb.upper - bb.lower).max(0.001);
+
+    // 第九阶段：增强价格预测模型
+    let recent_momentum = if prices.len() >= 5 {
+        (prices[prices.len() - 1] - prices[prices.len() - 5]) / prices[prices.len() - 5]
+    } else {
+        0.0
+    };
+    let price_ctx = price_model::PricePredictionContext {
+        current_price,
+        volatility,
+        regime: regime_analysis.regime,
+        volatility_level: regime_analysis.volatility_level,
+        trend: trend_analysis.overall_trend.clone(),
+        vwap_deviation: vwap_signal.deviation,
+        bollinger_position,
+        support_resistance: sr.clone(),
+        recent_momentum,
+    };
+    let enhanced_prediction = price_model::calculate_enhanced_price_prediction(&price_ctx);
+
+    // 第十阶段：专业预测引擎
+    let prediction_ctx = professional_engine::PredictionContext {
+        current_price,
+        market_regime: regime_analysis.clone(),
+        trend_analysis: trend_analysis.clone(),
+        volume_signal: volume_signal.clone(),
+        divergence: divergence_analysis.clone(),
+        indicators: tech_indicators.clone(),
+        patterns: patterns.clone(),
+        support_resistance: sr.clone(),
+        multi_factor_score: multi_factor_score.clone(),
+        volatility,
+    };
+    let professional_result = professional_engine::execute_professional_prediction(&prediction_ctx);
+
+    AnalysisBundle {
+        regime_analysis,
+        trend_analysis,
+        volume_signal,
+        patterns,
+        support_resistance: sr,
+        tech_indicators,
+        divergence_analysis,
+        volatility,
+        vol_forecast,
+        signal_confirm,
+        multi_factor_score,
+        enhanced_prediction,
+        professional_result,
+    }
 }
 
 /// 计算单日预测（基础版本，保留向后兼容）
@@ -526,20 +576,36 @@ pub async fn predict_simple(request: PredictionRequest) -> Result<PredictionResp
     predict(request).await
 }
 
-/// 评估模型
+/// 评估模型：加载已训练权重，在最近历史数据上计算真实指标
 pub async fn evaluate_model(model_id: String) -> Result<EvaluationResult, String> {
+    use crate::prediction::model::management::get_model_file_path;
+    use crate::prediction::model::ml_inference::{evaluate_on, MlPredictor};
+
     let metadata = load_model_metadata(&model_id)?;
-    
+    let model_path = get_model_file_path(&model_id);
+    if !model_path.exists() {
+        return Err("模型权重文件不存在，请先训练".to_string());
+    }
+
+    let predictor = MlPredictor::load(&model_path)?;
+
+    let pool = create_temp_pool().await?;
+    let historical = get_recent_historical_data(&metadata.stock_code, 250, &pool)
+        .await
+        .map_err(|e| format!("获取历史数据失败: {e}"))?;
+
+    let (direction_accuracy, mae, rmse, test_samples) = evaluate_on(&historical, &predictor);
+
     Ok(EvaluationResult {
         model_id,
         model_name: metadata.name,
         stock_code: metadata.stock_code,
-        test_samples: 0,
-        accuracy: metadata.accuracy,
-        direction_accuracy: metadata.accuracy,
-        mse: 0.0,
-        mae: 0.0,
-        rmse: 0.0,
+        test_samples,
+        accuracy: direction_accuracy,
+        direction_accuracy,
+        mse: rmse * rmse,
+        mae,
+        rmse,
         evaluation_date: chrono::Local::now().format("%Y-%m-%d").to_string(),
     })
 }

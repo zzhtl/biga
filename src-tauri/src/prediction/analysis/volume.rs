@@ -11,6 +11,8 @@ pub struct VolumePriceSignal {
     pub signal: String,
     pub price_trend: String,
     pub volume_trend: String,
+    /// 量比 = 当日成交量 / 过去5日平均成交量
+    pub volume_ratio: f64,
     pub key_factors: Vec<String>,
 }
 
@@ -31,6 +33,7 @@ pub fn analyze_volume_price(
             signal: "数据不足".to_string(),
             price_trend: "未知".to_string(),
             volume_trend: "未知".to_string(),
+            volume_ratio: 1.0,
             key_factors: vec!["数据不足".to_string()],
         };
     }
@@ -53,7 +56,13 @@ pub fn analyze_volume_price(
     // 成交量趋势分析
     let recent_5_vol_avg = volumes[len - 5..].iter().sum::<i64>() as f64 / 5.0;
     let latest_volume = *volumes.last().unwrap() as f64;
-    
+    // 量比：当日成交量 / 过去5日平均成交量
+    let volume_ratio = if recent_5_vol_avg > 0.0 {
+        latest_volume / recent_5_vol_avg
+    } else {
+        1.0
+    };
+
     let volume_trend = if latest_volume > recent_5_vol_avg * 1.5 {
         "显著放量"
     } else if latest_volume > recent_5_vol_avg * 1.2 {
@@ -161,6 +170,7 @@ pub fn analyze_volume_price(
         signal,
         price_trend: price_trend.to_string(),
         volume_trend: volume_trend.to_string(),
+        volume_ratio,
         key_factors,
     }
 }

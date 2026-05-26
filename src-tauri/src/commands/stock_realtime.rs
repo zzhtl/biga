@@ -23,6 +23,7 @@ pub async fn get_realtime_data(
                 COALESCE(amount, 0.00) as amount,
                 COALESCE(amplitude, 0.00) as amplitude,
                 COALESCE(turnover_rate, 0.00) as turnover_rate,
+                COALESCE(volume_ratio, 0.00) as volume_ratio,
                 COALESCE(change_percent, 0.00) as change_percent,
                 COALESCE(change, 0.00) as change
                 FROM realtime_data ORDER BY {order_by}
@@ -43,6 +44,7 @@ pub async fn get_realtime_data(
                 COALESCE(amount, 0.00) as amount,
                 COALESCE(amplitude, 0.00) as amplitude,
                 COALESCE(turnover_rate, 0.00) as turnover_rate,
+                COALESCE(volume_ratio, 0.00) as volume_ratio,
                 COALESCE(change_percent, 0.00) as change_percent,
                 COALESCE(change, 0.00) as change
                 FROM realtime_data

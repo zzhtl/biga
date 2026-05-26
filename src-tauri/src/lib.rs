@@ -75,14 +75,31 @@ pub fn run() {
                     .expect("Failed to create database pool");
                 
                 // 执行迁移脚本
-                let migration_files = ["01_create_tables.sql", "02_stock_prediction_model.sql"];
+                let migration_files = [
+                    "01_create_tables.sql",
+                    "02_stock_prediction_model.sql",
+                    "03_volume_metrics.sql",
+                ];
                 for file in &migration_files {
                     let path = Path::new("migrations").join(file);
                     if path.exists() {
                         let sql = fs::read_to_string(&path)
                             .expect("Failed to read migration file");
-                        sqlx::query(&sql).execute(&pool).await
-                            .expect("Failed to execute migration");
+                        // 按语句拆分执行，幂等地忽略 "duplicate column" 错误
+                        // （SQLite 不支持 ALTER TABLE ADD COLUMN IF NOT EXISTS）
+                        for statement in sql.split(';') {
+                            let statement = statement.trim();
+                            if statement.is_empty() {
+                                continue;
+                            }
+                            if let Err(e) = sqlx::query(statement).execute(&pool).await {
+                                let msg = e.to_string();
+                                if msg.contains("duplicate column name") {
+                                    continue;
+                                }
+                                panic!("Failed to execute migration {file}: {e}");
+                            }
+                        }
                     }
                 }
                 

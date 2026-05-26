@@ -73,7 +73,11 @@ pub struct HistoricalData {
     pub volume: i64,
     pub amount: f64,
     pub amplitude: f64,
+    /// 换手率（%）= 成交额 / 流通市值 × 100，回填得到
     pub turnover_rate: f64,
+    /// 量比 = 当日成交量 / 过去 N 日平均成交量，回填得到
+    #[sqlx(default)]
+    pub volume_ratio: f64,
     pub change_percent: f64,
     pub change: f64,
 }
@@ -125,7 +129,8 @@ impl HistoricalDataItem {
             volume: (self.volume * 100.0) as i64, // 手转股
             amount: self.amount,
             amplitude,
-            turnover_rate: 0.0, // API未提供
+            turnover_rate: 0.0, // 由 backfill_volume_metrics 回填
+            volume_ratio: 0.0,  // 由 backfill_volume_metrics 回填
             change_percent,
             change,
         })
@@ -150,8 +155,43 @@ pub struct RealtimeData {
     pub amount: f64,
     pub amplitude: f64,
     pub turnover_rate: f64,
+    #[sqlx(default)]
+    pub volume_ratio: f64,
     pub change_percent: f64,
     pub change: f64,
+}
+
+// =============================================================================
+// 股本信息（量比/换手率计算所需）
+// =============================================================================
+
+/// 股本数据（来自实时接口 hs/real/ssjy）
+#[derive(Debug, Clone, Default, Serialize, Deserialize, FromRow)]
+pub struct StockCapital {
+    pub symbol: String,
+    /// 流通股本（股）= 流通市值 / 最新价
+    pub circulating_shares: f64,
+    /// 总股本（股）= 总市值 / 最新价
+    pub total_shares: f64,
+    /// 流通市值（元）
+    pub circulating_market_cap: f64,
+}
+
+/// 实时行情接口（hs/real/ssjy）响应中与股本/量比/换手率相关的字段
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RealtimeQuoteItem {
+    /// 流通市值（元）
+    #[serde(rename = "lt", default)]
+    pub circulating_market_cap: f64,
+    /// 总市值（元）
+    #[serde(rename = "sz", default)]
+    pub total_market_cap: f64,
+    /// 换手率（%）
+    #[serde(rename = "hs", default)]
+    pub turnover_rate: f64,
+    /// 量比（%）
+    #[serde(rename = "lb", default)]
+    pub volume_ratio: f64,
 }
 
 // =============================================================================

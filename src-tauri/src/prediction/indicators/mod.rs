@@ -67,6 +67,10 @@ pub struct TechnicalIndicatorValues {
     pub br: f64,
     pub ar: f64,
     pub atr: f64,
+    /// 量比 = 当日成交量 / 过去N日平均成交量（1.0 为均量水平）
+    pub volume_ratio: f64,
+    /// 换手率（%），由历史数据回填，调用方填充
+    pub turnover_rate: f64,
 }
 
 impl Default for TechnicalIndicatorValues {
@@ -97,6 +101,8 @@ impl Default for TechnicalIndicatorValues {
             br: 100.0,
             ar: 100.0,
             atr: 0.0,
+            volume_ratio: 1.0,
+            turnover_rate: 0.0,
         }
     }
 }
@@ -251,7 +257,21 @@ pub fn calculate_all_indicators(
     if highs.len() >= 14 && lows.len() >= 14 && prices.len() >= 14 {
         result.atr = atr::calculate_atr(highs, lows, prices, 14);
     }
-    
+
+    // 量比（当日成交量 / 过去N日平均成交量）
+    if volumes.len() > crate::utils::volume_metrics::DEFAULT_VOLUME_RATIO_PERIOD {
+        let vols: Vec<f64> = volumes.iter().map(|&v| v as f64).collect();
+        let ratios = crate::utils::volume_metrics::calculate_volume_ratio_series(
+            &vols,
+            crate::utils::volume_metrics::DEFAULT_VOLUME_RATIO_PERIOD,
+        );
+        if let Some(&last) = ratios.last() {
+            if last > 0.0 {
+                result.volume_ratio = last;
+            }
+        }
+    }
+
     result
 }
 
