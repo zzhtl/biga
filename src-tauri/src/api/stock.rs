@@ -16,6 +16,17 @@ fn api_token() -> String {
         .unwrap_or_else(|_| "C5BFE522-34E7-4931-8216-CAD281648165".to_string())
 }
 
+/// 将各种格式的股票代码归一化为 zhitu 实时接口所需的纯 6 位数字代码。
+/// 例如 "000002.SZ" / "sz000002" → "000002"。
+fn normalize_quote_symbol(symbol: &str) -> String {
+    let digits: String = symbol.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() >= 6 {
+        digits[..6].to_string()
+    } else {
+        symbol.to_string()
+    }
+}
+
 pub async fn fetch_stock_infos() -> Result<Vec<StockInfo>, AppError> {
     println!("开始获取股票信息...");
     
@@ -142,7 +153,9 @@ fn parse_historical_data(
 /// 用于推导流通股本以计算历史换手率。网络或解析失败时返回 Err，调用方应优雅降级。
 pub async fn fetch_stock_capital(symbol: &str) -> Result<RealtimeQuoteItem, AppError> {
     let token = api_token();
-    let url = format!("{REALTIME_API}/{symbol}?token={token}");
+    // ssjy 接口只接受纯 6 位数字代码（如 000002），需从 000002.SZ / sz000002 归一化
+    let code = normalize_quote_symbol(symbol);
+    let url = format!("{REALTIME_API}/{code}?token={token}");
 
     let response = reqwest::Client::new()
         .get(&url)
@@ -167,6 +180,16 @@ pub async fn fetch_stock_capital(symbol: &str) -> Result<RealtimeQuoteItem, AppE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_quote_symbol() {
+        // ssjy 接口要求纯 6 位数字
+        assert_eq!(normalize_quote_symbol("000002.SZ"), "000002");
+        assert_eq!(normalize_quote_symbol("sz000001"), "000001");
+        assert_eq!(normalize_quote_symbol("600519.SH"), "600519");
+        assert_eq!(normalize_quote_symbol("600519"), "600519");
+        assert_eq!(normalize_quote_symbol("000001"), "000001");
+    }
 
     #[test]
     fn test_parse_historical_data_item() {

@@ -1,5 +1,6 @@
 //! 各因子评分（趋势/量价/动量/形态/支撑阻力/情绪/波动率）
 
+use crate::config::weights::{TURNOVER_RATE_IMPACT, VOLUME_RATIO_IMPACT};
 use crate::prediction::analysis::market_regime::VolatilityLevel;
 use crate::prediction::analysis::{
     PatternRecognition, SupportResistance, TrendState, VolumePriceSignal,
@@ -64,23 +65,24 @@ pub(super) fn calculate_volume_price_score_enhanced(
         0.0
     };
 
-    // 量比确认：放量配合方向加分，缩量背离减分
+    // 量比确认：放量配合方向加分，缩量背离减分（系数见 config::weights::VOLUME_RATIO_IMPACT）
     let vr = indicators.volume_ratio;
+    let vr_impact = VOLUME_RATIO_IMPACT;
     let volume_ratio_adjustment: f64 = match signal.direction.as_str() {
         "上涨" => {
             if vr > 1.5 {
-                0.10 // 放量上涨，量价齐升
+                vr_impact // 放量上涨，量价齐升
             } else if vr < 0.7 {
-                -0.06 // 缩量上涨，动能存疑
+                -vr_impact * 0.6 // 缩量上涨，动能存疑
             } else {
                 0.0
             }
         }
         "下跌" => {
             if vr > 1.5 {
-                -0.10 // 放量下跌，抛压加剧
+                -vr_impact // 放量下跌，抛压加剧
             } else if vr < 0.7 {
-                0.05 // 缩量下跌，抛压减轻
+                vr_impact * 0.5 // 缩量下跌，抛压减轻
             } else {
                 0.0
             }
@@ -89,11 +91,12 @@ pub(super) fn calculate_volume_price_score_enhanced(
     };
 
     // 换手率：适度换手(2%-15%)流动性健康、信号更可信；极高换手(>15%)警惕过热
+    // 系数见 config::weights::TURNOVER_RATE_IMPACT
     let turnover = indicators.turnover_rate;
     let turnover_adjustment: f64 = if turnover > 15.0 {
-        -0.04
+        -TURNOVER_RATE_IMPACT
     } else if turnover >= 2.0 {
-        0.03
+        TURNOVER_RATE_IMPACT * 0.75
     } else {
         0.0
     };

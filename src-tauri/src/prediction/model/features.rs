@@ -108,17 +108,19 @@ fn features_at(h: &[HistoricalData], i: usize) -> [f32; FEATURE_DIM] {
 
     let amplitude = (h[i].amplitude / 10.0) as f32;
 
+    // 确定性量纲缩放：把各特征拉到 ~±1 同一量级，避免收益率被量比淹没。
+    // 训练与推理使用同一变换，无需存储统计量。
     [
-        ret_1,
-        ret_5,
-        ret_10,
-        ma_ratio,
-        (rsi / 100.0) - 0.5,
-        volatility,
+        ret_1 * 25.0,
+        ret_5 * 12.0,
+        ret_10 * 8.0,
+        ma_ratio * 15.0,
+        ((rsi / 100.0) - 0.5) * 2.0,
+        volatility * 30.0,
         (volume_ratio - 1.0).clamp(-2.0, 3.0),
-        turnover,
-        pos,
-        amplitude,
+        turnover, // 换手率/10，缺数据时为 0
+        pos * 2.0,
+        amplitude * 2.0,
     ]
 }
 

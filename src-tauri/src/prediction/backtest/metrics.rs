@@ -7,6 +7,9 @@ pub struct BacktestSample {
     pub actual_change: f64,
 }
 
+/// 高置信度阈值：|预测涨跌幅| ≥ 该值（百分点）才计入高置信子集
+pub const HIGH_CONVICTION_THRESHOLD: f64 = 1.5;
+
 /// 回测指标汇总
 #[derive(Debug, Clone)]
 pub struct BacktestMetrics {
@@ -24,6 +27,10 @@ pub struct BacktestMetrics {
     pub strategy_return: f64,
     /// 策略胜率 (0-1)
     pub win_rate: f64,
+    /// 高置信子集样本数（|预测| ≥ 阈值）
+    pub high_conviction_total: usize,
+    /// 高置信子集方向准确率 (0-1)
+    pub high_conviction_accuracy: f64,
 }
 
 impl Default for BacktestMetrics {
@@ -36,6 +43,8 @@ impl Default for BacktestMetrics {
             rmse: 0.0,
             strategy_return: 0.0,
             win_rate: 0.0,
+            high_conviction_total: 0,
+            high_conviction_accuracy: 0.0,
         }
     }
 }
@@ -52,6 +61,8 @@ pub fn compute_metrics(samples: &[BacktestSample]) -> BacktestMetrics {
     let mut sq_error_sum = 0.0;
     let mut strategy_return = 0.0;
     let mut wins = 0usize;
+    let mut hc_total = 0usize;
+    let mut hc_correct = 0usize;
 
     for s in samples {
         // 方向：同号视为正确
@@ -59,6 +70,14 @@ pub fn compute_metrics(samples: &[BacktestSample]) -> BacktestMetrics {
             || (s.predicted_change < 0.0 && s.actual_change < 0.0);
         if same_dir {
             direction_correct += 1;
+        }
+
+        // 高置信子集：仅当预测幅度足够大
+        if s.predicted_change.abs() >= HIGH_CONVICTION_THRESHOLD {
+            hc_total += 1;
+            if same_dir {
+                hc_correct += 1;
+            }
         }
 
         let err = (s.predicted_change - s.actual_change).abs();
@@ -82,6 +101,12 @@ pub fn compute_metrics(samples: &[BacktestSample]) -> BacktestMetrics {
         rmse: (sq_error_sum / total as f64).sqrt(),
         strategy_return,
         win_rate: wins as f64 / total as f64,
+        high_conviction_total: hc_total,
+        high_conviction_accuracy: if hc_total > 0 {
+            hc_correct as f64 / hc_total as f64
+        } else {
+            0.0
+        },
     }
 }
 
