@@ -192,7 +192,7 @@
         candle_patterns: any[];
         volume_analysis: any;
         multi_factor_score: {
-            // 后端可能在某些场景下不返回 total_score
+            // 后端某些场景可能缺少这个字段
             total_score?: number;
             factors: any[];
             signal_quality: any;
@@ -249,8 +249,7 @@
     let isTechnicalPredicting = false;
 
     function normalizeNumber(value: any): number {
-        // 将后端可能返回的数字字符串/undefined 统一为 number，
-        // 避免模板渲染阶段直接对 undefined/字符串调用 toFixed / length。
+        // 统一处理后端返回的 number/string/undefined，避免模板渲染阶段直接异常。
         return Number(value);
     }
 
@@ -309,42 +308,46 @@
     }
 
     function normalizeProfessionalPrediction(raw: any): ProfessionalPrediction {
-        const srRaw = raw?.support_resistance ?? {};
-        const mtRaw = raw?.multi_timeframe ?? {};
-        const divRaw = raw?.divergence ?? {};
-        const mfsRaw = raw?.multi_factor_score ?? {};
+        const supportResistanceRaw = raw?.support_resistance ?? {};
+        const multiTimeframeRaw = raw?.multi_timeframe ?? {};
+        const divergenceRaw = raw?.divergence ?? {};
+        const multiFactorScoreRaw = raw?.multi_factor_score ?? {};
 
         return {
             buy_points: Array.isArray(raw?.buy_points) ? raw.buy_points.map(normalizeBuySellPoint) : [],
             sell_points: Array.isArray(raw?.sell_points) ? raw.sell_points.map(normalizeBuySellPoint) : [],
             support_resistance: {
-                support_levels: Array.isArray(srRaw?.support_levels) ? srRaw.support_levels.map(normalizeNumber) : [],
-                resistance_levels: Array.isArray(srRaw?.resistance_levels) ? srRaw.resistance_levels.map(normalizeNumber) : [],
-                current_position: String(srRaw?.current_position ?? ""),
+                support_levels: Array.isArray(supportResistanceRaw?.support_levels)
+                    ? supportResistanceRaw.support_levels.map(normalizeNumber)
+                    : [],
+                resistance_levels: Array.isArray(supportResistanceRaw?.resistance_levels)
+                    ? supportResistanceRaw.resistance_levels.map(normalizeNumber)
+                    : [],
+                current_position: String(supportResistanceRaw?.current_position ?? ""),
             },
             multi_timeframe: {
-                daily_trend: String(mtRaw?.daily_trend ?? ""),
-                weekly_trend: String(mtRaw?.weekly_trend ?? ""),
-                monthly_trend: String(mtRaw?.monthly_trend ?? ""),
-                resonance_level: normalizeNumber(mtRaw?.resonance_level),
-                resonance_direction: String(mtRaw?.resonance_direction ?? ""),
-                signal_quality: normalizeNumber(mtRaw?.signal_quality),
+                daily_trend: String(multiTimeframeRaw?.daily_trend ?? ""),
+                weekly_trend: String(multiTimeframeRaw?.weekly_trend ?? ""),
+                monthly_trend: String(multiTimeframeRaw?.monthly_trend ?? ""),
+                resonance_level: normalizeNumber(multiTimeframeRaw?.resonance_level),
+                resonance_direction: String(multiTimeframeRaw?.resonance_direction ?? ""),
+                signal_quality: normalizeNumber(multiTimeframeRaw?.signal_quality),
             },
             divergence: {
-                has_bullish_divergence: Boolean(divRaw?.has_bullish_divergence),
-                has_bearish_divergence: Boolean(divRaw?.has_bearish_divergence),
-                divergence_strength: normalizeNumber(divRaw?.divergence_strength),
-                warning_message: String(divRaw?.warning_message ?? ""),
+                has_bullish_divergence: Boolean(divergenceRaw?.has_bullish_divergence),
+                has_bearish_divergence: Boolean(divergenceRaw?.has_bearish_divergence),
+                divergence_strength: normalizeNumber(divergenceRaw?.divergence_strength),
+                warning_message: String(divergenceRaw?.warning_message ?? ""),
             },
             current_advice: String(raw?.current_advice ?? ""),
             risk_level: String(raw?.risk_level ?? ""),
             candle_patterns: Array.isArray(raw?.candle_patterns) ? raw.candle_patterns : [],
             volume_analysis: raw?.volume_analysis ?? {},
             multi_factor_score: {
-                total_score: mfsRaw?.total_score,
-                factors: Array.isArray(mfsRaw?.factors) ? mfsRaw.factors : [],
-                signal_quality: mfsRaw?.signal_quality ?? null,
-                operation_suggestion: String(mfsRaw?.operation_suggestion ?? ""),
+                total_score: multiFactorScoreRaw?.total_score,
+                factors: Array.isArray(multiFactorScoreRaw?.factors) ? multiFactorScoreRaw.factors : [],
+                signal_quality: multiFactorScoreRaw?.signal_quality ?? null,
+                operation_suggestion: String(multiFactorScoreRaw?.operation_suggestion ?? ""),
             },
         };
     }
@@ -402,11 +405,10 @@
             }
             
             if (predictions.length > 0 && professionalAnalysis) {
-                // 后端偶发缺字段/或返回数字字符串，避免在 toFixed 处直接抛异常
-                const totalScoreRaw = (professionalAnalysis.multi_factor_score as any)?.total_score;
-                const totalScoreNum =
+                const totalScoreRaw = professionalAnalysis.multi_factor_score?.total_score;
+                const totalScore =
                     typeof totalScoreRaw === "number" ? totalScoreRaw : Number(totalScoreRaw);
-                const totalScoreText = Number.isFinite(totalScoreNum) ? `${totalScoreNum.toFixed(1)}/100` : "—/100";
+                const totalScoreText = Number.isFinite(totalScore) ? `${totalScore.toFixed(1)}/100` : "—/100";
 
                 await alert(
                     `✅ 纯技术分析预测成功！\n基于${technicalHistoryDays}天历史数据\n预测未来${technicalPredictionDays}天走势\n\n综合评分: ${totalScoreText}`
