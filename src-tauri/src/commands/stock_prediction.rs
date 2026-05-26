@@ -64,10 +64,10 @@ pub async fn predict_stock_price(request: PredictionRequest) -> Result<Predictio
     inference::predict(request).await
 }
 
-/// 使用 Candle 进行预测
+/// 使用 Candle 进行预测（有已训练模型时走 ML，否则回退规则引擎）
 #[tauri::command]
 pub async fn predict_with_candle(request: PredictionRequest) -> Result<PredictionResponse, String> {
-    inference::predict(request).await
+    inference::predict_with_model(request).await
 }
 
 /// 简化策略预测

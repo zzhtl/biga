@@ -148,6 +148,15 @@ pub fn build_dataset(historical: &[HistoricalData]) -> (Vec<f32>, Vec<f32>, usiz
     (features, labels, n)
 }
 
+/// 提取最新一个交易日（无标签）的特征向量，用于实时预测。
+pub fn latest_features(historical: &[HistoricalData]) -> Option<Vec<f32>> {
+    let len = historical.len();
+    if len < LOOKBACK + 1 {
+        return None;
+    }
+    Some(features_at(historical, len - 1).to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

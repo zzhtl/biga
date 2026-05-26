@@ -576,6 +576,87 @@ pub async fn predict_simple(request: PredictionRequest) -> Result<PredictionResp
     predict(request).await
 }
 
+/// 使用已训练的 Candle 模型预测；该股无可用模型时回退到规则引擎。
+pub async fn predict_with_model(request: PredictionRequest) -> Result<PredictionResponse, String> {
+    use crate::prediction::model::features::latest_features;
+    use crate::prediction::model::management::{get_model_file_path, list_models};
+    use crate::prediction::model::ml_inference::MlPredictor;
+
+    // 选取该股票最新且权重文件存在的模型
+    let models = list_models(&request.stock_code);
+    let model = match models
+        .into_iter()
+        .find(|m| get_model_file_path(&m.id).exists())
+    {
+        Some(m) => m,
+        None => return predict(request).await, // 无模型 → 规则引擎
+    };
+
+    let pool = create_temp_pool().await?;
+    let historical = get_recent_historical_data(&request.stock_code, 250, &pool)
+        .await
+        .map_err(|e| format!("获取历史数据失败: {e}"))?;
+    if historical.len() < 60 {
+        return predict(request).await;
+    }
+
+    let predictor = MlPredictor::load(&get_model_file_path(&model.id))?;
+    let feats = latest_features(&historical).ok_or("数据不足以构造特征")?;
+    let ml_return = predictor.predict(&feats)?; // 次日预期收益率 %
+
+    let last_data = historical.last().unwrap();
+    let current_price = last_data.close;
+    let confidence = model.accuracy.clamp(0.3, 0.92);
+    let direction = if ml_return > 0.05 {
+        "看涨"
+    } else if ml_return < -0.05 {
+        "看跌"
+    } else {
+        "中性"
+    };
+
+    // 多日预测：以模型次日收益为基准，按日衰减
+    let decay = 0.9_f64;
+    let mut predictions = Vec::new();
+    let mut last_date = last_data.date;
+    let mut last_price = current_price;
+    for day in 1..=request.prediction_days {
+        let target_date = get_next_trading_day(last_date);
+        let change_percent = ml_return * decay.powi(day as i32 - 1);
+        let predicted_price = last_price * (1.0 + change_percent / 100.0);
+
+        predictions.push(Prediction {
+            target_date: target_date.format("%Y-%m-%d").to_string(),
+            predicted_price,
+            predicted_change_percent: change_percent,
+            confidence,
+            trading_signal: Some(direction.to_string()),
+            signal_strength: Some(confidence),
+            technical_indicators: None,
+            prediction_reason: Some(format!(
+                "Candle MLP 模型预测（历史方向准确率 {:.0}%）",
+                model.accuracy * 100.0
+            )),
+            key_factors: Some(vec![
+                format!("模型: {}", model.name),
+                format!("次日预期收益 {ml_return:.2}%"),
+            ]),
+        });
+
+        last_date = target_date;
+        last_price = predicted_price;
+    }
+
+    Ok(PredictionResponse {
+        predictions,
+        last_real_data: Some(LastRealData {
+            date: last_data.date.format("%Y-%m-%d").to_string(),
+            price: current_price,
+            change_percent: last_data.change_percent,
+        }),
+    })
+}
+
 /// 评估模型：加载已训练权重，在最近历史数据上计算真实指标
 pub async fn evaluate_model(model_id: String) -> Result<EvaluationResult, String> {
     use crate::prediction::model::management::get_model_file_path;
