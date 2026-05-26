@@ -86,12 +86,12 @@ async fn main() {
                 Ok(rep) => {
                     let m = &rep.metrics;
                     println!(
-                        "{symbol:<10} 样本={:<4} 方向准确率={:>5.1}% 高置信({:>3})={:>5.1}% MAE={:>5.2}",
-                        m.total,
+                        "{symbol:<10} 引擎准确率={:>5.1}% 朴素基准={:>5.1}% 超额={:>+5.1}% | 预测涨占比={:>4.0}% 实际涨={:>4.0}%",
                         m.direction_accuracy * 100.0,
-                        m.high_conviction_total,
-                        m.high_conviction_accuracy * 100.0,
-                        m.mean_abs_error
+                        m.baseline_accuracy * 100.0,
+                        m.edge() * 100.0,
+                        m.predicted_up_ratio * 100.0,
+                        m.actual_up_ratio * 100.0
                     );
                     acc_sum += m.direction_accuracy;
                     n_stocks += 1;

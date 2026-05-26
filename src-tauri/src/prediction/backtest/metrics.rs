@@ -31,6 +31,19 @@ pub struct BacktestMetrics {
     pub high_conviction_total: usize,
     /// 高置信子集方向准确率 (0-1)
     pub high_conviction_accuracy: f64,
+    /// 预测为上涨的比例（检测是否单边预测）
+    pub predicted_up_ratio: f64,
+    /// 实际上涨的比例（数据本身的上涨基率）
+    pub actual_up_ratio: f64,
+    /// 朴素基准准确率 = 总是猜多数类（max(上涨率, 下跌率)）
+    pub baseline_accuracy: f64,
+}
+
+impl BacktestMetrics {
+    /// 相对朴素基准的超额准确率（>0 才说明模型有真实预测价值）
+    pub fn edge(&self) -> f64 {
+        self.direction_accuracy - self.baseline_accuracy
+    }
 }
 
 impl Default for BacktestMetrics {
@@ -45,6 +58,9 @@ impl Default for BacktestMetrics {
             win_rate: 0.0,
             high_conviction_total: 0,
             high_conviction_accuracy: 0.0,
+            predicted_up_ratio: 0.0,
+            actual_up_ratio: 0.0,
+            baseline_accuracy: 0.0,
         }
     }
 }
@@ -63,6 +79,8 @@ pub fn compute_metrics(samples: &[BacktestSample]) -> BacktestMetrics {
     let mut wins = 0usize;
     let mut hc_total = 0usize;
     let mut hc_correct = 0usize;
+    let mut predicted_up = 0usize;
+    let mut actual_up = 0usize;
 
     for s in samples {
         // 方向：同号视为正确
@@ -70,6 +88,12 @@ pub fn compute_metrics(samples: &[BacktestSample]) -> BacktestMetrics {
             || (s.predicted_change < 0.0 && s.actual_change < 0.0);
         if same_dir {
             direction_correct += 1;
+        }
+        if s.predicted_change > 0.0 {
+            predicted_up += 1;
+        }
+        if s.actual_change > 0.0 {
+            actual_up += 1;
         }
 
         // 高置信子集：仅当预测幅度足够大
@@ -107,12 +131,35 @@ pub fn compute_metrics(samples: &[BacktestSample]) -> BacktestMetrics {
         } else {
             0.0
         },
+        predicted_up_ratio: predicted_up as f64 / total as f64,
+        actual_up_ratio: actual_up as f64 / total as f64,
+        baseline_accuracy: {
+            let up = actual_up as f64 / total as f64;
+            up.max(1.0 - up)
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_baseline_and_edge() {
+        // 4 个样本：3 涨 1 跌 → 基率 0.75（总是猜涨）
+        let samples = vec![
+            BacktestSample { predicted_change: 1.0, actual_change: 2.0 },
+            BacktestSample { predicted_change: -1.0, actual_change: 1.0 },
+            BacktestSample { predicted_change: 1.0, actual_change: 1.0 },
+            BacktestSample { predicted_change: 1.0, actual_change: -1.0 },
+        ];
+        let m = compute_metrics(&samples);
+        assert!((m.actual_up_ratio - 0.75).abs() < 1e-9);
+        assert!((m.baseline_accuracy - 0.75).abs() < 1e-9);
+        // 方向正确：样本1(对) 2(错) 3(对) 4(错) = 2/4 = 0.5 → edge = 0.5-0.75 < 0
+        assert!((m.direction_accuracy - 0.5).abs() < 1e-9);
+        assert!(m.edge() < 0.0);
+    }
 
     #[test]
     fn test_metrics_all_correct() {
