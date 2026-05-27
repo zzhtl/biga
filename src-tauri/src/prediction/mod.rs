@@ -12,6 +12,8 @@ pub mod analysis;
 pub mod strategy;
 pub mod model;
 pub mod backtest;
+pub mod factor;
+pub mod cross_section;
 
 // 重新导出常用类型
 pub use types::*;

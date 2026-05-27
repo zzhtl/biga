@@ -150,6 +150,37 @@ pub fn build_dataset(historical: &[HistoricalData]) -> (Vec<f32>, Vec<f32>, usiz
     (features, labels, n)
 }
 
+/// 带日期的样本（用于截面相对强弱建模）
+pub struct DatedSample {
+    pub date: chrono::NaiveDate,
+    pub features: [f32; FEATURE_DIM],
+    /// 未来 horizon 日收益率（小数）
+    pub fwd_return: f64,
+}
+
+/// 构造带日期、带未来 horizon 日收益的样本序列（用于跨股票按日对齐做截面去均值）。
+pub fn build_samples(historical: &[HistoricalData], horizon: usize) -> Vec<DatedSample> {
+    let len = historical.len();
+    let h = horizon.max(1);
+    if len < LOOKBACK + h + 1 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for i in LOOKBACK..(len - h) {
+        let base = historical[i].close;
+        if base <= 0.0 {
+            continue;
+        }
+        let fwd = (historical[i + h].close - base) / base;
+        out.push(DatedSample {
+            date: historical[i].date,
+            features: features_at(historical, i),
+            fwd_return: fwd,
+        });
+    }
+    out
+}
+
 /// 提取最新一个交易日（无标签）的特征向量，用于实时预测。
 pub fn latest_features(historical: &[HistoricalData]) -> Option<Vec<f32>> {
     let len = historical.len();

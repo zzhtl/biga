@@ -200,6 +200,53 @@ pub fn train_eval(
     })
 }
 
+/// 训练后返回测试集逐样本预测值（用于截面 Rank IC / 多空价差评估）。
+#[allow(clippy::too_many_arguments)]
+pub fn train_predict(
+    train_x: &[f32],
+    train_y: &[f32],
+    n_train: usize,
+    test_x: &[f32],
+    n_test: usize,
+    epochs: usize,
+    learning_rate: f64,
+) -> Result<Vec<f32>, String> {
+    if n_train < 10 || n_test == 0 {
+        return Err(format!("样本不足（train={n_train}, test={n_test}）"));
+    }
+    let device = Device::Cpu;
+    let x_train = Tensor::from_vec(train_x.to_vec(), (n_train, FEATURE_DIM), &device)
+        .map_err(|e| e.to_string())?;
+    let y_train =
+        Tensor::from_vec(train_y.to_vec(), (n_train, 1), &device).map_err(|e| e.to_string())?;
+    let x_test = Tensor::from_vec(test_x.to_vec(), (n_test, FEATURE_DIM), &device)
+        .map_err(|e| e.to_string())?;
+
+    let varmap = VarMap::new();
+    let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+    let mlp = Mlp::new(vb).map_err(|e| e.to_string())?;
+    let mut optimizer = AdamW::new(
+        varmap.all_vars(),
+        ParamsAdamW {
+            lr: learning_rate.max(1e-5),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    for _ in 0..epochs.max(1) {
+        let pred = mlp.forward(&x_train).map_err(|e| e.to_string())?;
+        let loss = candle_nn::loss::mse(&pred, &y_train).map_err(|e| e.to_string())?;
+        optimizer.backward_step(&loss).map_err(|e| e.to_string())?;
+    }
+
+    let pred_test = mlp.forward(&x_test).map_err(|e| e.to_string())?;
+    pred_test
+        .flatten_all()
+        .and_then(|t| t.to_vec1::<f32>())
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

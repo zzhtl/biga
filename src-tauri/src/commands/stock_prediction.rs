@@ -119,6 +119,42 @@ pub async fn run_model_backtest(request: BacktestRequest) -> Result<BacktestRepo
 }
 
 // =============================================================================
+// 截面相对强弱排名（市场中性多因子）
+// =============================================================================
+
+/// 滚动截面多因子排名：对库内历史足够的股票，输出按相对强弱打分的排名。
+///
+/// 经走步回测验证有正样本外 Rank IC（低波动/低换手 + 量比×换手率组合等因子）。
+#[tauri::command]
+pub async fn cross_sectional_ranking() -> Result<Vec<crate::prediction::cross_section::RankedStock>, String> {
+    use crate::db::repository::get_symbols_with_min_bars;
+    use crate::prediction::cross_section::rank_latest;
+
+    let pool = create_temp_pool().await?;
+    let symbols = get_symbols_with_min_bars(150, &pool)
+        .await
+        .map_err(|e| format!("获取股票列表失败: {e}"))?;
+    if symbols.len() < 5 {
+        return Err("历史数据足够的股票不足 5 只，无法做截面排名".to_string());
+    }
+
+    let mut stocks = Vec::new();
+    for sym in symbols {
+        if let Ok(hist) = get_recent_historical_data(&sym, 400, &pool).await {
+            if hist.len() >= 150 {
+                stocks.push((sym, hist));
+            }
+        }
+    }
+
+    let ranking = rank_latest(&stocks, 5, 120);
+    if ranking.is_empty() {
+        return Err("数据不足以生成截面排名".to_string());
+    }
+    Ok(ranking)
+}
+
+// =============================================================================
 // 优化建议命令
 // =============================================================================
 

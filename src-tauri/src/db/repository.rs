@@ -243,6 +243,20 @@ pub async fn get_recent_historical_data(
     Ok(result)
 }
 
+/// 获取历史数据足够长的股票代码列表（用于截面排名）
+pub async fn get_symbols_with_min_bars(
+    min_bars: i64,
+    pool: &SqlitePool,
+) -> Result<Vec<String>, AppError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT symbol FROM historical_data GROUP BY symbol HAVING COUNT(*) >= ? ORDER BY symbol",
+    )
+    .bind(min_bars)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(s,)| s).collect())
+}
+
 /// 获取最新收盘价
 pub async fn get_latest_close_price(
     symbol: &str,
