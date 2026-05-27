@@ -5,7 +5,9 @@
 use biga_lib::db::connection::create_pool;
 use biga_lib::db::models::HistoricalData;
 use biga_lib::db::repository::get_recent_historical_data;
-use biga_lib::prediction::cross_section::{build_panel, pearson, rank_latest, walk_forward};
+use biga_lib::prediction::cross_section::{
+    build_panel, factor_ic_order, orthogonalize_panel, pearson, rank_latest, walk_forward,
+};
 use biga_lib::prediction::factor::{factor_dim, factor_names};
 use sqlx::Row;
 
@@ -67,12 +69,58 @@ async fn main() {
         println!("  {name:<18} IC = {ic:+.4}");
     }
 
-    // 前向滚动多因子
+    // 因子相关性诊断（冗余程度：平均绝对两两相关）
+    {
+        let mut sum_abs = 0.0;
+        let mut pairs = 0usize;
+        let mut day_cnt = 0usize;
+        for day in &panel {
+            if day.len() < 5 {
+                continue;
+            }
+            for a in 0..dim {
+                for b in (a + 1)..dim {
+                    let xa: Vec<f64> = day.iter().map(|r| r.factors[a]).collect();
+                    let xb: Vec<f64> = day.iter().map(|r| r.factors[b]).collect();
+                    sum_abs += pearson(&xa, &xb).abs();
+                    pairs += 1;
+                }
+            }
+            day_cnt += 1;
+            if day_cnt >= 200 {
+                break; // 抽样200日足够估计
+            }
+        }
+        println!(
+            "\n因子平均绝对两两相关 = {:.3}（越高越冗余）",
+            sum_abs / pairs.max(1) as f64
+        );
+    }
+
+    // 基线 vs 正交化：前向滚动对比
     let rep = walk_forward(&panel, WINDOW);
+    let order = factor_ic_order(&panel);
+    let ortho = orthogonalize_panel(panel, &order);
+    let rep_o = walk_forward(&ortho, WINDOW);
+
+    let cost = 0.003_f64; // 每期(5日)多空双边交易成本假设 0.3%
     println!("\n========= 前向滚动多因子（窗口{WINDOW}日，{}个样本外日）=========", rep.oos_days);
-    println!(">>> 前向 Rank IC = {:+.4}", rep.rank_ic);
-    println!(">>> 相对方向准确率 = {:.2}%（基准50%）", rep.direction_accuracy * 100.0);
-    println!(">>> 多空价差（top20%-bot20%）= {:+.2}%", rep.long_short_spread * 100.0);
+    println!(
+        "  基线   : Rank IC {:+.4} | 方向 {:.2}% | 多空 {:+.2}%/期 | 净多空(费后) {:+.2}%",
+        rep.rank_ic,
+        rep.direction_accuracy * 100.0,
+        rep.long_short_spread * 100.0,
+        (rep.long_short_spread - cost) * 100.0
+    );
+    println!(
+        "  正交化 : Rank IC {:+.4} | 方向 {:.2}% | 多空 {:+.2}%/期 | 净多空(费后) {:+.2}%",
+        rep_o.rank_ic,
+        rep_o.direction_accuracy * 100.0,
+        rep_o.long_short_spread * 100.0,
+        (rep_o.long_short_spread - cost) * 100.0
+    );
+    let better = if rep_o.rank_ic > rep.rank_ic { "正交化更优" } else { "基线更优" };
+    println!("  → {better}（假设每期多空双边成本 {:.1}%）", cost * 100.0);
 
     // 最新排名演示
     let ranking = rank_latest(&stocks, HORIZON, WINDOW);

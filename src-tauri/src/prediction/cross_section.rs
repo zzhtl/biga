@@ -135,6 +135,81 @@ fn standardize(items: Vec<(String, Vec<f64>, f64)>, dim: usize) -> Vec<PanelRow>
         .collect()
 }
 
+/// 因子正交化（逐日 Gram-Schmidt 残差化，去除因子间冗余/共线）。
+///
+/// 按给定 `order`（通常按 |IC| 降序）依次保留因子，将后续因子对已保留因子做
+/// 截面回归取残差，再各列重新 z-score。消除多重共线，使 IC 加权不重复计数。
+pub fn orthogonalize_panel(mut panel: Vec<Vec<PanelRow>>, order: &[usize]) -> Vec<Vec<PanelRow>> {
+    let dim = factor_dim();
+    for day in panel.iter_mut() {
+        let n = day.len();
+        if n < MIN_CROSS {
+            continue;
+        }
+        // 提取各列
+        let mut cols: Vec<Vec<f64>> = (0..dim)
+            .map(|d| day.iter().map(|r| r.factors[d]).collect())
+            .collect();
+
+        let mut basis: Vec<Vec<f64>> = Vec::new();
+        for &d in order {
+            // 对已入基的正交列做残差化
+            let mut col = cols[d].clone();
+            for b in &basis {
+                let bb: f64 = b.iter().map(|x| x * x).sum();
+                if bb <= 1e-12 {
+                    continue;
+                }
+                let cb: f64 = col.iter().zip(b).map(|(c, x)| c * x).sum();
+                let coef = cb / bb;
+                for (c, x) in col.iter_mut().zip(b) {
+                    *c -= coef * x;
+                }
+            }
+            basis.push(col.clone());
+            cols[d] = col;
+        }
+
+        // 各列重新 z-score 后写回
+        for d in 0..dim {
+            let col = &cols[d];
+            let mean = col.iter().sum::<f64>() / n as f64;
+            let var = col.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
+            let sd = var.sqrt();
+            for (r, &v) in day.iter_mut().zip(col.iter()) {
+                r.factors[d] = if sd > 1e-9 { (v - mean) / sd } else { 0.0 };
+            }
+        }
+    }
+    panel
+}
+
+/// 计算各因子全样本平均 IC（按 |IC| 降序返回索引，用于正交化顺序）
+pub fn factor_ic_order(panel: &[Vec<PanelRow>]) -> Vec<usize> {
+    let dim = factor_dim();
+    let mut ic = vec![0.0; dim];
+    let mut cnt = 0usize;
+    for day in panel {
+        if day.len() < MIN_CROSS {
+            continue;
+        }
+        let ys: Vec<f64> = day.iter().map(|r| r.fwd_return).collect();
+        for d in 0..dim {
+            let xs: Vec<f64> = day.iter().map(|r| r.factors[d]).collect();
+            ic[d] += pearson(&xs, &ys);
+        }
+        cnt += 1;
+    }
+    let mut order: Vec<usize> = (0..dim).collect();
+    order.sort_by(|&a, &b| {
+        (ic[b] / cnt.max(1) as f64)
+            .abs()
+            .partial_cmp(&(ic[a] / cnt.max(1) as f64).abs())
+            .unwrap()
+    });
+    order
+}
+
 /// 用一段截面日估计每个因子的平均 IC（作为权重）
 fn estimate_weights(days: &[Vec<PanelRow>], dim: usize) -> Vec<f64> {
     let mut w = vec![0.0; dim];
@@ -217,12 +292,14 @@ pub fn rank_latest(
 ) -> Vec<RankedStock> {
     let dim = factor_dim();
 
-    // 1. 历史面板（带 fwd）估权重
+    // 1. 历史面板（带 fwd）→ 正交化（去冗余）→ 估权重
     let hist_panel = build_panel(stocks, horizon.max(1));
     if hist_panel.len() < window.max(20) {
         return Vec::new();
     }
-    let w = estimate_weights(&hist_panel[hist_panel.len() - window..], dim);
+    let order = factor_ic_order(&hist_panel);
+    let ortho_hist = orthogonalize_panel(hist_panel, &order);
+    let w = estimate_weights(&ortho_hist[ortho_hist.len() - window..], dim);
 
     // 2. 最新一日截面（无 fwd）：取每只股票最后一根的因子
     let mut latest: Vec<(String, Vec<f64>, f64)> = Vec::new();
@@ -237,7 +314,12 @@ pub fn rank_latest(
     if latest.len() < MIN_CROSS {
         return Vec::new();
     }
+    // 截面标准化 + 同序正交化（与历史一致）
     let today = standardize(latest, dim);
+    let today = orthogonalize_panel(vec![today], &order)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
 
     // 3. 打分排序（降序）
     let mut scored: Vec<(String, f64)> = today
