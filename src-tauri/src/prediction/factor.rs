@@ -25,6 +25,11 @@ pub fn factor_names() -> Vec<String> {
         "volume_ratio",
         "vr_x_turnover",  // 量比 × 换手率（交互）
         "vr_over_turnover", // 量比 / 换手率（低换手上的量比异动）
+        // === 量 × 价 交叉因子 ===
+        "vr_x_ret5",       // 量比 × 5日动量（放量上涨 vs 放量下跌，方向性区分）
+        "volprice_corr10", // 10日量价配合度（量变与价变的相关系数）
+        "obv_slope10",     // OBV 10日归一化斜率（资金流方向）
+        "vr_x_rangepos",   // 量比 × 区间位置去中心（高位放量出货 / 低位放量吸筹）
     ]
     .iter()
     .map(|s| s.to_string())
@@ -34,6 +39,28 @@ pub fn factor_names() -> Vec<String> {
 /// 因子维度
 pub fn factor_dim() -> usize {
     factor_names().len()
+}
+
+/// 皮尔逊相关系数（样本不足或零方差时返回 0，保证因子有限）
+fn corr(xs: &[f64], ys: &[f64]) -> f64 {
+    let n = xs.len();
+    if n < 2 || n != ys.len() {
+        return 0.0;
+    }
+    let nf = n as f64;
+    let mx = xs.iter().sum::<f64>() / nf;
+    let my = ys.iter().sum::<f64>() / nf;
+    let (mut cov, mut vx, mut vy) = (0.0, 0.0, 0.0);
+    for (x, y) in xs.iter().zip(ys) {
+        let (dx, dy) = (x - mx, y - my);
+        cov += dx * dy;
+        vx += dx * dx;
+        vy += dy * dy;
+    }
+    if vx <= 1e-12 || vy <= 1e-12 {
+        return 0.0;
+    }
+    cov / (vx.sqrt() * vy.sqrt())
 }
 
 /// 计算索引 `i` 处的原始因子向量（仅用 ≤ i 的数据）。i 须 ≥ FACTOR_LOOKBACK。
@@ -102,6 +129,56 @@ pub fn compute_factor_row(h: &[HistoricalData], i: usize) -> Option<Vec<f64>> {
     let vr_x_turnover = volume_ratio * turnover5;
     let vr_over_turnover = volume_ratio / (turnover5 + 0.5); // 低换手上的量比异动
 
+    // === 量 × 价 交叉因子 ===
+    // 放量方向：量比 × 5日动量。放量上涨为正、放量下跌为负，区分量能背后的方向。
+    let vr_x_ret5 = volume_ratio * ret_5;
+
+    // 量价配合度：近10日「成交量日变化率」与「价格日收益」的相关系数。
+    // 正相关 = 涨放量/跌缩量（健康），负相关 = 量价背离。
+    let volprice_corr10 = {
+        let vchg: Vec<f64> = ((i - 9)..=i)
+            .map(|k| {
+                let pv = h[k - 1].volume as f64;
+                if pv > 0.0 {
+                    (h[k].volume as f64 - pv) / pv
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let pret: Vec<f64> = ((i - 9)..=i).map(|k| ret(k, k - 1)).collect();
+        corr(&vchg, &pret)
+    };
+
+    // 资金流方向：OBV(=累积 sign(Δclose)×成交量) 近10日的归一化斜率。
+    let obv_slope10 = {
+        let mut obv = 0.0;
+        let mut first = None;
+        let mut last = 0.0;
+        for k in (i - 9)..=i {
+            let d = close(k) - close(k - 1);
+            let s = if d > 0.0 {
+                1.0
+            } else if d < 0.0 {
+                -1.0
+            } else {
+                0.0
+            };
+            obv += s * h[k].volume as f64;
+            first.get_or_insert(obv);
+            last = obv;
+        }
+        let avgv = ((i - 9)..=i).map(|k| h[k].volume as f64).sum::<f64>() / 10.0;
+        if avgv > 0.0 {
+            (last - first.unwrap()) / (10.0 * avgv)
+        } else {
+            0.0
+        }
+    };
+
+    // 高低位放量：量比 × 区间位置去中心。高位(>0.5)放量为正(出货风险)、低位放量为负(吸筹)。
+    let vr_x_rangepos = volume_ratio * (range_pos - 0.5);
+
     Some(vec![
         volatility,
         turnover5,
@@ -115,6 +192,10 @@ pub fn compute_factor_row(h: &[HistoricalData], i: usize) -> Option<Vec<f64>> {
         volume_ratio,
         vr_x_turnover,
         vr_over_turnover,
+        vr_x_ret5,
+        volprice_corr10,
+        obv_slope10,
+        vr_x_rangepos,
     ])
 }
 

@@ -244,6 +244,7 @@
     
     // 纯技术分析预测（无需模型）- 默认展示
     let showTechnicalOnly = true;
+    let tabManuallySelected = false; // 用户是否手动切过 tab（手动后不再自动跳转）
     let technicalHistoryDays = 180; // 使用多少天历史数据
     let technicalPredictionDays = 7; // 预测未来多少天
     let isTechnicalPredicting = false;
@@ -445,7 +446,19 @@
             const models: ModelInfo[] = await invoke('list_stock_prediction_models', { symbol: stockCode });
             modelList = models;
             if (modelList.length > 0) {
-                selectedModelName = modelList[0].name;
+                // 默认选中准确率最高的模型
+                const best = modelList.reduce((a, b) => (b.accuracy > a.accuracy ? b : a));
+                selectedModelName = best.name;
+                // 优先展示「使用现有模型」tab（除非用户已手动切过 tab）
+                if (!tabManuallySelected) {
+                    showTechnicalOnly = false;
+                    showBacktestReport = false;
+                    useExistingModel = true;
+                }
+            } else if (!tabManuallySelected) {
+                // 无可用模型时回退到「纯技术分析」（无需训练、始终可用）
+                showTechnicalOnly = true;
+                showBacktestReport = false;
             }
         } catch (error) {
             errorMessage = `加载模型列表失败: ${error}`;
@@ -742,6 +755,30 @@
     $: if (stockCode) {
         loadModelList();
     }
+
+    // ===== 核心结论（展示在预测结果最顶部，先给实质判断）=====
+    // 预测区间累计涨跌：优先用最新真实价到末日预测价的累计涨幅，无真实价时退化为逐日涨跌之和
+    $: predHorizonChange =
+        predictions.length && lastRealData && lastRealData.price > 0
+            ? ((predictions[predictions.length - 1].predicted_price - lastRealData.price) / lastRealData.price) * 100
+            : predictions.reduce((s, p) => s + p.predicted_change_percent, 0);
+    $: predAvgConfidence = predictions.length
+        ? (predictions.reduce((s, p) => s + p.confidence, 0) / predictions.length) * 100
+        : 0;
+    $: conclusionDirection =
+        predHorizonChange > 1.5 ? 'bull' : predHorizonChange < -1.5 ? 'bear' : 'neutral';
+    $: conclusionLabel =
+        conclusionDirection === 'bull' ? '偏多 ▲' : conclusionDirection === 'bear' ? '偏空 ▼' : '震荡 ◆';
+    $: conclusionAdvice =
+        professionalAnalysis?.current_advice ||
+        (conclusionDirection === 'bull'
+            ? '可逢低关注，分批参与'
+            : conclusionDirection === 'bear'
+              ? '注意回避风险，反弹减仓'
+              : '观望为主，等待方向明确');
+    $: conclusionRisk = professionalAnalysis?.risk_level || '';
+    $: buyPointsCount = professionalAnalysis?.buy_points?.length ?? 0;
+    $: sellPointsCount = professionalAnalysis?.sell_points?.length ?? 0;
     
     async function deleteModel(modelId: string) {
         // 使用 Tauri 对话框进行确认
@@ -894,16 +931,16 @@
     {/if}
     
     <div class="tabs">
-        <button class:active={showTechnicalOnly} on:click={() => {showTechnicalOnly = true; showBacktestReport = false; useExistingModel = false;}}>
+        <button class:active={showTechnicalOnly} on:click={() => {tabManuallySelected = true; showTechnicalOnly = true; showBacktestReport = false; useExistingModel = false;}}>
             📊 纯技术分析
         </button>
-        <button class:active={useExistingModel && !showBacktestReport && !showTechnicalOnly} on:click={() => {useExistingModel = true; showBacktestReport = false; showTechnicalOnly = false;}}>
+        <button class:active={useExistingModel && !showBacktestReport && !showTechnicalOnly} on:click={() => {tabManuallySelected = true; useExistingModel = true; showBacktestReport = false; showTechnicalOnly = false;}}>
             使用现有模型
         </button>
-        <button class:active={!useExistingModel && !showBacktestReport && !showTechnicalOnly} on:click={() => {useExistingModel = false; showBacktestReport = false; showTechnicalOnly = false;}}>
+        <button class:active={!useExistingModel && !showBacktestReport && !showTechnicalOnly} on:click={() => {tabManuallySelected = true; useExistingModel = false; showBacktestReport = false; showTechnicalOnly = false;}}>
             训练新模型
         </button>
-        <button class:active={showBacktestReport} on:click={() => {showBacktestReport = true; showTechnicalOnly = false; setDefaultBacktestDates();}}>
+        <button class:active={showBacktestReport} on:click={() => {tabManuallySelected = true; showBacktestReport = true; showTechnicalOnly = false; setDefaultBacktestDates();}}>
             回测报告
         </button>
     </div>
@@ -1576,7 +1613,43 @@
     {#if predictions && predictions.length > 0}
         <div class="prediction-results">
             <h2>预测结果</h2>
-            
+
+            <!-- 核心结论：先给实质性判断，再接下方详细逻辑与分析 -->
+            <div class="conclusion-card {conclusionDirection}">
+                <div class="conclusion-head">
+                    <span class="conclusion-badge">{conclusionLabel}</span>
+                    <div class="conclusion-headline">
+                        未来 {predictions.length} 天：
+                        <span class="conclusion-change {predHorizonChange >= 0 ? 'price-up' : 'price-down'}">
+                            预计累计 {predHorizonChange >= 0 ? '+' : ''}{predHorizonChange.toFixed(2)}%
+                        </span>
+                    </div>
+                </div>
+                <div class="conclusion-grid">
+                    <div class="conclusion-item">
+                        <span class="ci-label">操作建议</span>
+                        <span class="ci-value">{conclusionAdvice}</span>
+                    </div>
+                    <div class="conclusion-item">
+                        <span class="ci-label">平均置信度</span>
+                        <span class="ci-value">{predAvgConfidence.toFixed(1)}%</span>
+                    </div>
+                    {#if conclusionRisk}
+                        <div class="conclusion-item">
+                            <span class="ci-label">风险等级</span>
+                            <span class="ci-value risk-level {conclusionRisk.includes('低') ? 'low' : conclusionRisk.includes('高') ? 'high' : 'medium'}">{conclusionRisk}</span>
+                        </div>
+                    {/if}
+                    {#if showProfessionalAnalysis && professionalAnalysis}
+                        <div class="conclusion-item">
+                            <span class="ci-label">买卖点</span>
+                            <span class="ci-value">{buyPointsCount} 个买入 / {sellPointsCount} 个卖出</span>
+                        </div>
+                    {/if}
+                </div>
+                <div class="conclusion-note">⚠️ 单股方向预测存在不确定性，结论仅供参考，请结合下方逻辑与分析自行决策。</div>
+            </div>
+
             <!-- 新增：最新真实数据展示 -->
             {#if lastRealData}
                 <div class="last-real-data">
@@ -2071,9 +2144,11 @@
 
 <style>
     .container {
-        max-width: 900px;
+        max-width: 1200px;
         margin: 0 auto;
         padding: 1rem;
+        width: 100%;
+        box-sizing: border-box;
     }
 
     h1 {
@@ -2326,6 +2401,80 @@
         border-radius: 1rem;
         width: 100%;
         box-sizing: border-box;
+    }
+
+    /* 核心结论卡 */
+    .conclusion-card {
+        margin: 0 0 1.5rem;
+        padding: 1.25rem 1.5rem;
+        border-radius: 0.75rem;
+        border-left: 5px solid #6366f1;
+        background: rgba(99, 102, 241, 0.08);
+    }
+    .conclusion-card.bull {
+        border-left-color: #10b981;
+        background: rgba(16, 185, 129, 0.1);
+    }
+    .conclusion-card.bear {
+        border-left-color: #ef4444;
+        background: rgba(239, 68, 68, 0.1);
+    }
+    .conclusion-card.neutral {
+        border-left-color: #f59e0b;
+        background: rgba(245, 158, 11, 0.1);
+    }
+    .conclusion-head {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+    .conclusion-badge {
+        font-size: 1.15rem;
+        font-weight: 700;
+        padding: 0.3rem 0.9rem;
+        border-radius: 0.5rem;
+        background: rgba(0, 0, 0, 0.2);
+        white-space: nowrap;
+    }
+    .conclusion-card.bull .conclusion-badge { color: #10b981; }
+    .conclusion-card.bear .conclusion-badge { color: #ef4444; }
+    .conclusion-card.neutral .conclusion-badge { color: #f59e0b; }
+    .conclusion-headline {
+        font-size: 1.05rem;
+        font-weight: 600;
+    }
+    .conclusion-change.price-up { color: #10b981; }
+    .conclusion-change.price-down { color: #ef4444; }
+    .conclusion-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 0.75rem;
+        margin-top: 1rem;
+    }
+    .conclusion-item {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        background: rgba(0, 0, 0, 0.15);
+        padding: 0.6rem 0.8rem;
+        border-radius: 0.5rem;
+    }
+    .ci-label {
+        font-size: 0.75rem;
+        opacity: 0.7;
+    }
+    .ci-value {
+        font-size: 0.95rem;
+        font-weight: 600;
+    }
+    .ci-value.risk-level.low { color: #10b981; }
+    .ci-value.risk-level.medium { color: #f59e0b; }
+    .ci-value.risk-level.high { color: #ef4444; }
+    .conclusion-note {
+        margin-top: 0.9rem;
+        font-size: 0.75rem;
+        opacity: 0.65;
     }
     
     .prediction-table {
