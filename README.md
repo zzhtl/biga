@@ -38,30 +38,28 @@ src-tauri/src/
 ├── prediction/            # 🎯 预测核心模块
 │   ├── types.rs           # 类型定义
 │   │
-│   ├── indicators/        # 📊 技术指标
-│   │   ├── macd.rs        # MACD 指标
-│   │   ├── kdj.rs         # KDJ 指标
-│   │   ├── rsi.rs         # RSI 指标
-│   │   ├── bollinger.rs   # 布林带
-│   │   ├── obv.rs         # OBV 能量潮
-│   │   ├── cci.rs         # CCI 指标
-│   │   ├── dmi.rs         # DMI 趋向指标
-│   │   └── atr.rs         # ATR 波动率
+│   ├── indicators/        # 📊 技术指标（MACD/KDJ/RSI/布林/OBV/CCI/DMI/ATR/量比换手等）
 │   │
-│   ├── analysis/          # 📈 分析模块
-│   │   ├── trend.rs       # 趋势分析
-│   │   ├── volume.rs      # 量价分析
-│   │   ├── pattern.rs     # K线形态识别
-│   │   └── support_resistance.rs  # 支撑阻力位
+│   ├── analysis/          # 📈 分析模块（按职责拆分为文件夹模块）
+│   │   ├── trend.rs / volume.rs / pattern.rs / support_resistance.rs
+│   │   ├── divergence/          # 背离检测（detectors/checks/extremes/action）
+│   │   ├── market_regime/       # 市场状态分类（indicators/volatility/classifier）
+│   │   └── signal_confirmation/ # 信号确认（sources/conflict/weights/combination）
 │   │
 │   ├── strategy/          # 💡 策略模块
-│   │   ├── multi_factor.rs      # 多因子评分
-│   │   └── multi_timeframe.rs   # 多周期共振
+│   │   ├── multi_factor/        # 多因子评分（factors/weights/transform）
+│   │   ├── professional_engine/ # 专业预测引擎（signals/direction/change/risk/output）
+│   │   ├── adaptive_weights.rs / price_model.rs / multi_timeframe.rs
 │   │
-│   └── model/             # 🤖 机器学习
-│       ├── training.rs    # 模型训练
-│       ├── inference.rs   # 预测推理
-│       └── management.rs  # 模型管理
+│   ├── model/             # 🤖 机器学习（Candle MLP）
+│   │   ├── features.rs    # 特征工程（含量比/换手率）
+│   │   ├── network.rs     # MLP + 训练（train_and_save/train_eval/train_predict）
+│   │   ├── inference.rs   # 规则引擎编排 + analyze()  ／ ml_inference.rs
+│   │   └── training.rs / management.rs
+│   │
+│   ├── backtest/          # 📉 真实走步回测（方向准确率/MAPE/朴素基准/edge/高置信）
+│   ├── factor.rs          # 🧮 截面因子库（含 量比×换手率 组合因子）
+│   └── cross_section.rs   # 🎯 滚动截面多因子排序（市场中性，有正样本外 IC）
 │
 ├── services/              # ⚙️ 服务层
 │   ├── stock.rs           # 股票服务
@@ -115,10 +113,20 @@ src-tauri/src/
 - ✅ **多周期共振**：日/周/月三重确认
 
 ### 🤖 深度学习预测
-- ✅ **模型训练**：自定义训练参数、批量训练
-- ✅ **智能预测**：价格预测 + 方向预测 + 置信度
+- ✅ **模型训练**：自定义训练参数、批量训练（Candle MLP，真实训练 + 保存）
+- ✅ **智能预测**：价格预测 + 方向预测 + 置信度（有模型走 ML，否则规则引擎）
 - ✅ **预测理由**：每个预测带详细理由和关键因素
 - ✅ **模型管理**：保存、加载、删除、评估
+
+### 🧮 量化因子研究（截面相对强弱，市场中性）
+经严格走步回测（每期滚动重估因子权重，逐日累计样本外指标）得到的核心结论：
+
+- **单股"次日涨跌方向"预测无超额**：规则引擎/单股 ML 方向准确率 ~46–48%，**低于"总猜多数方向"的朴素基准**（市场有效性使然）。
+- **滚动截面多因子有真实 alpha**：前向 Rank IC ≈ **+0.05**，多空（top20%-bot20%）毛 +0.57%/5日，扣 0.3%/期双边成本后**净 ≈ +0.27%/5日**。
+- **量比 × 换手率组合**显著强于单独使用（IC 强 3–4 倍）；主力因子为低振幅、低换手、低波动。
+- **广度是最大杠杆**：扩大票池可持续提升 IC。
+
+实现见 `prediction/factor.rs`（因子库）与 `prediction/cross_section.rs`（截面标准化 + 滚动 IC 加权 + 正交化 + 走步评估）；命令 `cross_sectional_ranking` 输出全市场相对强弱排名。详见 [CLAUDE.md](./CLAUDE.md)。
 
 ## 开发环境配置
 
@@ -140,24 +148,26 @@ pnpm install
 cargo tauri dev
 ```
 
-### 运行示例
+### 运行示例 / 量化评测工具
 ```bash
 cd src-tauri
 
-# 测试历史数据获取
-cargo run --example test_historical_data
+# 单元 + 集成测试
+cargo test
 
-# 测试增强预测
-cargo run --example test_enhanced_prediction
+# —— 量化研究工具（务必 --release，否则训练/回测很慢）——
+# 截面多因子评测：单因子 IC、前向滚动 Rank IC、正交化对比、加成本净多空、最新排名
+cargo run --release --example cross_sectional
 
-# 测试专业预测策略
-cargo run --example test_professional_prediction
+# 批量拉取更多股票历史+股本（改 examples/fetch_more_data.rs 的 CODES 列表）
+cargo run --release --example fetch_more_data
 
-# 测试技术指标
-cargo run --example test_indicators
+# 全库回填股本/量比/换手率
+cargo run --release --example batch_refresh
 
-# 测试 MACD 计算
-cargo run --example test_macd_full
+# 规则引擎走步回测 / 池化 ML 评测（对照，已证无超额）
+cargo run --release --example tune_backtest
+cargo run --release --example pooled_ml
 ```
 
 ## 快速开始
