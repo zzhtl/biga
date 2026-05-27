@@ -12,4 +12,4 @@ vite.config.ts.timestamp-*
 .cursor*
 
 # 本地工作指南（Claude 自动读取，不入库）
-.claude/CLAUDE.md
+.claude*
