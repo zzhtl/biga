@@ -241,7 +241,12 @@
     let backtestEndDate = "";
     let backtestInterval = 7; // 默认每7天进行一次预测
     let expandedEntryIndex: number | null = null; // 展开查看的回测条目索引
-    
+
+    // 预测结果展示：折叠/展开状态
+    let showMoreAnalysis = false;            // 更多分析（多周期共振 + 量价背离）默认收起
+    let showDailyTable = false;              // 逐日明细表默认收起
+    let expandedPredIndex: number | null = null; // 逐日表中展开查看理由/技术指标的行
+
     // 纯技术分析预测（无需模型）- 默认展示
     let showTechnicalOnly = true;
     let tabManuallySelected = false; // 用户是否手动切过 tab（手动后不再自动跳转）
@@ -629,8 +634,9 @@
         isPredicting = true;
         errorMessage = "";
         predictionChart = null; // 重置图表数据
+        professionalAnalysis = null; // 重置专业分析数据，避免上次技术分析结果残留到摘要卡
         showProfessionalAnalysis = false; // 重置专业分析显示
-        
+
         try {
             const request = {
                 stock_code: stockCode,
@@ -638,7 +644,7 @@
                 prediction_days: daysToPredict,
                 use_candle: true
             };
-            
+
             console.log("发送预测请求:", request);
             const result = await invoke<Prediction[] | PredictionResult>('predict_with_candle', { request });
             console.log("收到预测结果:", result);
@@ -779,7 +785,23 @@
     $: conclusionRisk = professionalAnalysis?.risk_level || '';
     $: buyPointsCount = professionalAnalysis?.buy_points?.length ?? 0;
     $: sellPointsCount = professionalAnalysis?.sell_points?.length ?? 0;
-    
+    // 摘要卡：当前价 → 目标价（预测区间末日价）
+    $: targetPrice = predictions.length ? predictions[predictions.length - 1].predicted_price : 0;
+    // 关键价位：当前价下方最近的支撑、上方最近的压力（无符合项时回退到极值）
+    $: currentPrice = lastRealData?.price ?? 0;
+    $: nearestSupport = (() => {
+        const levels = professionalAnalysis?.support_resistance?.support_levels ?? [];
+        if (!levels.length) return null;
+        const below = levels.filter(l => l < currentPrice);
+        return below.length ? Math.max(...below) : Math.min(...levels);
+    })();
+    $: nearestResistance = (() => {
+        const levels = professionalAnalysis?.support_resistance?.resistance_levels ?? [];
+        if (!levels.length) return null;
+        const above = levels.filter(l => l > currentPrice);
+        return above.length ? Math.min(...above) : Math.max(...levels);
+    })();
+
     async function deleteModel(modelId: string) {
         // 使用 Tauri 对话框进行确认
         const confirmed = await confirm('确定要删除此模型吗？', { title: '删除模型' });
@@ -1614,7 +1636,7 @@
         <div class="prediction-results">
             <h2>预测结果</h2>
 
-            <!-- 核心结论：先给实质性判断，再接下方详细逻辑与分析 -->
+            <!-- 决策摘要卡：一眼抓住方向 / 目标价 / 关键价位 / 建议 / 风险 / 置信度 -->
             <div class="conclusion-card {conclusionDirection}">
                 <div class="conclusion-head">
                     <span class="conclusion-badge">{conclusionLabel}</span>
@@ -1625,6 +1647,14 @@
                         </span>
                     </div>
                 </div>
+                {#if lastRealData}
+                    <div class="conclusion-price">
+                        <span class="cp-date">{new Date(lastRealData.date).toLocaleDateString()}</span>
+                        <span class="cp-current">当前 {lastRealData.price.toFixed(2)}</span>
+                        <span class="cp-arrow">→</span>
+                        <span class="cp-target {targetPrice >= lastRealData.price ? 'price-up' : 'price-down'}">目标 {targetPrice.toFixed(2)}</span>
+                    </div>
+                {/if}
                 <div class="conclusion-grid">
                     <div class="conclusion-item">
                         <span class="ci-label">操作建议</span>
@@ -1640,6 +1670,12 @@
                             <span class="ci-value risk-level {conclusionRisk.includes('低') ? 'low' : conclusionRisk.includes('高') ? 'high' : 'medium'}">{conclusionRisk}</span>
                         </div>
                     {/if}
+                    {#if nearestSupport !== null || nearestResistance !== null}
+                        <div class="conclusion-item">
+                            <span class="ci-label">关键价位</span>
+                            <span class="ci-value">{nearestSupport !== null ? `支撑 ${nearestSupport.toFixed(2)}` : ''}{nearestSupport !== null && nearestResistance !== null ? ' / ' : ''}{nearestResistance !== null ? `压力 ${nearestResistance.toFixed(2)}` : ''}</span>
+                        </div>
+                    {/if}
                     {#if showProfessionalAnalysis && professionalAnalysis}
                         <div class="conclusion-item">
                             <span class="ci-label">买卖点</span>
@@ -1650,38 +1686,11 @@
                 <div class="conclusion-note">⚠️ 单股方向预测存在不确定性，结论仅供参考，请结合下方逻辑与分析自行决策。</div>
             </div>
 
-            <!-- 新增：最新真实数据展示 -->
-            {#if lastRealData}
-                <div class="last-real-data">
-                    <h3>最新真实数据</h3>
-                    <div class="real-data-card">
-                        <div class="real-data-date">{new Date(lastRealData.date).toLocaleDateString()}</div>
-                        <div class="real-data-price">{lastRealData.price.toFixed(2)}</div>
-                        <div class="real-data-change {lastRealData.change_percent >= 0 ? 'price-up' : 'price-down'}">
-                            {lastRealData.change_percent >= 0 ? '+' : ''}{lastRealData.change_percent.toFixed(2)}%
-                        </div>
-                    </div>
-                </div>
-            {/if}
-            
             <!-- 新增：专业分析结果展示 -->
             {#if showProfessionalAnalysis && professionalAnalysis}
                 <div class="professional-analysis">
                     <h3>🎯 金融级策略分析</h3>
-                    
-                    <!-- 操作建议 -->
-                    <div class="advice-card">
-                        <div class="advice-content">
-                            <strong>操作建议：</strong>{professionalAnalysis.current_advice}
-                        </div>
-                        <div class="risk-indicator">
-                            <strong>风险等级：</strong>
-                            <span class="risk-level {professionalAnalysis.risk_level.includes('低') ? 'low' : professionalAnalysis.risk_level.includes('高') ? 'high' : 'medium'}">
-                                {professionalAnalysis.risk_level}
-                            </span>
-                        </div>
-                    </div>
-                    
+
                     <!-- 买入点信号 -->
                     {#if professionalAnalysis.buy_points && professionalAnalysis.buy_points.length > 0}
                         <div class="buy-sell-section buy-section">
@@ -1821,62 +1830,9 @@
                             </div>
                         </div>
                     </div>
-                    
-                    <!-- 多周期共振 -->
-                    <div class="multi-timeframe-section">
-                        <h4>🔄 多周期共振分析</h4>
-                        <div class="mtf-grid">
-                            <div class="mtf-item">
-                                <span class="mtf-label">日线:</span>
-                                <span class="mtf-value">{professionalAnalysis.multi_timeframe.daily_trend}</span>
-                            </div>
-                            <div class="mtf-item">
-                                <span class="mtf-label">周线:</span>
-                                <span class="mtf-value">{professionalAnalysis.multi_timeframe.weekly_trend}</span>
-                            </div>
-                            <div class="mtf-item">
-                                <span class="mtf-label">月线:</span>
-                                <span class="mtf-value">{professionalAnalysis.multi_timeframe.monthly_trend}</span>
-                            </div>
-                            <div class="mtf-item">
-                                <span class="mtf-label">共振级别:</span>
-                                <span class="mtf-value resonance-level">{professionalAnalysis.multi_timeframe.resonance_level}级</span>
-                            </div>
-                            <div class="mtf-item">
-                                <span class="mtf-label">共振方向:</span>
-                                <span class="mtf-value">{professionalAnalysis.multi_timeframe.resonance_direction}</span>
-                            </div>
-                            <div class="mtf-item">
-                                <span class="mtf-label">信号质量:</span>
-                                <span class="mtf-value quality-score">{professionalAnalysis.multi_timeframe.signal_quality.toFixed(0)}分</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- 量价背离 -->
-                    <div class="divergence-section">
-                        <h4>⚠️ 量价背离分析</h4>
-                        <div class="divergence-content">
-                            <div class="divergence-indicators">
-                                {#if professionalAnalysis.divergence.has_bullish_divergence}
-                                    <div class="divergence-badge bullish">
-                                        🟢 底背离 (强度: {(professionalAnalysis.divergence.divergence_strength * 100).toFixed(0)}%)
-                                    </div>
-                                {/if}
-                                {#if professionalAnalysis.divergence.has_bearish_divergence}
-                                    <div class="divergence-badge bearish">
-                                        🔴 顶背离 (强度: {(professionalAnalysis.divergence.divergence_strength * 100).toFixed(0)}%)
-                                    </div>
-                                {/if}
-                            </div>
-                            <div class="divergence-message">
-                                💡 {professionalAnalysis.divergence.warning_message}
-                            </div>
-                        </div>
-                    </div>
                 </div>
             {/if}
-            
+
             <!-- 预测图表 -->
             {#if predictionChart}
                 <div class="prediction-chart">
@@ -1933,7 +1889,7 @@
                                         {@const x = 60 + (i / (priceData.length - 1)) * 690}
                                         {@const y = 250 - ((price - minPrice) / priceRange) * 180}
                                         <circle cx={x} cy={y} r="5" fill="rgb(79, 70, 229)" stroke="white" stroke-width="2"/>
-                                        <text x={x} y={y - 15} text-anchor="middle" fill="white" font-size="11" font-weight="bold">{price.toFixed(1)}</text>
+                                        <text x={x} y={y - 15} text-anchor="middle" fill="white" font-size="11" font-weight="bold">{price.toFixed(2)}</text>
                                     {/each}
                                     
                                     <!-- 日期标签 -->
@@ -1945,7 +1901,7 @@
                                     <!-- Y轴价格标签 -->
                                     {#each [0, 1, 2, 3, 4] as i}
                                         {@const price = minPrice + (priceRange * (4 - i) / 4)}
-                                        <text x="50" y={55 + i * 40} text-anchor="end" fill="rgba(255,255,255,0.8)" font-size="11">{price.toFixed(1)}</text>
+                                        <text x="50" y={55 + i * 40} text-anchor="end" fill="rgba(255,255,255,0.8)" font-size="11">{price.toFixed(2)}</text>
                                     {/each}
                                     
                                     <!-- 坐标轴标题 -->
@@ -1955,54 +1911,83 @@
                             </svg>
                         </div>
                         
-                        <!-- 备用简单图表 -->
-                        <div class="simple-chart-backup" style="margin-top: 1rem;">
-                            <div class="chart-bars">
-                                {#each predictions as prediction, index}
-                                    <div class="chart-bar-item">
-                                        <div class="bar-container">
-                                            <div 
-                                                class="price-bar" 
-                                                style="height: {(prediction.predicted_price / Math.max(...predictions.map(p => p.predicted_price))) * 100}px; background-color: rgb(79, 70, 229);"
-                                                title="预测价格: {prediction.predicted_price.toFixed(2)}"
-                                            ></div>
-                                            <div 
-                                                class="confidence-bar" 
-                                                style="height: {prediction.confidence * 80}px; background-color: rgb(34, 197, 94); margin-left: 5px;"
-                                                title="置信度: {(prediction.confidence * 100).toFixed(2)}%"
-                                            ></div>
-                                        </div>
-                                        <div class="bar-label">{new Date(prediction.target_date).toLocaleDateString().slice(5)}</div>
-                                    </div>
-                                {/each}
-                            </div>
-                        </div>
                     </div>
                 </div>
             {:else}
-                <!-- 调试信息：显示为什么图表没有生成 -->
-                <div class="debug-info" style="background: rgba(255,0,0,0.1); padding: 1rem; border-radius: 0.5rem; margin: 1rem 0;">
-                    <h4>图表调试信息</h4>
-                    <p>预测数据长度: {predictions ? predictions.length : 0}</p>
-                    <p>图表数据状态: {predictionChart ? '已生成' : '未生成'}</p>
-                    {#if predictions && predictions.length > 0}
-                        <p>第一个预测: {JSON.stringify(predictions[0])}</p>
+                <p class="chart-empty-note">暂无足够数据生成趋势图</p>
+            {/if}
+            
+            <!-- 更多分析（多周期共振 · 量价背离）：默认折叠 -->
+            {#if showProfessionalAnalysis && professionalAnalysis}
+                <div class="collapsible-section">
+                    <button type="button" class="collapsible-toggle" on:click={() => showMoreAnalysis = !showMoreAnalysis}>
+                        {showMoreAnalysis ? '▾' : '▸'} 更多分析（多周期共振 · 量价背离）
+                    </button>
+                    {#if showMoreAnalysis}
+                        <div class="collapsible-body">
+                            <!-- 多周期共振 -->
+                            <div class="multi-timeframe-section">
+                                <h4>🔄 多周期共振分析</h4>
+                                <div class="mtf-grid">
+                                    <div class="mtf-item">
+                                        <span class="mtf-label">日线:</span>
+                                        <span class="mtf-value">{professionalAnalysis.multi_timeframe.daily_trend}</span>
+                                    </div>
+                                    <div class="mtf-item">
+                                        <span class="mtf-label">周线:</span>
+                                        <span class="mtf-value">{professionalAnalysis.multi_timeframe.weekly_trend}</span>
+                                    </div>
+                                    <div class="mtf-item">
+                                        <span class="mtf-label">月线:</span>
+                                        <span class="mtf-value">{professionalAnalysis.multi_timeframe.monthly_trend}</span>
+                                    </div>
+                                    <div class="mtf-item">
+                                        <span class="mtf-label">共振级别:</span>
+                                        <span class="mtf-value resonance-level">{professionalAnalysis.multi_timeframe.resonance_level}级</span>
+                                    </div>
+                                    <div class="mtf-item">
+                                        <span class="mtf-label">共振方向:</span>
+                                        <span class="mtf-value">{professionalAnalysis.multi_timeframe.resonance_direction}</span>
+                                    </div>
+                                    <div class="mtf-item">
+                                        <span class="mtf-label">信号质量:</span>
+                                        <span class="mtf-value quality-score">{professionalAnalysis.multi_timeframe.signal_quality.toFixed(0)}分</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- 量价背离 -->
+                            <div class="divergence-section">
+                                <h4>⚠️ 量价背离分析</h4>
+                                <div class="divergence-content">
+                                    <div class="divergence-indicators">
+                                        {#if professionalAnalysis.divergence.has_bullish_divergence}
+                                            <div class="divergence-badge bullish">
+                                                🟢 底背离 (强度: {(professionalAnalysis.divergence.divergence_strength * 100).toFixed(0)}%)
+                                            </div>
+                                        {/if}
+                                        {#if professionalAnalysis.divergence.has_bearish_divergence}
+                                            <div class="divergence-badge bearish">
+                                                🔴 顶背离 (强度: {(professionalAnalysis.divergence.divergence_strength * 100).toFixed(0)}%)
+                                            </div>
+                                        {/if}
+                                    </div>
+                                    <div class="divergence-message">
+                                        💡 {professionalAnalysis.divergence.warning_message}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     {/if}
                 </div>
             {/if}
-            
-            <!-- 预测统计信息 -->
+
+            <!-- 预测统计信息（紧凑信息条） -->
             <div class="prediction-stats">
                 <div class="stat-card">
                     <h4>平均预测涨幅</h4>
                     <div class="stat-value {predictions.reduce((sum, p) => sum + p.predicted_change_percent, 0) / predictions.length > 0 ? 'positive' : 'negative'}">
                         {(predictions.reduce((sum, p) => sum + p.predicted_change_percent, 0) / predictions.length).toFixed(2)}%
-                    </div>
-                </div>
-                <div class="stat-card">
-                    <h4>平均置信度</h4>
-                    <div class="stat-value">
-                        {(predictions.reduce((sum, p) => sum + p.confidence, 0) / predictions.length * 100).toFixed(2)}%
                     </div>
                 </div>
                 <div class="stat-card">
@@ -2018,125 +2003,147 @@
                     </div>
                 </div>
             </div>
-            
-            <div class="prediction-table">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>日期</th>
-                            <th>预测价格</th>
-                            <th>涨跌幅</th>
-                            <th>置信度</th>
-                            <th>交易信号</th>
-                            <th>预测理由</th>
-                            <th>技术指标</th>
-                            <th>风险评级</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {#each predictions as prediction}
-                            <tr class:positive={prediction.predicted_change_percent > 0} class:negative={prediction.predicted_change_percent < 0}>
-                                <td>{new Date(prediction.target_date).toLocaleDateString()}</td>
-                                <td>{prediction.predicted_price.toFixed(2)}</td>
-                                <td class:price-up={prediction.predicted_change_percent > 0} class:price-down={prediction.predicted_change_percent < 0}>
-                                    {prediction.predicted_change_percent > 0 ? '+' : ''}{prediction.predicted_change_percent.toFixed(2)}%
-                                </td>
-                                <td>
-                                    <div class="confidence-indicator">
-                                        <div class="confidence-bar-inline" style="width: {prediction.confidence * 100}%"></div>
-                                        <span>{(prediction.confidence * 100).toFixed(2)}%</span>
-                                    </div>
-                                </td>
-                                <td>
-                                    <span class="signal-badge {prediction.trading_signal?.includes('买入') ? 'buy-signal' : prediction.trading_signal?.includes('卖出') ? 'sell-signal' : 'hold-signal'}">
-                                        {prediction.trading_signal || '持有'}
-                                    </span>
-                                    {#if prediction.signal_strength}
-                                        <div class="signal-strength">
-                                            强度: {(prediction.signal_strength * 100).toFixed(0)}%
-                                        </div>
-                                    {/if}
-                                </td>
-                                <td class="prediction-reason-cell">
-                                    {#if prediction.prediction_reason}
-                                        <div class="prediction-reason">
-                                            <div class="reason-text">{prediction.prediction_reason}</div>
-                                            {#if prediction.key_factors && prediction.key_factors.length > 0}
-                                                <div class="key-factors">
-                                                    {#each prediction.key_factors as factor}
-                                                        <span class="factor-tag">{factor}</span>
-                                                    {/each}
+
+            <!-- 逐日明细表：默认折叠，主表精简核心列，行内"详情"展开理由/技术指标/风险 -->
+            <div class="collapsible-section">
+                <button type="button" class="collapsible-toggle" on:click={() => showDailyTable = !showDailyTable}>
+                    {showDailyTable ? '▾' : '▸'} 逐日明细表（{predictions.length} 天）
+                </button>
+                {#if showDailyTable}
+                    <div class="prediction-table">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>日期</th>
+                                    <th>预测价格</th>
+                                    <th>涨跌幅</th>
+                                    <th>置信度</th>
+                                    <th>交易信号</th>
+                                    <th>详情</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {#each predictions as prediction, i}
+                                    <tr class:positive={prediction.predicted_change_percent > 0} class:negative={prediction.predicted_change_percent < 0}>
+                                        <td>{new Date(prediction.target_date).toLocaleDateString()}</td>
+                                        <td>{prediction.predicted_price.toFixed(2)}</td>
+                                        <td class:price-up={prediction.predicted_change_percent > 0} class:price-down={prediction.predicted_change_percent < 0}>
+                                            {prediction.predicted_change_percent > 0 ? '+' : ''}{prediction.predicted_change_percent.toFixed(2)}%
+                                        </td>
+                                        <td>
+                                            <div class="confidence-indicator">
+                                                <div class="confidence-bar-inline" style="width: {prediction.confidence * 100}%"></div>
+                                                <span>{(prediction.confidence * 100).toFixed(2)}%</span>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <span class="signal-badge {prediction.trading_signal?.includes('买入') ? 'buy-signal' : prediction.trading_signal?.includes('卖出') ? 'sell-signal' : 'hold-signal'}">
+                                                {prediction.trading_signal || '持有'}
+                                            </span>
+                                            {#if prediction.signal_strength}
+                                                <div class="signal-strength">
+                                                    强度: {(prediction.signal_strength * 100).toFixed(0)}%
                                                 </div>
                                             {/if}
-                                        </div>
-                                    {:else}
-                                        <span class="no-reason">暂无理由</span>
-                                    {/if}
-                                </td>
-                                <td>
-                                    {#if prediction.technical_indicators}
-                                        <div class="tech-indicators">
-                                            <span title="RSI: {prediction.technical_indicators.rsi.toFixed(1)}">
-                                                RSI: {prediction.technical_indicators.rsi > 70 ? '超买' : prediction.technical_indicators.rsi < 30 ? '超卖' : '正常'}
-                                            </span>
-                                            
-                                            <!-- 增强MACD指标展示 -->
-                                            <div class="tech-detail-indicator">
-                                                <span class="tech-label">MACD:</span>
-                                                <div class="tech-values">
-                                                    <span class="tech-value {prediction.technical_indicators.macd_dif > prediction.technical_indicators.macd_dea ? 'positive' : 'negative'}">
-                                                        DIF: {prediction.technical_indicators.macd_dif.toFixed(2)}
-                                                    </span>
-                                                    <span class="tech-value">
-                                                        DEA: {prediction.technical_indicators.macd_dea.toFixed(2)}
-                                                    </span>
-                                                    <span class="tech-value {prediction.technical_indicators.macd_histogram > 0 ? 'positive' : 'negative'}">
-                                                        HIST: {prediction.technical_indicators.macd_histogram.toFixed(2)}
-                                                    </span>
+                                        </td>
+                                        <td>
+                                            <button class="action-btn" type="button" on:click={() => expandedPredIndex = expandedPredIndex === i ? null : i}>
+                                                {expandedPredIndex === i ? '收起' : '详情'}
+                                            </button>
+                                        </td>
+                                    </tr>
+                                    {#if expandedPredIndex === i}
+                                        <tr class="pred-detail-row">
+                                            <td colspan="6">
+                                                <div class="pred-detail">
+                                                    <div class="pred-detail-block">
+                                                        <span class="pred-detail-label">风险评级</span>
+                                                        <span class="risk-badge {prediction.confidence > 0.8 ? 'low-risk' : prediction.confidence > 0.6 ? 'medium-risk' : 'high-risk'}">
+                                                            {prediction.confidence > 0.8 ? '低风险' : prediction.confidence > 0.6 ? '中风险' : '高风险'}
+                                                        </span>
+                                                    </div>
+                                                    <div class="pred-detail-block">
+                                                        <span class="pred-detail-label">预测理由</span>
+                                                        {#if prediction.prediction_reason}
+                                                            <div class="prediction-reason">
+                                                                <div class="reason-text">{prediction.prediction_reason}</div>
+                                                                {#if prediction.key_factors && prediction.key_factors.length > 0}
+                                                                    <div class="key-factors">
+                                                                        {#each prediction.key_factors as factor}
+                                                                            <span class="factor-tag">{factor}</span>
+                                                                        {/each}
+                                                                    </div>
+                                                                {/if}
+                                                            </div>
+                                                        {:else}
+                                                            <span class="no-reason">暂无理由</span>
+                                                        {/if}
+                                                    </div>
+                                                    {#if prediction.technical_indicators}
+                                                        <div class="pred-detail-block">
+                                                            <span class="pred-detail-label">技术指标</span>
+                                                            <div class="tech-indicators">
+                                                                <span title="RSI: {prediction.technical_indicators.rsi.toFixed(1)}">
+                                                                    RSI: {prediction.technical_indicators.rsi > 70 ? '超买' : prediction.technical_indicators.rsi < 30 ? '超卖' : '正常'}
+                                                                </span>
+
+                                                                <!-- 增强MACD指标展示 -->
+                                                                <div class="tech-detail-indicator">
+                                                                    <span class="tech-label">MACD:</span>
+                                                                    <div class="tech-values">
+                                                                        <span class="tech-value {prediction.technical_indicators.macd_dif > prediction.technical_indicators.macd_dea ? 'positive' : 'negative'}">
+                                                                            DIF: {prediction.technical_indicators.macd_dif.toFixed(2)}
+                                                                        </span>
+                                                                        <span class="tech-value">
+                                                                            DEA: {prediction.technical_indicators.macd_dea.toFixed(2)}
+                                                                        </span>
+                                                                        <span class="tech-value {prediction.technical_indicators.macd_histogram > 0 ? 'positive' : 'negative'}">
+                                                                            HIST: {prediction.technical_indicators.macd_histogram.toFixed(2)}
+                                                                        </span>
+                                                                    </div>
+                                                                    {#if prediction.technical_indicators.macd_golden_cross}
+                                                                        <span class="tech-signal buy-signal">金叉</span>
+                                                                    {:else if prediction.technical_indicators.macd_death_cross}
+                                                                        <span class="tech-signal sell-signal">死叉</span>
+                                                                    {/if}
+                                                                </div>
+
+                                                                <!-- 增强KDJ指标展示 -->
+                                                                <div class="tech-detail-indicator">
+                                                                    <span class="tech-label">KDJ:</span>
+                                                                    <div class="tech-values">
+                                                                        <span class="tech-value {prediction.technical_indicators.kdj_k > prediction.technical_indicators.kdj_d ? 'positive' : 'negative'}">
+                                                                            K: {prediction.technical_indicators.kdj_k.toFixed(1)}
+                                                                        </span>
+                                                                        <span class="tech-value">
+                                                                            D: {prediction.technical_indicators.kdj_d.toFixed(1)}
+                                                                        </span>
+                                                                        <span class="tech-value {prediction.technical_indicators.kdj_j > 80 ? 'overbought' : prediction.technical_indicators.kdj_j < 20 ? 'oversold' : ''}">
+                                                                            J: {prediction.technical_indicators.kdj_j.toFixed(1)}
+                                                                        </span>
+                                                                    </div>
+                                                                    {#if prediction.technical_indicators.kdj_golden_cross}
+                                                                        <span class="tech-signal buy-signal">金叉</span>
+                                                                    {:else if prediction.technical_indicators.kdj_death_cross}
+                                                                        <span class="tech-signal sell-signal">死叉</span>
+                                                                    {:else if prediction.technical_indicators.kdj_overbought}
+                                                                        <span class="tech-signal overbought-signal">超买</span>
+                                                                    {:else if prediction.technical_indicators.kdj_oversold}
+                                                                        <span class="tech-signal oversold-signal">超卖</span>
+                                                                    {/if}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    {/if}
                                                 </div>
-                                                {#if prediction.technical_indicators.macd_golden_cross}
-                                                    <span class="tech-signal buy-signal">金叉</span>
-                                                {:else if prediction.technical_indicators.macd_death_cross}
-                                                    <span class="tech-signal sell-signal">死叉</span>
-                                                {/if}
-                                            </div>
-                                            
-                                            <!-- 增强KDJ指标展示 -->
-                                            <div class="tech-detail-indicator">
-                                                <span class="tech-label">KDJ:</span>
-                                                <div class="tech-values">
-                                                    <span class="tech-value {prediction.technical_indicators.kdj_k > prediction.technical_indicators.kdj_d ? 'positive' : 'negative'}">
-                                                        K: {prediction.technical_indicators.kdj_k.toFixed(1)}
-                                                    </span>
-                                                    <span class="tech-value">
-                                                        D: {prediction.technical_indicators.kdj_d.toFixed(1)}
-                                                    </span>
-                                                    <span class="tech-value {prediction.technical_indicators.kdj_j > 80 ? 'overbought' : prediction.technical_indicators.kdj_j < 20 ? 'oversold' : ''}">
-                                                        J: {prediction.technical_indicators.kdj_j.toFixed(1)}
-                                                    </span>
-                                                </div>
-                                                {#if prediction.technical_indicators.kdj_golden_cross}
-                                                    <span class="tech-signal buy-signal">金叉</span>
-                                                {:else if prediction.technical_indicators.kdj_death_cross}
-                                                    <span class="tech-signal sell-signal">死叉</span>
-                                                {:else if prediction.technical_indicators.kdj_overbought}
-                                                    <span class="tech-signal overbought-signal">超买</span>
-                                                {:else if prediction.technical_indicators.kdj_oversold}
-                                                    <span class="tech-signal oversold-signal">超卖</span>
-                                                {/if}
-                                            </div>
-                                        </div>
+                                            </td>
+                                        </tr>
                                     {/if}
-                                </td>
-                                <td>
-                                    <span class="risk-badge {prediction.confidence > 0.8 ? 'low-risk' : prediction.confidence > 0.6 ? 'medium-risk' : 'high-risk'}">
-                                        {prediction.confidence > 0.8 ? '低风险' : prediction.confidence > 0.6 ? '中风险' : '高风险'}
-                                    </span>
-                                </td>
-                            </tr>
-                        {/each}
-                    </tbody>
-                </table>
+                                {/each}
+                            </tbody>
+                        </table>
+                    </div>
+                {/if}
             </div>
         </div>
     {/if}
@@ -2476,7 +2483,78 @@
         font-size: 0.75rem;
         opacity: 0.65;
     }
-    
+    .conclusion-price {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-top: 0.75rem;
+        font-size: 1.05rem;
+        font-weight: 600;
+        flex-wrap: wrap;
+    }
+    .cp-date {
+        font-size: 0.75rem;
+        font-weight: 400;
+        opacity: 0.7;
+    }
+    .cp-arrow {
+        opacity: 0.6;
+    }
+    .cp-target.price-up { color: #10b981; }
+    .cp-target.price-down { color: #ef4444; }
+
+    /* 折叠区（更多分析 / 逐日明细表） */
+    .collapsible-section {
+        margin: 1.25rem 0;
+    }
+    .collapsible-toggle {
+        width: 100%;
+        text-align: left;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 0.5rem;
+        padding: 0.7rem 1rem;
+        font-size: 0.95rem;
+        font-weight: 600;
+        color: inherit;
+        cursor: pointer;
+    }
+    .collapsible-toggle:hover {
+        background: rgba(255, 255, 255, 0.1);
+    }
+    .collapsible-body {
+        margin-top: 0.75rem;
+    }
+    .chart-empty-note {
+        margin: 1rem 0;
+        padding: 1rem;
+        text-align: center;
+        opacity: 0.6;
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 0.5rem;
+    }
+
+    /* 逐日明细表：行内展开详情 */
+    .pred-detail-row td {
+        background: rgba(0, 0, 0, 0.15);
+    }
+    .pred-detail {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        padding: 0.5rem 0.25rem;
+    }
+    .pred-detail-block {
+        display: flex;
+        flex-direction: column;
+        gap: 0.35rem;
+    }
+    .pred-detail-label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        opacity: 0.7;
+    }
+
     .prediction-table {
         overflow-x: auto;
         width: 100%;
@@ -2594,10 +2672,6 @@
     }
     
     /* 预测理由紧凑显示 */
-    .prediction-reason-cell {
-        font-size: 0.65rem; /* 更小 */
-    }
-    
     .reason-text {
         margin-bottom: 0.2rem;
         line-height: 1.2;
@@ -2857,55 +2931,6 @@
         border-radius: 0.25rem;
     }
     
-    .simple-chart-backup {
-        background: rgba(0, 0, 0, 0.1);
-        padding: 1rem;
-        border-radius: 0.5rem;
-    }
-    
-    .chart-bars {
-        display: flex;
-        justify-content: space-around;
-        align-items: flex-end;
-        gap: 0.5rem;
-        height: 120px;
-    }
-    
-    .chart-bar-item {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 0.5rem;
-    }
-    
-    .bar-container {
-        display: flex;
-        align-items: flex-end;
-        height: 100px;
-    }
-    
-    .price-bar,
-    .confidence-bar {
-        width: 12px;
-        border-radius: 2px 2px 0 0;
-    }
-    
-    .bar-label {
-        font-size: 0.75rem;
-        color: rgba(255, 255, 255, 0.7);
-        text-align: center;
-    }
-    
-    .debug-info {
-        font-size: 0.875rem;
-        color: rgba(255, 255, 255, 0.8);
-    }
-    
-    .debug-info h4 {
-        margin: 0 0 0.5rem 0;
-        color: #ef4444;
-    }
-    
     .prediction-stats {
         margin-top: 2rem;
         display: flex;
@@ -3100,50 +3125,7 @@
         color: #10b981 !important; /* 绿色表示下跌 */
         font-weight: bold;
     }
-    
-    /* 新增：最新真实数据样式 */
-    .last-real-data {
-        margin-bottom: 2rem;
-        padding: 1rem;
-        background-color: rgba(0, 0, 0, 0.2);
-        border-radius: 0.5rem;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    
-    .last-real-data h3 {
-        margin-top: 0;
-        margin-bottom: 1rem;
-        font-size: 1.2rem;
-        color: rgba(255, 255, 255, 0.9);
-    }
-    
-    .real-data-card {
-        display: flex;
-        align-items: center;
-        gap: 2rem;
-        padding: 1rem;
-        background-color: rgba(255, 255, 255, 0.05);
-        border-radius: 0.5rem;
-    }
-    
-    .real-data-date {
-        font-size: 1.1rem;
-        color: rgba(255, 255, 255, 0.8);
-    }
-    
-    .real-data-price {
-        font-size: 1.5rem;
-        font-weight: bold;
-        color: rgba(255, 255, 255, 0.9);
-    }
-    
-    .real-data-change {
-        font-size: 1.3rem;
-        font-weight: bold;
-        padding: 0.25rem 0.75rem;
-        border-radius: 0.25rem;
-    }
-    
+
     /* 回测功能样式 */
     .backtest-settings {
         display: flex;
@@ -3380,25 +3362,6 @@
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-    }
-    
-    .advice-card {
-        background: rgba(0, 0, 0, 0.3);
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1.5rem;
-        border-left: 4px solid #667eea;
-    }
-    
-    .advice-content {
-        margin-bottom: 0.5rem;
-        font-size: 1.1rem;
-    }
-    
-    .risk-indicator {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
     }
     
     .risk-level {
@@ -3685,11 +3648,6 @@
     }
     
     /* 预测理由样式 */
-    .prediction-reason-cell {
-        min-width: 200px;
-        max-width: 300px;
-    }
-    
     .prediction-reason {
         display: flex;
         flex-direction: column;
