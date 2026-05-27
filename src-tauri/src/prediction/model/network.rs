@@ -128,6 +128,78 @@ pub fn train_and_save(
     })
 }
 
+/// 用显式训练/测试集训练 MLP，返回测试集指标（不保存权重）。
+///
+/// 支持跨股票池化训练：调用方把各股票的时间序切分拼接成统一的训练/测试集传入。
+#[allow(clippy::too_many_arguments)]
+pub fn train_eval(
+    train_x: &[f32],
+    train_y: &[f32],
+    n_train: usize,
+    test_x: &[f32],
+    test_y: &[f32],
+    n_test: usize,
+    epochs: usize,
+    learning_rate: f64,
+) -> Result<TrainOutcome, String> {
+    if n_train < 10 || n_test == 0 {
+        return Err(format!("样本不足（train={n_train}, test={n_test}）"));
+    }
+    let device = Device::Cpu;
+
+    let x_train =
+        Tensor::from_vec(train_x.to_vec(), (n_train, FEATURE_DIM), &device).map_err(|e| e.to_string())?;
+    let y_train =
+        Tensor::from_vec(train_y.to_vec(), (n_train, 1), &device).map_err(|e| e.to_string())?;
+    let x_test =
+        Tensor::from_vec(test_x.to_vec(), (n_test, FEATURE_DIM), &device).map_err(|e| e.to_string())?;
+
+    let varmap = VarMap::new();
+    let vb = VarBuilder::from_varmap(&varmap, DType::F32, &device);
+    let mlp = Mlp::new(vb).map_err(|e| e.to_string())?;
+    let mut optimizer = AdamW::new(
+        varmap.all_vars(),
+        ParamsAdamW {
+            lr: learning_rate.max(1e-5),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    for _ in 0..epochs.max(1) {
+        let pred = mlp.forward(&x_train).map_err(|e| e.to_string())?;
+        let loss = candle_nn::loss::mse(&pred, &y_train).map_err(|e| e.to_string())?;
+        optimizer.backward_step(&loss).map_err(|e| e.to_string())?;
+    }
+
+    let pred_test = mlp.forward(&x_test).map_err(|e| e.to_string())?;
+    let preds: Vec<f32> = pred_test
+        .flatten_all()
+        .and_then(|t| t.to_vec1::<f32>())
+        .map_err(|e| e.to_string())?;
+
+    let mut direction_correct = 0usize;
+    let mut abs_sum = 0.0f64;
+    let mut sq_sum = 0.0f64;
+    for (p, a) in preds.iter().zip(test_y.iter()) {
+        let (p, a) = (*p as f64, *a as f64);
+        if (p > 0.0 && a > 0.0) || (p < 0.0 && a < 0.0) {
+            direction_correct += 1;
+        }
+        let err = (p - a).abs();
+        abs_sum += err;
+        sq_sum += err * err;
+    }
+    let count = preds.len().max(1) as f64;
+
+    Ok(TrainOutcome {
+        direction_accuracy: direction_correct as f64 / count,
+        mae: abs_sum / count,
+        rmse: (sq_sum / count).sqrt(),
+        test_samples: preds.len(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
