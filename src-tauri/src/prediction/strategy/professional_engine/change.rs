@@ -29,15 +29,15 @@ pub(super) fn calculate_expected_change(
     let adjusted_change = base_change * confirmation_multiplier;
 
     // 应用A股涨跌停限制
-    let limited_change = apply_a_share_limits(adjusted_change, None);
+    let limited_change = apply_a_share_limits(adjusted_change, ctx.stock_code.as_deref());
 
     // 根据波动率计算预测区间
     let volatility_multiplier = ctx.market_regime.volatility_level.adjustment_factor();
     let range_width = ctx.volatility * 100.0 * volatility_multiplier * 1.5;
 
     // 预测区间也要遵守涨跌停限制
-    let lower = apply_a_share_limits(limited_change - range_width, None);
-    let upper = apply_a_share_limits(limited_change + range_width, None);
+    let lower = apply_a_share_limits(limited_change - range_width, ctx.stock_code.as_deref());
+    let upper = apply_a_share_limits(limited_change + range_width, ctx.stock_code.as_deref());
 
     (limited_change, (lower, upper))
 }

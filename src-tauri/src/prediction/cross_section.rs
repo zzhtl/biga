@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 /// 单个截面样本（因子已截面标准化）
 pub struct PanelRow {
+    pub date: NaiveDate,
     pub symbol: String,
     pub factors: Vec<f64>,
     pub fwd_return: f64,
@@ -21,6 +22,16 @@ pub struct RankedStock {
     pub symbol: String,
     pub score: f64,
     pub rank: usize,
+}
+
+/// 样本外截面排名信号
+#[derive(Debug, Clone)]
+pub struct CrossSectionRankSignal {
+    pub date: NaiveDate,
+    pub symbol: String,
+    pub score: f64,
+    pub rank: usize,
+    pub total: usize,
 }
 
 /// 走步评估报告
@@ -94,13 +105,13 @@ pub fn build_panel(
         if items.len() < MIN_CROSS {
             continue;
         }
-        panel.push(standardize(items, dim));
+        panel.push(standardize(_date, items, dim));
     }
     panel
 }
 
 /// 对一个截面做因子 z-score
-fn standardize(items: Vec<(String, Vec<f64>, f64)>, dim: usize) -> Vec<PanelRow> {
+fn standardize(date: NaiveDate, items: Vec<(String, Vec<f64>, f64)>, dim: usize) -> Vec<PanelRow> {
     let n = items.len() as f64;
     let mut mean = vec![0.0; dim];
     let mut std = vec![0.0; dim];
@@ -127,6 +138,7 @@ fn standardize(items: Vec<(String, Vec<f64>, f64)>, dim: usize) -> Vec<PanelRow>
                 .map(|d| if std[d] > 1e-9 { (f[d] - mean[d]) / std[d] } else { 0.0 })
                 .collect();
             PanelRow {
+                date,
                 symbol,
                 factors,
                 fwd_return: fwd,
@@ -282,6 +294,71 @@ pub fn walk_forward(panel: &[Vec<PanelRow>], window: usize) -> WalkForwardReport
     }
 }
 
+/// 前向滚动输出每个样本外交易日的截面排名信号。
+pub fn walk_forward_rank_signals(
+    stocks: &[(String, Vec<HistoricalData>)],
+    horizon: usize,
+    window: usize,
+) -> Vec<CrossSectionRankSignal> {
+    let hist_panel = build_panel(stocks, horizon.max(1));
+    if hist_panel.len() < window.max(20) {
+        return Vec::new();
+    }
+
+    let order = factor_ic_order(&hist_panel);
+    let panel = orthogonalize_panel(hist_panel, &order);
+    let dim = factor_dim();
+    let mut signals = Vec::new();
+
+    for t in window..panel.len() {
+        let w = estimate_weights(&panel[t - window..t], dim);
+        let day = &panel[t];
+        if day.len() < MIN_CROSS {
+            continue;
+        }
+
+        let mut scored: Vec<(usize, f64)> = day
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| (idx, composite(row, &w)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let total = scored.len();
+        for (rank_idx, (row_idx, score)) in scored.into_iter().enumerate() {
+            let row = &day[row_idx];
+            signals.push(CrossSectionRankSignal {
+                date: row.date,
+                symbol: row.symbol.clone(),
+                score,
+                rank: rank_idx + 1,
+                total,
+            });
+        }
+    }
+
+    signals
+}
+
+/// 生产和回测共用的截面排名偏置：返回单日涨跌幅偏置（百分点）。
+pub fn daily_bias_from_rank(rank: usize, total: usize) -> f64 {
+    if total <= 1 || rank == 0 {
+        return 0.0;
+    }
+
+    let percentile = (rank - 1) as f64 / (total - 1) as f64;
+    if percentile <= 0.20 {
+        0.08
+    } else if percentile <= 0.40 {
+        0.03
+    } else if percentile >= 0.80 {
+        -0.08
+    } else if percentile >= 0.60 {
+        -0.03
+    } else {
+        0.0
+    }
+}
+
 /// 生产打分：用最近 `window` 个截面日（带未来收益）估权重，对**最新交易日**截面打分排序。
 ///
 /// `stocks` 为各股票按日期升序的历史数据；`horizon` 为权重估计所用的未来收益周期。
@@ -315,7 +392,7 @@ pub fn rank_latest(
         return Vec::new();
     }
     // 截面标准化 + 同序正交化（与历史一致）
-    let today = standardize(latest, dim);
+    let today = standardize(NaiveDate::MIN, latest, dim);
     let today = orthogonalize_panel(vec![today], &order)
         .into_iter()
         .next()

@@ -37,6 +37,18 @@ pub fn is_trading_day(date: NaiveDate) -> bool {
                 return false;
             }
         }
+        2026 => {
+            if (month == 1 && (1..=3).contains(&day))
+                || (month == 2 && (15..=23).contains(&day))
+                || (month == 4 && (4..=6).contains(&day))
+                || (month == 5 && (1..=5).contains(&day))
+                || (month == 6 && (19..=21).contains(&day))
+                || (month == 9 && (25..=27).contains(&day))
+                || (month == 10 && (1..=7).contains(&day))
+            {
+                return false;
+            }
+        }
         2023 => {
             if month == 1 && (21..=27).contains(&day) {
                 return false;
@@ -128,5 +140,12 @@ mod tests {
         let next = get_next_trading_day(friday);
         assert_eq!(next.weekday(), Weekday::Mon);
     }
-}
 
+    #[test]
+    fn test_2026_exchange_holidays() {
+        assert!(!is_trading_day(NaiveDate::from_ymd_opt(2026, 2, 23).unwrap()));
+        assert!(is_trading_day(NaiveDate::from_ymd_opt(2026, 2, 24).unwrap()));
+        assert!(!is_trading_day(NaiveDate::from_ymd_opt(2026, 6, 19).unwrap()));
+        assert!(!is_trading_day(NaiveDate::from_ymd_opt(2026, 9, 25).unwrap()));
+    }
+}

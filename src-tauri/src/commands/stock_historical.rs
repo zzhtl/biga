@@ -1,5 +1,5 @@
 use crate::db::{
-    backfill_volume_metrics, batch_insert_historical_data, get_latest_close_price,
+    backfill_volume_metrics, batch_insert_historical_data, get_latest_close_price, get_historical_data as query_historical_data,
     upsert_stock_capital,
 };
 use crate::db::models::{HistoricalData, StockCapital};
@@ -15,21 +15,7 @@ pub async fn get_historical_data(
     end: String,
     pool: State<'_, SqlitePool>, // 从全局状态中提取连接池
 ) -> Result<Vec<HistoricalData>, AppError> {
-    // 1. 从数据库查询
-    let records = sqlx::query_as::<_, HistoricalData>(
-        r#"
-        SELECT * FROM historical_data
-        WHERE symbol = ? AND date BETWEEN ? AND ?
-        ORDER BY date DESC
-        "#,
-    )
-    .bind(symbol)
-    .bind(start)
-    .bind(end)
-    .fetch_all(&*pool)
-    .await?;
-
-    Ok(records)
+    query_historical_data(&symbol, &start, &end, &pool).await
 }
 
 #[tauri::command]

@@ -153,6 +153,7 @@
         risk_reward_ratio: number;
         reasons: string[];
         confidence: number;
+        accuracy_rate?: number;
     }
     
     // 新增：支撑压力位接口
@@ -192,11 +193,18 @@
         candle_patterns: any[];
         volume_analysis: any;
         multi_factor_score: {
-            // 后端某些场景可能缺少这个字段
-            total_score?: number;
-            factors: any[];
-            signal_quality: any;
-            operation_suggestion: string;
+            total_score: number;
+            trend_score: number;
+            volume_price_score: number;
+            momentum_score: number;
+            pattern_score: number;
+            support_resistance_score: number;
+            sentiment_score: number;
+            volatility_score: number;
+            signal: string;
+            signal_strength: number;
+            adaptive_score: number;
+            confirmation_count: number;
         };
     }
     
@@ -217,7 +225,7 @@
     // 模型训练参数
     let newModelName = "模型-" + new Date().toISOString().slice(0, 10);
     let modelType = "candle_mlp"; // 默认使用Candle的MLP模型
-    let lookbackDays = 180; // 修改为180天历史数据
+    let lookbackDays = 1500; // 默认使用更长真实历史数据
     let trainTestSplit = 0.8;
     let features = ["close", "volume", "change_percent", "ma_trend", "price_position", "volatility", "rsi_signal", "macd_momentum", "ma5", "ma10", "ma20", "rsi", "macd", "bollinger", "stochastic_k", "stochastic_d", "momentum", "kdj_k", "kdj_d", "kdj_j", "cci", "obv", "macd_dif", "macd_dea", "macd_histogram"];
     let epochs = 100; // 训练轮数
@@ -250,13 +258,14 @@
     // 纯技术分析预测（无需模型）- 默认展示
     let showTechnicalOnly = true;
     let tabManuallySelected = false; // 用户是否手动切过 tab（手动后不再自动跳转）
-    let technicalHistoryDays = 180; // 使用多少天历史数据
+    let technicalHistoryDays = 1500; // 使用多少天历史数据
     let technicalPredictionDays = 7; // 预测未来多少天
     let isTechnicalPredicting = false;
 
-    function normalizeNumber(value: any): number {
+    function normalizeNumber(value: any, fallback = 0): number {
         // 统一处理后端返回的 number/string/undefined，避免模板渲染阶段直接异常。
-        return Number(value);
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
     }
 
     function normalizePrediction(raw: any): Prediction {
@@ -350,10 +359,18 @@
             candle_patterns: Array.isArray(raw?.candle_patterns) ? raw.candle_patterns : [],
             volume_analysis: raw?.volume_analysis ?? {},
             multi_factor_score: {
-                total_score: multiFactorScoreRaw?.total_score,
-                factors: Array.isArray(multiFactorScoreRaw?.factors) ? multiFactorScoreRaw.factors : [],
-                signal_quality: multiFactorScoreRaw?.signal_quality ?? null,
-                operation_suggestion: String(multiFactorScoreRaw?.operation_suggestion ?? ""),
+                total_score: normalizeNumber(multiFactorScoreRaw?.total_score, 50),
+                trend_score: normalizeNumber(multiFactorScoreRaw?.trend_score, 50),
+                volume_price_score: normalizeNumber(multiFactorScoreRaw?.volume_price_score, 50),
+                momentum_score: normalizeNumber(multiFactorScoreRaw?.momentum_score, 50),
+                pattern_score: normalizeNumber(multiFactorScoreRaw?.pattern_score, 50),
+                support_resistance_score: normalizeNumber(multiFactorScoreRaw?.support_resistance_score, 50),
+                sentiment_score: normalizeNumber(multiFactorScoreRaw?.sentiment_score, 50),
+                volatility_score: normalizeNumber(multiFactorScoreRaw?.volatility_score, 50),
+                signal: String(multiFactorScoreRaw?.signal ?? "中性"),
+                signal_strength: normalizeNumber(multiFactorScoreRaw?.signal_strength, 0.5),
+                adaptive_score: normalizeNumber(multiFactorScoreRaw?.adaptive_score, 50),
+                confirmation_count: normalizeNumber(multiFactorScoreRaw?.confirmation_count, 0),
             },
         };
     }
@@ -411,7 +428,9 @@
             }
             
             if (predictions.length > 0 && professionalAnalysis) {
-                const totalScoreRaw = professionalAnalysis.multi_factor_score?.total_score;
+                const totalScoreRaw =
+                    professionalAnalysis.multi_factor_score?.adaptive_score ??
+                    professionalAnalysis.multi_factor_score?.total_score;
                 const totalScore =
                     typeof totalScoreRaw === "number" ? totalScoreRaw : Number(totalScoreRaw);
                 const totalScoreText = Number.isFinite(totalScore) ? `${totalScore.toFixed(1)}/100` : "—/100";
@@ -507,8 +526,8 @@
         try {
             // 计算训练日期范围 - 考虑A股节假日因素
             const endDate = new Date().toISOString().slice(0, 10);
-            // 使用180天训练数据 + 30天节假日缓冲期 = 210天总范围
-            const totalDays = lookbackDays + 30; // 180 + 30 = 210天
+            // 使用训练窗口 + 30天节假日缓冲期
+            const totalDays = lookbackDays + 30;
             const startDateObj = new Date(Date.now() - totalDays * 24 * 60 * 60 * 1000);
             const startDate = startDateObj.toISOString().slice(0, 10);
 
@@ -618,6 +637,10 @@
         
         predictionChart = chartData;
         console.log("预测图表数据已生成:", predictionChart);
+    }
+
+    function chartX(index: number, length: number): number {
+        return length <= 1 ? 405 : 60 + (index / (length - 1)) * 690;
     }
 
     async function predictStock() {
@@ -890,11 +913,6 @@
             return;
         }
         
-        if (!selectedModelName && useExistingModel) {
-            errorMessage = "请先选择模型";
-            return;
-        }
-        
         isBacktesting = true;
         errorMessage = "";
         
@@ -978,8 +996,8 @@
             <div class="prediction-settings">
                 <div class="form-group">
                     <label>历史数据天数：</label>
-                    <input type="number" bind:value={technicalHistoryDays} min="60" max="365" step="10" />
-                    <small>建议120-250天，数据越多越准确</small>
+                    <input type="number" bind:value={technicalHistoryDays} min="120" max="3000" step="100" />
+                    <small>建议500-3000天，真实数据越多校准越稳定</small>
                 </div>
                 
                 <div class="form-group">
@@ -1099,9 +1117,9 @@
                 
                 <div class="form-group">
                     <label>历史窗口天数 (实际查询范围+30天节假日缓冲):</label>
-                    <input type="number" bind:value={lookbackDays} min="60" max="365" step="30" />
+                    <input type="number" bind:value={lookbackDays} min="120" max="3000" step="100" />
                     <small style="color: rgba(255,255,255,0.6); font-size: 0.8rem;">
-                        推荐: 180天 (约6个月交易数据)，实际查询 {lookbackDays + 30} 天
+                        推荐: 1500天 (约6年交易数据)，实际查询 {lookbackDays + 30} 天
                     </small>
                 </div>
                 
@@ -1489,7 +1507,7 @@
                 <button
                     on:click={runBacktest}
                     class:loading={isBacktesting}
-                    disabled={isBacktesting || !selectedModelName}
+                    disabled={isBacktesting}
                 >
                     {#if isBacktesting}
                         <span class="spinner"></span>
@@ -1519,7 +1537,7 @@
                                 </div>
                                 <div class="stat-item">
                                     <span class="stat-label">平均误差:</span>
-                                    <span class="stat-value">{(backtestReport.average_prediction_error * 100).toFixed(2)}%</span>
+                                    <span class="stat-value">{backtestReport.average_prediction_error.toFixed(2)}%</span>
                                 </div>
                                 <div class="stat-item">
                                     <span class="stat-label">总预测次数:</span>
@@ -1574,7 +1592,7 @@
                                                     <span>{(entry.direction_accuracy * 100).toFixed(1)}%</span>
                                                 </div>
                                             </td>
-                                            <td>{(entry.avg_prediction_error * 100).toFixed(2)}%</td>
+                                            <td>{entry.avg_prediction_error.toFixed(2)}%</td>
                                             <td>{entry.predictions.length}</td>
                                             <td>
                                                 <button class="action-btn" type="button" on:click={() => expandedEntryIndex = expandedEntryIndex === i ? null : i}>
@@ -1700,7 +1718,7 @@
                                     <div class="signal-card buy-card">
                                         <div class="signal-header">
                                             <span class="signal-type">{buyPoint.point_type}</span>
-                                            <span class="signal-strength">强度: {buyPoint.signal_strength.toFixed(0)}分</span>
+                                            <span class="signal-strength">强度: {(buyPoint.signal_strength * 100).toFixed(0)}分</span>
                                         </div>
                                         <div class="signal-body">
                                             <div class="signal-row">
@@ -1708,11 +1726,11 @@
                                                 <span class="value price-value">{buyPoint.price_level.toFixed(2)}元</span>
                                             </div>
                                             <div class="signal-row">
-                                                <span class="label">🛡️ 止损位(跌至卖出):</span>
+                                                <span class="label">🛡️ 止损位(跌破离场):</span>
                                                 <span class="value stop-loss">{buyPoint.stop_loss.toFixed(2)}元 (↓{Math.abs((buyPoint.stop_loss - buyPoint.price_level) / buyPoint.price_level * 100).toFixed(2)}%)</span>
                                             </div>
                                             <div class="signal-row">
-                                                <span class="label">🎯 止盈位(涨至卖出):</span>
+                                                <span class="label">🎯 目标位(上涨止盈):</span>
                                                 <span class="value take-profit">
                                                     {#each buyPoint.take_profit as tp, i}
                                                         {tp.toFixed(2)}元(↑{((tp - buyPoint.price_level) / buyPoint.price_level * 100).toFixed(2)}%)
@@ -1756,7 +1774,7 @@
                                     <div class="signal-card sell-card">
                                         <div class="signal-header">
                                             <span class="signal-type">{sellPoint.point_type}</span>
-                                            <span class="signal-strength">强度: {sellPoint.signal_strength.toFixed(0)}分</span>
+                                            <span class="signal-strength">强度: {(sellPoint.signal_strength * 100).toFixed(0)}分</span>
                                         </div>
                                         <div class="signal-body">
                                             <div class="signal-row">
@@ -1764,14 +1782,14 @@
                                                 <span class="value price-value">{sellPoint.price_level.toFixed(2)}元</span>
                                             </div>
                                             <div class="signal-row">
-                                                <span class="label">🛡️ 止损位(跌至卖出):</span>
-                                                <span class="value stop-loss">{sellPoint.stop_loss.toFixed(2)}元 (↓{Math.abs((sellPoint.stop_loss - sellPoint.price_level) / sellPoint.price_level * 100).toFixed(2)}%)</span>
+                                                <span class="label">🛡️ 风险位(上破失效):</span>
+                                                <span class="value stop-loss">{sellPoint.stop_loss.toFixed(2)}元 (↑{Math.abs((sellPoint.stop_loss - sellPoint.price_level) / sellPoint.price_level * 100).toFixed(2)}%)</span>
                                             </div>
                                             <div class="signal-row">
-                                                <span class="label">🎯 止盈位(涨至卖出):</span>
+                                                <span class="label">🎯 下行目标位:</span>
                                                 <span class="value take-profit">
                                                     {#each sellPoint.take_profit as tp, i}
-                                                        {tp.toFixed(2)}元(↑{((tp - sellPoint.price_level) / sellPoint.price_level * 100).toFixed(2)}%)
+                                                        {tp.toFixed(2)}元(↓{Math.abs((tp - sellPoint.price_level) / sellPoint.price_level * 100).toFixed(2)}%)
                                                         {#if i < sellPoint.take_profit.length - 1}, {/if}
                                                     {/each}
                                                 </span>
@@ -1865,13 +1883,13 @@
                                         <line x1="60" y1={50 + i * 40} x2="750" y2={50 + i * 40} stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
                                     {/each}
                                     {#each predictionChart.labels as label, i}
-                                        {@const x = 60 + (i / (predictionChart.labels.length - 1)) * 690}
+                                        {@const x = chartX(i, predictionChart.labels.length)}
                                         <line x1={x} y1="50" x2={x} y2="250" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
                                     {/each}
                                     
                                     <!-- 价格曲线 -->
                                     {@const pathD = priceData.map((price, i) => {
-                                        const x = 60 + (i / (priceData.length - 1)) * 690;
+                                        const x = chartX(i, priceData.length);
                                         const y = 250 - ((price - minPrice) / priceRange) * 180;
                                         return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
                                     }).join(' ')}
@@ -1879,14 +1897,14 @@
                                     
                                     <!-- 置信度柱状图 -->
                                     {#each confidenceData as confidence, i}
-                                        {@const x = 60 + (i / (confidenceData.length - 1)) * 690}
+                                        {@const x = chartX(i, confidenceData.length)}
                                         {@const height = (confidence / 100) * 60}
                                         <rect x={x - 8} y={250 - height} width="16" height={height} fill="rgba(34, 197, 94, 0.6)" rx="2"/>
                                     {/each}
                                     
                                     <!-- 数据点 -->
                                     {#each priceData as price, i}
-                                        {@const x = 60 + (i / (priceData.length - 1)) * 690}
+                                        {@const x = chartX(i, priceData.length)}
                                         {@const y = 250 - ((price - minPrice) / priceRange) * 180}
                                         <circle cx={x} cy={y} r="5" fill="rgb(79, 70, 229)" stroke="white" stroke-width="2"/>
                                         <text x={x} y={y - 15} text-anchor="middle" fill="white" font-size="11" font-weight="bold">{price.toFixed(2)}</text>
@@ -1894,7 +1912,7 @@
                                     
                                     <!-- 日期标签 -->
                                     {#each predictionChart.labels as label, i}
-                                        {@const x = 60 + (i / (predictionChart.labels.length - 1)) * 690}
+                                        {@const x = chartX(i, predictionChart.labels.length)}
                                         <text x={x} y={275} text-anchor="middle" fill="rgba(255,255,255,0.8)" font-size="12">{label}</text>
                                     {/each}
                                     

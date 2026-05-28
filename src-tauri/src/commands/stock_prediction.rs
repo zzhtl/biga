@@ -5,11 +5,13 @@
 use crate::prediction::{
     types::*,
     model::{training, inference, management},
-    strategy::multi_timeframe::MultiTimeframeSignal,
+    strategy::multi_timeframe::{self, MultiTimeframeSignal},
     analysis::*,
 };
-use crate::db::{connection::create_temp_pool, repository::get_recent_historical_data};
+use crate::db::{connection::create_temp_pool, repository::{get_historical_data, get_recent_historical_data, get_recent_historical_data_for_symbols, get_symbols_with_min_bars}};
 use crate::services;
+use chrono::NaiveDate;
+use sqlx::sqlite::SqlitePool;
 
 // =============================================================================
 // 模型管理命令
@@ -89,10 +91,18 @@ pub async fn evaluate_candle_model(model_id: String) -> Result<EvaluationResult,
 /// 执行回测（真实 walk-forward：逐日仅用历史数据预测并与未来真实涨跌对比）
 #[tauri::command]
 pub async fn run_model_backtest(request: BacktestRequest) -> Result<BacktestReport, String> {
-    use crate::prediction::backtest::{run_backtest, MIN_LOOKBACK};
+    use crate::prediction::backtest::{run_backtest_window, MIN_LOOKBACK};
 
     let pool = create_temp_pool().await?;
-    let historical = get_recent_historical_data(&request.stock_code, 400, &pool)
+    let start_date = NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d")
+        .map_err(|e| format!("回测开始日期格式错误: {e}"))?;
+    let end_date = NaiveDate::parse_from_str(&request.end_date, "%Y-%m-%d")
+        .map_err(|e| format!("回测结束日期格式错误: {e}"))?;
+    if end_date < start_date {
+        return Err("回测结束日期不能早于开始日期".to_string());
+    }
+
+    let historical = get_historical_data(&request.stock_code, "1900-01-01", &request.end_date, &pool)
         .await
         .map_err(|e| format!("获取历史数据失败: {e}"))?;
 
@@ -101,21 +111,121 @@ pub async fn run_model_backtest(request: BacktestRequest) -> Result<BacktestRepo
     }
 
     let horizon = request.prediction_days.max(1);
-    let report = run_backtest(&request.stock_code, &historical, MIN_LOOKBACK, horizon, 1)?;
+    let report = run_backtest_window(
+        &request.stock_code,
+        &historical,
+        MIN_LOOKBACK,
+        horizon,
+        request.backtest_interval,
+        Some(start_date),
+        Some(end_date),
+    )?;
     let m = &report.metrics;
+    if m.total == 0 {
+        return Err("指定日期范围内没有可回测样本，请扩大区间或确认历史数据覆盖范围".to_string());
+    }
 
     // 价格准确率：由平均绝对误差换算的有界评分（误差 10 个百分点对应 0 分）
     let price_accuracy = (1.0 - m.mean_abs_error / 10.0).clamp(0.0, 1.0);
+    let backtest_entries: Vec<BacktestEntry> = report
+        .observations
+        .iter()
+        .map(backtest_entry_from_observation)
+        .collect();
+    let accuracy_trend = backtest_entries
+        .iter()
+        .map(|entry| entry.direction_accuracy)
+        .collect();
+    let daily_accuracy = backtest_entries
+        .iter()
+        .map(|entry| DailyAccuracy {
+            date: entry.prediction_date.clone(),
+            price_accuracy: entry.price_accuracy,
+            direction_accuracy: entry.direction_accuracy,
+            prediction_count: entry.predictions.len(),
+            market_volatility: entry.actual_changes.first().copied().unwrap_or(0.0).abs(),
+        })
+        .collect();
+    let price_error_distribution = backtest_entries
+        .iter()
+        .map(|entry| entry.avg_prediction_error)
+        .collect();
+    let volatility_vs_accuracy = backtest_entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.actual_changes.first().copied().unwrap_or(0.0).abs(),
+                entry.direction_accuracy,
+            )
+        })
+        .collect();
 
     Ok(BacktestReport {
         stock_code: request.stock_code,
-        model_name: request.model_name.unwrap_or_else(|| "default".to_string()),
+        model_name: "规则引擎+真实数据校准".to_string(),
         backtest_period: format!("{} 至 {}", request.start_date, request.end_date),
         total_predictions: m.total,
+        backtest_entries,
         overall_price_accuracy: price_accuracy,
         overall_direction_accuracy: m.direction_accuracy,
         average_prediction_error: m.mean_abs_error,
+        accuracy_trend,
+        daily_accuracy,
+        price_error_distribution,
+        direction_correct_rate: m.direction_accuracy,
+        volatility_vs_accuracy,
     })
+}
+
+fn backtest_entry_from_observation(
+    observation: &crate::prediction::backtest::BacktestObservation,
+) -> BacktestEntry {
+    let error_percent = (observation.predicted_change - observation.actual_change).abs();
+    let price_accuracy = (1.0 - error_percent / 10.0).clamp(0.0, 1.0);
+    let direction_accuracy = if same_direction(observation.predicted_change, observation.actual_change) {
+        1.0
+    } else {
+        0.0
+    };
+
+    BacktestEntry {
+        prediction_date: observation.prediction_date.format("%Y-%m-%d").to_string(),
+        predictions: vec![Prediction {
+            target_date: observation.target_date.format("%Y-%m-%d").to_string(),
+            predicted_price: observation.predicted_price,
+            predicted_change_percent: observation.predicted_change,
+            confidence: observation.confidence,
+            trading_signal: Some(signal_from_change(observation.predicted_change).to_string()),
+            signal_strength: Some(observation.confidence),
+            technical_indicators: None,
+            prediction_reason: Some("真实走步回测：仅使用预测日前历史数据".to_string()),
+            key_factors: Some(vec![
+                format!("预测发起日: {}", observation.prediction_date.format("%Y-%m-%d")),
+                format!("基准价格: {:.2}", observation.base_price),
+                format!("实际涨跌幅: {:+.2}%", observation.actual_change),
+            ]),
+        }],
+        actual_prices: vec![observation.actual_price],
+        actual_changes: vec![observation.actual_change],
+        price_accuracy,
+        direction_accuracy,
+        avg_prediction_error: error_percent,
+    }
+}
+
+fn same_direction(predicted_change: f64, actual_change: f64) -> bool {
+    (predicted_change > 0.0 && actual_change > 0.0)
+        || (predicted_change < 0.0 && actual_change < 0.0)
+}
+
+fn signal_from_change(change: f64) -> &'static str {
+    if change > 0.0 {
+        "看涨"
+    } else if change < 0.0 {
+        "看跌"
+    } else {
+        "中性"
+    }
 }
 
 // =============================================================================
@@ -138,14 +248,12 @@ pub async fn cross_sectional_ranking() -> Result<Vec<crate::prediction::cross_se
         return Err("历史数据足够的股票不足 5 只，无法做截面排名".to_string());
     }
 
-    let mut stocks = Vec::new();
-    for sym in symbols {
-        if let Ok(hist) = get_recent_historical_data(&sym, 400, &pool).await {
-            if hist.len() >= 150 {
-                stocks.push((sym, hist));
-            }
-        }
-    }
+    let stocks = get_recent_historical_data_for_symbols(&symbols, 800, &pool)
+        .await
+        .map_err(|e| format!("获取截面历史数据失败: {e}"))?
+        .into_iter()
+        .filter(|(_, hist)| hist.len() >= 150)
+        .collect::<Vec<_>>();
 
     let ranking = rank_latest(&stocks, 5, 120);
     if ranking.is_empty() {
@@ -244,17 +352,31 @@ pub async fn analyze_multi_timeframe_prediction_value(symbol: String) -> Result<
 /// 专业策略预测
 #[tauri::command]
 pub async fn predict_with_professional_strategy(request: PredictionRequest) -> Result<ProfessionalPredictionResponse, String> {
-    // 获取基础预测
-    let predictions = inference::predict(request.clone()).await?;
-    
+    predict_with_professional_strategy_inner(request, None).await
+}
+
+async fn predict_with_professional_strategy_inner(
+    request: PredictionRequest,
+    history_days: Option<usize>,
+) -> Result<ProfessionalPredictionResponse, String> {
+    let analysis_days = history_days
+        .unwrap_or(inference::MAX_ANALYSIS_DAYS)
+        .clamp(inference::MIN_ANALYSIS_DAYS, inference::MAX_ANALYSIS_DAYS);
+
+    let mut predictions = if request.use_candle {
+        inference::predict_with_model(request.clone()).await?
+    } else {
+        inference::predict_with_history(request.clone(), analysis_days).await?
+    };
+
     // 获取历史数据进行专业分析
     let pool = create_temp_pool().await?;
-    let historical = get_recent_historical_data(&request.stock_code, 200, &pool)
+    let historical = get_recent_historical_data(&request.stock_code, analysis_days, &pool)
         .await
         .map_err(|e| format!("获取历史数据失败: {e}"))?;
     
-    if historical.is_empty() {
-        return Err("未找到历史数据".to_string());
+    if historical.len() < 60 {
+        return Err("历史数据不足60天，无法进行准确预测".to_string());
     }
     
     let prices: Vec<f64> = historical.iter().map(|h| h.close).collect();
@@ -264,81 +386,119 @@ pub async fn predict_with_professional_strategy(request: PredictionRequest) -> R
     let opens: Vec<f64> = historical.iter().map(|h| h.open).collect();
     
     let current_price = *prices.last().unwrap();
+    let last_data = historical.last().unwrap();
     
-    // 技术分析
-    let trend_analysis = trend::analyze_trend(&prices, &highs, &lows);
-    let volume_signal = volume::analyze_volume_price(&prices, &highs, &lows, &volumes);
-    let patterns = pattern::recognize_patterns(&opens, &prices, &highs, &lows);
-    let sr = support_resistance::calculate_support_resistance(&prices, &highs, &lows, current_price);
+    let analysis = inference::analyze(
+        &prices,
+        &highs,
+        &lows,
+        &volumes,
+        &opens,
+        inference::AnalysisOptions {
+            turnover_rate: last_data.turnover_rate,
+            prediction_days: request.prediction_days,
+            stock_code: Some(&request.stock_code),
+        },
+    );
+    let mut professional_result = analysis.professional_result.clone();
+    let calibration_horizon = if request.use_candle {
+        request.prediction_days.max(1)
+    } else {
+        1
+    };
+    inference::calibrate_professional_result(
+        &historical,
+        &mut professional_result,
+        calibration_horizon,
+        Some(&request.stock_code),
+    );
+    if let Some(adjustment) = latest_cross_section_adjustment(&request.stock_code, &pool).await? {
+        append_prediction_factor(&mut predictions, &adjustment.summary);
+        professional_result.key_factors.push(adjustment.summary);
+    }
+    let risk = &professional_result.risk_assessment;
     
     // 生成买卖点
     let mut buy_points = Vec::new();
     let mut sell_points = Vec::new();
     
     // 根据分析结果生成买点
-    if trend_analysis.overall_trend.is_bullish() || !patterns.iter().filter(|p| p.is_bullish).collect::<Vec<_>>().is_empty() {
-        let nearest_support = sr.support_levels.first().copied().unwrap_or(current_price * 0.95);
+    if professional_result.direction.to_bias() > 0.0 || analysis.patterns.iter().any(|p| p.is_bullish) {
+        let price_level = analysis
+            .support_resistance
+            .support_levels
+            .first()
+            .copied()
+            .unwrap_or(current_price);
+        let stop_loss = price_level * (1.0 - risk.suggested_stop_loss / 100.0);
+        let take_profit = vec![
+            price_level * (1.0 + risk.suggested_take_profit / 200.0),
+            price_level * (1.0 + risk.suggested_take_profit / 100.0),
+        ];
         
         buy_points.push(BuySellPoint {
             point_type: "买入".to_string(),
-            signal_strength: trend_analysis.trend_confidence,
-            price_level: nearest_support,
-            stop_loss: nearest_support * 0.95,
-            take_profit: vec![current_price * 1.05, current_price * 1.10],
-            risk_reward_ratio: 2.0,
+            signal_strength: professional_result.confidence,
+            price_level,
+            stop_loss,
+            take_profit,
+            risk_reward_ratio: risk.risk_reward_ratio,
             reasons: vec![
-                format!("趋势: {}", trend_analysis.description),
-                format!("量价信号: {}", volume_signal.signal),
+                format!("专业方向: {}", professional_result.direction.to_string()),
+                format!("量价信号: {}", analysis.volume_signal.signal),
+                format!("策略建议: {}", professional_result.suggested_action),
             ],
-            confidence: trend_analysis.trend_confidence,
+            confidence: professional_result.confidence,
             accuracy_rate: Some(0.65),
         });
     }
     
     // 根据分析结果生成卖点
-    if trend_analysis.overall_trend.is_bearish() || !patterns.iter().filter(|p| !p.is_bullish).collect::<Vec<_>>().is_empty() {
-        let nearest_resistance = sr.resistance_levels.first().copied().unwrap_or(current_price * 1.05);
+    if professional_result.direction.to_bias() < 0.0 || analysis.patterns.iter().any(|p| !p.is_bullish) {
+        let price_level = analysis
+            .support_resistance
+            .resistance_levels
+            .first()
+            .copied()
+            .unwrap_or(current_price);
+        let stop_loss = price_level * (1.0 + risk.suggested_stop_loss / 100.0);
+        let take_profit = vec![
+            price_level * (1.0 - risk.suggested_take_profit / 200.0),
+            price_level * (1.0 - risk.suggested_take_profit / 100.0),
+        ];
         
         sell_points.push(BuySellPoint {
             point_type: "卖出".to_string(),
-            signal_strength: trend_analysis.trend_confidence,
-            price_level: nearest_resistance,
-            stop_loss: nearest_resistance * 1.05,
-            take_profit: vec![current_price * 0.95, current_price * 0.90],
-            risk_reward_ratio: 2.0,
+            signal_strength: professional_result.confidence,
+            price_level,
+            stop_loss,
+            take_profit,
+            risk_reward_ratio: risk.risk_reward_ratio,
             reasons: vec![
-                format!("趋势: {}", trend_analysis.description),
-                format!("量价信号: {}", volume_signal.signal),
+                format!("专业方向: {}", professional_result.direction.to_string()),
+                format!("量价信号: {}", analysis.volume_signal.signal),
+                format!("策略建议: {}", professional_result.suggested_action),
             ],
-            confidence: trend_analysis.trend_confidence,
+            confidence: professional_result.confidence,
             accuracy_rate: Some(0.65),
         });
     }
-    
-    // 生成当前建议
-    let current_advice = match &trend_analysis.overall_trend {
-        TrendState::StrongBullish => "强烈看涨，可积极参与",
-        TrendState::Bullish => "看涨，可适度参与",
-        TrendState::Neutral => "震荡，建议观望",
-        TrendState::Bearish => "看跌，建议减仓",
-        TrendState::StrongBearish => "强烈看跌，建议回避",
-    };
-    
-    // 风险等级
-    let volatility = trend::calculate_historical_volatility(&prices, 20);
-    let risk_level = if volatility > 0.04 {
-        "高风险"
-    } else if volatility > 0.02 {
-        "中等风险"
-    } else {
-        "低风险"
-    };
+
+    let date = last_data.date.format("%Y-%m-%d").to_string();
+    let multi_timeframe = multi_timeframe::get_latest_signal(&prices, &highs, &lows, &date)
+        .unwrap_or_else(|| neutral_multi_timeframe_signal(&date));
     
     let professional_analysis = ProfessionalPrediction {
         buy_points,
         sell_points,
-        current_advice: current_advice.to_string(),
-        risk_level: risk_level.to_string(),
+        support_resistance: analysis.support_resistance,
+        multi_timeframe,
+        divergence: summarize_divergence(&analysis.divergence_analysis),
+        current_advice: professional_result.suggested_action.clone(),
+        risk_level: risk.risk_level.clone(),
+        candle_patterns: analysis.patterns,
+        volume_analysis: summarize_volume(&analysis.volume_signal, analysis.tech_indicators.obv_trend),
+        multi_factor_score: analysis.multi_factor_score,
     };
     
     Ok(ProfessionalPredictionResponse {
@@ -357,5 +517,193 @@ pub async fn predict_with_technical_only(request: TechnicalOnlyRequest) -> Resul
         use_candle: false,
     };
     
-    predict_with_professional_strategy(pred_request).await
+    predict_with_professional_strategy_inner(pred_request, request.history_days).await
+}
+
+struct CrossSectionAdjustment {
+    summary: String,
+}
+
+async fn latest_cross_section_adjustment(
+    stock_code: &str,
+    pool: &SqlitePool,
+) -> Result<Option<CrossSectionAdjustment>, String> {
+    use crate::prediction::cross_section::{daily_bias_from_rank, rank_latest};
+
+    let symbols = get_symbols_with_min_bars(150, pool)
+        .await
+        .map_err(|e| format!("获取截面股票池失败: {e}"))?;
+    if symbols.len() < 20 {
+        return Ok(None);
+    }
+
+    let stocks = get_recent_historical_data_for_symbols(&symbols, 800, pool)
+        .await
+        .map_err(|e| format!("获取截面历史数据失败: {e}"))?
+        .into_iter()
+        .filter(|(_, hist)| hist.len() >= 150)
+        .collect::<Vec<_>>();
+    let ranking = rank_latest(&stocks, 5, 120);
+    if ranking.len() < 20 {
+        return Ok(None);
+    }
+
+    let target_digits = symbol_digits(stock_code);
+    let ranked = ranking.iter().find(|ranked| {
+        ranked.symbol.eq_ignore_ascii_case(stock_code)
+            || (!target_digits.is_empty() && symbol_digits(&ranked.symbol) == target_digits)
+    });
+    let Some(ranked) = ranked else {
+        return Ok(None);
+    };
+
+    let total = ranking.len();
+    let percentile = if total > 1 {
+        (ranked.rank - 1) as f64 / (total - 1) as f64
+    } else {
+        0.5
+    };
+    let daily_bias = daily_bias_from_rank(ranked.rank, total);
+    if daily_bias == 0.0 {
+        return Ok(None);
+    }
+
+    let relative_strength = (1.0 - percentile) * 100.0;
+    Ok(Some(CrossSectionAdjustment {
+        summary: format!(
+            "截面强弱参考: 全市场第{}/{}名，相对强度{:.0}%，方向偏置参考{:+.2}%",
+            ranked.rank, total, relative_strength, daily_bias
+        ),
+    }))
+}
+
+fn append_prediction_factor(predictions: &mut PredictionResponse, summary: &str) {
+    for prediction in predictions.predictions.iter_mut() {
+        prediction
+            .key_factors
+            .get_or_insert_with(Vec::new)
+            .push(summary.to_string());
+    }
+}
+
+fn symbol_digits(symbol: &str) -> String {
+    symbol.chars().filter(|c| c.is_ascii_digit()).collect()
+}
+
+fn neutral_multi_timeframe_signal(date: &str) -> MultiTimeframeSignal {
+    MultiTimeframeSignal {
+        date: date.to_string(),
+        daily_trend: "中性".to_string(),
+        weekly_trend: "中性".to_string(),
+        monthly_trend: "中性".to_string(),
+        resonance_level: 0,
+        resonance_direction: "中性".to_string(),
+        signal_quality: 30.0,
+        buy_signal: false,
+        sell_signal: false,
+    }
+}
+
+fn summarize_divergence(analysis: &DivergenceAnalysis) -> VolumePriceDivergence {
+    let signals = [
+        &analysis.rsi_divergence,
+        &analysis.macd_divergence,
+        &analysis.obv_divergence,
+        &analysis.williams_divergence,
+        &analysis.roc_divergence,
+    ];
+    let has_bullish_divergence = signals
+        .iter()
+        .filter_map(|signal| signal.as_ref())
+        .any(|signal| signal.divergence_type.is_bullish());
+    let has_bearish_divergence = signals
+        .iter()
+        .filter_map(|signal| signal.as_ref())
+        .any(|signal| !signal.divergence_type.is_bullish());
+
+    VolumePriceDivergence {
+        has_bullish_divergence,
+        has_bearish_divergence,
+        divergence_strength: analysis.overall_confidence,
+        warning_message: analysis.suggested_action.clone(),
+    }
+}
+
+fn summarize_volume(signal: &VolumePriceSignal, obv_trend: f64) -> VolumeAnalysisInfo {
+    let volume_price_sync = matches!(signal.direction.as_str(), "上涨" | "下跌")
+        && signal.volume_trend.contains("放量");
+    let accumulation_signal = match signal.direction.as_str() {
+        "上涨" => signal.confidence,
+        "下跌" => -signal.confidence,
+        _ => 0.0,
+    };
+    let obv_trend = if obv_trend > 0.05 {
+        "上升"
+    } else if obv_trend < -0.05 {
+        "下降"
+    } else {
+        "平稳"
+    };
+
+    VolumeAnalysisInfo {
+        volume_trend: signal.volume_trend.clone(),
+        volume_price_sync,
+        accumulation_signal,
+        obv_trend: obv_trend.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_symbol_digits_normalizes_market_suffix() {
+        assert_eq!(symbol_digits("000001.SZ"), "000001");
+        assert_eq!(symbol_digits("sh600000"), "600000");
+    }
+
+    #[test]
+    fn test_append_prediction_factor_adds_context() {
+        let mut response = PredictionResponse {
+            predictions: vec![
+                Prediction {
+                    target_date: "2026-01-02".to_string(),
+                    predicted_price: 10.0,
+                    predicted_change_percent: 1.0,
+                    confidence: 0.6,
+                    trading_signal: Some("看涨".to_string()),
+                    signal_strength: Some(0.6),
+                    technical_indicators: None,
+                    prediction_reason: None,
+                    key_factors: None,
+                },
+                Prediction {
+                    target_date: "2026-01-05".to_string(),
+                    predicted_price: 10.0,
+                    predicted_change_percent: 1.0,
+                    confidence: 0.6,
+                    trading_signal: Some("看涨".to_string()),
+                    signal_strength: Some(0.6),
+                    technical_indicators: None,
+                    prediction_reason: None,
+                    key_factors: None,
+                },
+            ],
+            last_real_data: Some(LastRealData {
+                date: "2026-01-01".to_string(),
+                price: 10.0,
+                change_percent: 0.0,
+            }),
+        };
+
+        append_prediction_factor(&mut response, "截面测试");
+
+        assert!((response.predictions[0].predicted_change_percent - 1.0).abs() < 1e-9);
+        assert!((response.predictions[0].predicted_price - 10.0).abs() < 1e-9);
+        assert_eq!(
+            response.predictions[0].key_factors.as_ref().unwrap()[0],
+            "截面测试"
+        );
+    }
 }

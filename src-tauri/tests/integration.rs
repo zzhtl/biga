@@ -1,8 +1,9 @@
 //! 端到端集成测试：用内嵌 fixture 历史数据走完整分析管线与回测，不依赖在线 API / 数据库。
 
 use biga_lib::db::models::HistoricalData;
-use biga_lib::prediction::backtest::run_backtest;
-use biga_lib::prediction::model::inference::analyze;
+use biga_lib::prediction::backtest::{run_backtest, run_backtest_window};
+use biga_lib::prediction::model::inference::{analyze, AnalysisOptions};
+use biga_lib::prediction::strategy::professional_engine::get_stock_price_limits;
 use chrono::{Duration, NaiveDate};
 
 /// 构造带趋势 + 周期波动的合成历史数据
@@ -49,7 +50,18 @@ fn test_analyze_pipeline_runs() {
     let volumes: Vec<i64> = h.iter().map(|x| x.volume).collect();
     let opens: Vec<f64> = h.iter().map(|x| x.open).collect();
 
-    let bundle = analyze(&closes, &highs, &lows, &volumes, &opens, 3.5, 5);
+    let bundle = analyze(
+        &closes,
+        &highs,
+        &lows,
+        &volumes,
+        &opens,
+        AnalysisOptions {
+            turnover_rate: 3.5,
+            prediction_days: 5,
+            stock_code: Some("sh600000"),
+        },
+    );
 
     // 量比/换手率应被填充到指标中
     assert!(bundle.tech_indicators.volume_ratio > 0.0);
@@ -65,9 +77,30 @@ fn test_backtest_end_to_end() {
     let report = run_backtest("test", &h, 60, 5, 5).expect("回测应成功");
 
     assert!(report.metrics.total > 0, "应产生回测样本");
+    assert_eq!(report.observations.len(), report.metrics.total);
     assert!((0.0..=1.0).contains(&report.metrics.direction_accuracy));
     assert!(report.metrics.mean_abs_error.is_finite());
     assert_eq!(report.horizon, 5);
+}
+
+#[test]
+fn test_backtest_window_filters_prediction_dates() {
+    let h = fixture(220);
+    let start = h[100].date;
+    let end = h[130].date;
+    let report = run_backtest_window("test", &h, 60, 5, 7, Some(start), Some(end))
+        .expect("窗口回测应成功");
+
+    assert!(report.metrics.total > 0, "窗口内应产生回测样本");
+    assert_eq!(report.observations.len(), report.metrics.total);
+    assert!(report
+        .observations
+        .iter()
+        .all(|obs| obs.prediction_date >= start && obs.prediction_date <= end));
+    assert!(report
+        .observations
+        .iter()
+        .all(|obs| obs.predicted_price.is_finite() && obs.actual_price.is_finite()));
 }
 
 #[test]
@@ -75,4 +108,11 @@ fn test_backtest_insufficient_data() {
     let h = fixture(50); // 少于 lookback + horizon
     let result = run_backtest("test", &h, 60, 5, 1);
     assert!(result.is_err(), "数据不足应返回错误");
+}
+
+#[test]
+fn test_price_limits_respect_prefixed_growth_market_codes() {
+    assert_eq!(get_stock_price_limits(Some("sz300750")), (-20.0, 20.0));
+    assert_eq!(get_stock_price_limits(Some("sh688001")), (-20.0, 20.0));
+    assert_eq!(get_stock_price_limits(Some("sh600000")), (-9.5, 9.5));
 }

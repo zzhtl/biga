@@ -9,6 +9,68 @@ use crate::utils::volume_metrics::{
     calculate_turnover_rate, calculate_volume_ratio_series, DEFAULT_VOLUME_RATIO_PERIOD,
 };
 use sqlx::{QueryBuilder, sqlite::SqlitePool};
+use std::collections::BTreeMap;
+
+const VALID_HISTORICAL_BAR_FILTER: &str = "open > 0 AND close > 0 AND high > 0 AND low > 0 AND high >= low AND high >= open AND high >= close AND low <= open AND low <= close";
+
+fn historical_symbol_variants(symbol: &str) -> Vec<String> {
+    let trimmed = symbol.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    let digits: String = upper.chars().filter(|c| c.is_ascii_digit()).collect();
+    let mut variants = Vec::new();
+
+    for candidate in [
+        trimmed.to_string(),
+        upper.clone(),
+        upper.to_ascii_lowercase(),
+        digits.clone(),
+    ] {
+        if !candidate.is_empty() && !variants.contains(&candidate) {
+            variants.push(candidate);
+        }
+    }
+
+    if digits.len() == 6 {
+        for suffix in ["SZ", "SH"] {
+            let candidate = format!("{digits}.{suffix}");
+            if !variants.contains(&candidate) {
+                variants.push(candidate);
+            }
+        }
+    }
+
+    variants
+}
+
+/// 解析历史数据表中真实存在且最新有效的 symbol。
+pub async fn resolve_historical_symbol(
+    symbol: &str,
+    pool: &SqlitePool,
+) -> Result<Option<String>, AppError> {
+    let variants = historical_symbol_variants(symbol);
+    if variants.is_empty() {
+        return Ok(None);
+    }
+
+    let mut query_builder = QueryBuilder::new(
+        "SELECT symbol FROM historical_data WHERE ",
+    );
+    query_builder.push(VALID_HISTORICAL_BAR_FILTER);
+    query_builder.push(" AND symbol IN (");
+    let mut separated = query_builder.separated(", ");
+    for variant in &variants {
+        separated.push_bind(variant);
+    }
+    separated.push_unseparated(")");
+    query_builder.push(" GROUP BY symbol ORDER BY MAX(date) DESC, COUNT(*) DESC LIMIT 1");
+
+    let row: Option<(String,)> = query_builder
+        .build_query_as()
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(row.map(|(symbol,)| symbol))
+}
 
 // =============================================================================
 // 股票信息仓库
@@ -198,16 +260,22 @@ pub async fn get_historical_data(
     end_date: &str,
     pool: &SqlitePool,
 ) -> Result<Vec<HistoricalData>, AppError> {
-    let rows = sqlx::query_as::<_, HistoricalData>(
+    let actual_symbol = resolve_historical_symbol(symbol, pool)
+        .await?
+        .unwrap_or_else(|| symbol.to_string());
+    let query = format!(
         r#"
         SELECT symbol, date, open, high, low, close, volume, amount,
                amplitude, turnover_rate, volume_ratio, change_percent, change
         FROM historical_data
-        WHERE symbol = ? AND date >= ? AND date <= ?
+        WHERE symbol = ? AND date >= ? AND date <= ? AND {VALID_HISTORICAL_BAR_FILTER}
         ORDER BY date ASC
-        "#,
+        "#
+    );
+    let rows = sqlx::query_as::<_, HistoricalData>(
+        &query,
     )
-    .bind(symbol)
+    .bind(actual_symbol)
     .bind(start_date)
     .bind(end_date)
     .fetch_all(pool)
@@ -222,17 +290,23 @@ pub async fn get_recent_historical_data(
     days: usize,
     pool: &SqlitePool,
 ) -> Result<Vec<HistoricalData>, AppError> {
-    let rows = sqlx::query_as::<_, HistoricalData>(
+    let actual_symbol = resolve_historical_symbol(symbol, pool)
+        .await?
+        .unwrap_or_else(|| symbol.to_string());
+    let query = format!(
         r#"
         SELECT symbol, date, open, high, low, close, volume, amount,
                amplitude, turnover_rate, volume_ratio, change_percent, change
         FROM historical_data
-        WHERE symbol = ?
+        WHERE symbol = ? AND {VALID_HISTORICAL_BAR_FILTER}
         ORDER BY date DESC
         LIMIT ?
-        "#,
+        "#
+    );
+    let rows = sqlx::query_as::<_, HistoricalData>(
+        &query,
     )
-    .bind(symbol)
+    .bind(actual_symbol)
     .bind(days as i64)
     .fetch_all(pool)
     .await?;
@@ -243,13 +317,61 @@ pub async fn get_recent_historical_data(
     Ok(result)
 }
 
+/// 批量获取多只股票最近 N 天历史数据，返回每只股票时间正序序列。
+pub async fn get_recent_historical_data_for_symbols(
+    symbols: &[String],
+    days: usize,
+    pool: &SqlitePool,
+) -> Result<Vec<(String, Vec<HistoricalData>)>, AppError> {
+    if symbols.is_empty() || days == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut query_builder = QueryBuilder::new(
+        r#"
+        SELECT symbol, date, open, high, low, close, volume, amount,
+               amplitude, turnover_rate, volume_ratio, change_percent, change
+        FROM (
+            SELECT symbol, date, open, high, low, close, volume, amount,
+                   amplitude, turnover_rate, volume_ratio, change_percent, change,
+                   ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) AS rn
+            FROM historical_data
+            WHERE "#,
+    );
+    query_builder.push(VALID_HISTORICAL_BAR_FILTER);
+    query_builder.push(" AND symbol IN (");
+    let mut separated = query_builder.separated(", ");
+    for symbol in symbols {
+        separated.push_bind(symbol);
+    }
+    separated.push_unseparated(")");
+    query_builder.push(
+        r#"
+        )
+        WHERE rn <= "#,
+    );
+    query_builder.push_bind(days as i64);
+    query_builder.push(" ORDER BY symbol ASC, date ASC");
+
+    let rows: Vec<HistoricalData> = query_builder
+        .build_query_as()
+        .fetch_all(pool)
+        .await?;
+    let mut grouped: BTreeMap<String, Vec<HistoricalData>> = BTreeMap::new();
+    for row in rows {
+        grouped.entry(row.symbol.clone()).or_default().push(row);
+    }
+
+    Ok(grouped.into_iter().collect())
+}
+
 /// 获取历史数据足够长的股票代码列表（用于截面排名）
 pub async fn get_symbols_with_min_bars(
     min_bars: i64,
     pool: &SqlitePool,
 ) -> Result<Vec<String>, AppError> {
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT symbol FROM historical_data GROUP BY symbol HAVING COUNT(*) >= ? ORDER BY symbol",
+        &format!("SELECT symbol FROM historical_data WHERE {VALID_HISTORICAL_BAR_FILTER} GROUP BY symbol HAVING COUNT(*) >= ? ORDER BY symbol"),
     )
     .bind(min_bars)
     .fetch_all(pool)
@@ -262,10 +384,16 @@ pub async fn get_latest_close_price(
     symbol: &str,
     pool: &SqlitePool,
 ) -> Result<Option<f64>, AppError> {
+    let actual_symbol = resolve_historical_symbol(symbol, pool)
+        .await?
+        .unwrap_or_else(|| symbol.to_string());
+    let query = format!(
+        "SELECT close FROM historical_data WHERE symbol = ? AND {VALID_HISTORICAL_BAR_FILTER} ORDER BY date DESC LIMIT 1"
+    );
     let result: Option<(f64,)> = sqlx::query_as(
-        "SELECT close FROM historical_data WHERE symbol = ? ORDER BY date DESC LIMIT 1",
+        &query,
     )
-    .bind(symbol)
+    .bind(actual_symbol)
     .fetch_optional(pool)
     .await?;
 
@@ -496,3 +624,134 @@ pub async fn backfill_volume_metrics(
     Ok(updated)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("应创建内存 SQLite");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE historical_data (
+                symbol TEXT NOT NULL,
+                date DATE NOT NULL,
+                open REAL NOT NULL,
+                close REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                volume INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                amplitude REAL NOT NULL,
+                turnover_rate REAL NOT NULL,
+                change_percent REAL NOT NULL,
+                change REAL NOT NULL,
+                volume_ratio REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (symbol, date)
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("应创建历史数据表");
+
+        pool
+    }
+
+    async fn insert_history(
+        pool: &SqlitePool,
+        symbol: &str,
+        date: &str,
+        open: f64,
+        close: f64,
+    ) {
+        let high = open.max(close) + 0.1;
+        let low = open.min(close) - 0.1;
+        sqlx::query(
+            r#"
+            INSERT INTO historical_data
+                (symbol, date, open, close, high, low, volume, amount, amplitude,
+                 turnover_rate, change_percent, change, volume_ratio)
+            VALUES (?, ?, ?, ?, ?, ?, 1000, 10000, 1.0, 1.0, 1.0, 0.1, 1.0)
+            "#,
+        )
+        .bind(symbol)
+        .bind(date)
+        .bind(open)
+        .bind(close)
+        .bind(high)
+        .bind(low)
+        .execute(pool)
+        .await
+        .expect("应插入历史数据");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_historical_symbol_prefers_latest_valid_variant() {
+        let pool = test_pool().await;
+        insert_history(&pool, "000001.SZ", "2025-01-01", 10.0, 10.2).await;
+        insert_history(&pool, "000001", "2026-01-01", 11.0, 11.2).await;
+
+        let resolved = resolve_historical_symbol("000001.SZ", &pool)
+            .await
+            .expect("解析应成功");
+
+        assert_eq!(resolved.as_deref(), Some("000001"));
+    }
+
+    #[tokio::test]
+    async fn test_recent_historical_data_filters_zero_price_rows() {
+        let pool = test_pool().await;
+        insert_history(&pool, "603005.SH", "2026-01-01", 40.0, 41.0).await;
+        sqlx::query(
+            r#"
+            INSERT INTO historical_data
+                (symbol, date, open, close, high, low, volume, amount, amplitude,
+                 turnover_rate, change_percent, change, volume_ratio)
+            VALUES ('603005.SH', '2026-01-02', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("应插入无效占位数据");
+
+        let rows = get_recent_historical_data("603005", 5, &pool)
+            .await
+            .expect("查询应成功");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].symbol, "603005.SH");
+        assert_eq!(rows[0].date.to_string(), "2026-01-01");
+    }
+
+    #[tokio::test]
+    async fn test_recent_historical_data_for_symbols_limits_each_symbol() {
+        let pool = test_pool().await;
+        insert_history(&pool, "000001", "2026-01-01", 10.0, 10.1).await;
+        insert_history(&pool, "000001", "2026-01-02", 10.1, 10.2).await;
+        insert_history(&pool, "000001", "2026-01-03", 10.2, 10.3).await;
+        insert_history(&pool, "600000", "2026-01-01", 20.0, 20.1).await;
+        insert_history(&pool, "600000", "2026-01-02", 20.1, 20.2).await;
+        insert_history(&pool, "600000", "2026-01-03", 20.2, 20.3).await;
+
+        let grouped = get_recent_historical_data_for_symbols(
+            &["000001".to_string(), "600000".to_string()],
+            2,
+            &pool,
+        )
+        .await
+        .expect("批量查询应成功");
+
+        assert_eq!(grouped.len(), 2);
+        for (_, rows) in grouped {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].date.to_string(), "2026-01-02");
+            assert_eq!(rows[1].date.to_string(), "2026-01-03");
+        }
+    }
+}

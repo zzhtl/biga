@@ -2,34 +2,30 @@
 //! 用法：cargo run --example tune_backtest
 
 use biga_lib::db::connection::create_pool;
-use biga_lib::db::repository::get_recent_historical_data;
+use biga_lib::db::repository::{get_recent_historical_data_for_symbols, get_symbols_with_min_bars};
 use biga_lib::prediction::backtest::run_backtest;
-use sqlx::Row;
 
 #[tokio::main]
 async fn main() {
     let pool = create_pool().await.expect("创建连接池失败");
 
-    // 取历史足够长的股票
-    let rows = sqlx::query(
-        "SELECT symbol, COUNT(*) c FROM historical_data GROUP BY symbol HAVING c >= 200 ORDER BY c DESC LIMIT 25",
-    )
-    .fetch_all(&pool)
-    .await
-    .expect("查询股票失败");
+    let symbols = get_symbols_with_min_bars(200, &pool)
+        .await
+        .expect("查询股票失败");
 
-    println!("参与回测股票数：{}", rows.len());
+    let data = get_recent_historical_data_for_symbols(&symbols, 3000, &pool)
+        .await
+        .expect("查询历史数据失败")
+        .into_iter()
+        .filter(|(_, hist)| hist.len() >= 120)
+        .collect::<Vec<_>>();
+    let eval_symbols = data
+        .iter()
+        .take(25)
+        .map(|(symbol, _)| symbol.as_str())
+        .collect::<Vec<_>>();
 
-    let mut data = Vec::new();
-    for r in &rows {
-        let symbol: String = r.get("symbol");
-        let hist = get_recent_historical_data(&symbol, 300, &pool)
-            .await
-            .unwrap_or_default();
-        if hist.len() >= 120 {
-            data.push((symbol, hist));
-        }
-    }
+    println!("参与截面股票数：{}，参与端到端回测股票数：{}", data.len(), eval_symbols.len());
 
     for horizon in [1usize, 5] {
         let mut acc = 0.0;
@@ -37,8 +33,11 @@ async fn main() {
         let mut edge = 0.0;
         let mut pred_up = 0.0;
         let mut n = 0;
-        for (symbol, hist) in &data {
-            if let Ok(rep) = run_backtest(symbol, hist, 60, horizon, 3) {
+        for (symbol, hist) in data
+            .iter()
+            .filter(|(symbol, _)| eval_symbols.iter().any(|eval| *eval == symbol))
+        {
+            if let Ok(rep) = run_backtest(symbol, hist, 60, horizon, 10) {
                 let m = &rep.metrics;
                 acc += m.direction_accuracy;
                 base += m.baseline_accuracy;

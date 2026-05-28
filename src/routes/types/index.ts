@@ -89,6 +89,7 @@ export interface PredictionRequest {
 
 export interface TechnicalOnlyRequest {
   stock_code: string;
+  history_days?: number;
   prediction_days: number;
 }
 
@@ -180,14 +181,38 @@ export interface BacktestRequest {
   backtest_interval: number;
 }
 
+export interface BacktestEntry {
+  prediction_date: string;
+  predictions: Prediction[];
+  actual_prices: number[];
+  actual_changes: number[];
+  price_accuracy: number;
+  direction_accuracy: number;
+  avg_prediction_error: number;
+}
+
+export interface DailyAccuracy {
+  date: string;
+  price_accuracy: number;
+  direction_accuracy: number;
+  prediction_count: number;
+  market_volatility: number;
+}
+
 export interface BacktestReport {
   stock_code: string;
   model_name: string;
   backtest_period: string;
   total_predictions: number;
+  backtest_entries: BacktestEntry[];
   overall_price_accuracy: number;
   overall_direction_accuracy: number;
   average_prediction_error: number;
+  accuracy_trend: number[];
+  daily_accuracy: DailyAccuracy[];
+  price_error_distribution: number[];
+  direction_correct_rate: number;
+  volatility_vs_accuracy: Array<[number, number]>;
 }
 
 // =============================================================================
@@ -256,6 +281,8 @@ export interface MultiFactorScore {
   volatility_score: number;
   signal: string;
   signal_strength: number;
+  adaptive_score: number;
+  confirmation_count: number;
 }
 
 export interface ProfessionalPrediction {
@@ -307,4 +334,3 @@ export interface PagedResponse<T> {
   page: number;
   page_size: number;
 }
-

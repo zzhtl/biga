@@ -81,6 +81,7 @@ pub fn compute_metrics(samples: &[BacktestSample]) -> BacktestMetrics {
     let mut hc_correct = 0usize;
     let mut predicted_up = 0usize;
     let mut actual_up = 0usize;
+    let mut actual_down = 0usize;
 
     for s in samples {
         // 方向：同号视为正确
@@ -94,6 +95,8 @@ pub fn compute_metrics(samples: &[BacktestSample]) -> BacktestMetrics {
         }
         if s.actual_change > 0.0 {
             actual_up += 1;
+        } else if s.actual_change < 0.0 {
+            actual_down += 1;
         }
 
         // 高置信子集：仅当预测幅度足够大
@@ -133,10 +136,7 @@ pub fn compute_metrics(samples: &[BacktestSample]) -> BacktestMetrics {
         },
         predicted_up_ratio: predicted_up as f64 / total as f64,
         actual_up_ratio: actual_up as f64 / total as f64,
-        baseline_accuracy: {
-            let up = actual_up as f64 / total as f64;
-            up.max(1.0 - up)
-        },
+        baseline_accuracy: actual_up.max(actual_down) as f64 / total as f64,
     }
 }
 
@@ -192,5 +192,18 @@ mod tests {
         let m = compute_metrics(&[]);
         assert_eq!(m.total, 0);
         assert_eq!(m.direction_accuracy, 0.0);
+    }
+
+    #[test]
+    fn test_baseline_does_not_count_flat_as_down() {
+        let samples = vec![
+            BacktestSample { predicted_change: -1.0, actual_change: -1.0 },
+            BacktestSample { predicted_change: -1.0, actual_change: 0.0 },
+            BacktestSample { predicted_change: 1.0, actual_change: 1.0 },
+        ];
+        let m = compute_metrics(&samples);
+        assert!((m.actual_up_ratio - 1.0 / 3.0).abs() < 1e-9);
+        assert!((m.baseline_accuracy - 1.0 / 3.0).abs() < 1e-9);
+        assert!((m.direction_accuracy - 2.0 / 3.0).abs() < 1e-9);
     }
 }

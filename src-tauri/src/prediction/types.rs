@@ -1,6 +1,8 @@
 //! 预测模块类型定义
 
 use serde::{Deserialize, Serialize};
+use crate::prediction::analysis::{PatternRecognition, SupportResistance};
+use crate::prediction::strategy::{MultiFactorScore, MultiTimeframeSignal};
 
 // =============================================================================
 // 预测请求/响应类型
@@ -37,6 +39,7 @@ pub struct PredictionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TechnicalOnlyRequest {
     pub stock_code: String,
+    pub history_days: Option<usize>,
     pub prediction_days: usize,
 }
 
@@ -169,9 +172,37 @@ pub struct BacktestReport {
     pub model_name: String,
     pub backtest_period: String,
     pub total_predictions: usize,
+    pub backtest_entries: Vec<BacktestEntry>,
     pub overall_price_accuracy: f64,
     pub overall_direction_accuracy: f64,
     pub average_prediction_error: f64,
+    pub accuracy_trend: Vec<f64>,
+    pub daily_accuracy: Vec<DailyAccuracy>,
+    pub price_error_distribution: Vec<f64>,
+    pub direction_correct_rate: f64,
+    pub volatility_vs_accuracy: Vec<(f64, f64)>,
+}
+
+/// 单次回测记录
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacktestEntry {
+    pub prediction_date: String,
+    pub predictions: Vec<Prediction>,
+    pub actual_prices: Vec<f64>,
+    pub actual_changes: Vec<f64>,
+    pub price_accuracy: f64,
+    pub direction_accuracy: f64,
+    pub avg_prediction_error: f64,
+}
+
+/// 按日回测准确率
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyAccuracy {
+    pub date: String,
+    pub price_accuracy: f64,
+    pub direction_accuracy: f64,
+    pub prediction_count: usize,
+    pub market_volatility: f64,
 }
 
 // =============================================================================
@@ -229,8 +260,32 @@ pub struct BuySellPoint {
 pub struct ProfessionalPrediction {
     pub buy_points: Vec<BuySellPoint>,
     pub sell_points: Vec<BuySellPoint>,
+    pub support_resistance: SupportResistance,
+    pub multi_timeframe: MultiTimeframeSignal,
+    pub divergence: VolumePriceDivergence,
     pub current_advice: String,
     pub risk_level: String,
+    pub candle_patterns: Vec<PatternRecognition>,
+    pub volume_analysis: VolumeAnalysisInfo,
+    pub multi_factor_score: MultiFactorScore,
+}
+
+/// 量价/指标背离概要
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumePriceDivergence {
+    pub has_bullish_divergence: bool,
+    pub has_bearish_divergence: bool,
+    pub divergence_strength: f64,
+    pub warning_message: String,
+}
+
+/// 成交量分析概要
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeAnalysisInfo {
+    pub volume_trend: String,
+    pub volume_price_sync: bool,
+    pub accumulation_signal: f64,
+    pub obv_trend: String,
 }
 
 /// 专业预测响应
@@ -239,4 +294,3 @@ pub struct ProfessionalPredictionResponse {
     pub predictions: PredictionResponse,
     pub professional_analysis: ProfessionalPrediction,
 }
-

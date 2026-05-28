@@ -14,6 +14,8 @@ use crate::prediction::analysis::{
 /// 价格预测上下文
 pub struct PricePredictionContext {
     pub current_price: f64,
+    pub price_limit_down: f64,
+    pub price_limit_up: f64,
     pub volatility: f64,
     pub regime: MarketRegime,
     pub volatility_level: VolatilityLevel,
@@ -83,6 +85,7 @@ pub fn calculate_enhanced_price_prediction(ctx: &PricePredictionContext) -> Pric
         momentum_contribution,
         volatility_adjustment,
         sr_adjustment,
+        (ctx.price_limit_down, ctx.price_limit_up),
         &strategy,
     );
     
@@ -91,6 +94,8 @@ pub fn calculate_enhanced_price_prediction(ctx: &PricePredictionContext) -> Pric
         expected_change,
         ctx.volatility,
         &ctx.volatility_level,
+        ctx.price_limit_down,
+        ctx.price_limit_up,
     );
     
     // 8. 计算置信度
@@ -250,6 +255,7 @@ fn combine_predictions(
     momentum: f64,
     volatility_adj: f64,
     sr_adj: f64,
+    price_limits: (f64, f64),
     strategy: &StrategyType,
 ) -> ((f64, f64, f64), f64) {
     // 根据策略设置权重
@@ -268,8 +274,9 @@ fn combine_predictions(
     // 应用支撑阻力调整
     let final_prediction = volatility_adjusted + sr_adj;
     
-    // 限制在合理范围（A股涨跌停）
-    let clamped = final_prediction.clamp(-9.5, 9.5);
+    // 限制在对应板块的 A 股涨跌停范围
+    let (limit_down, limit_up) = price_limits;
+    let clamped = final_prediction.clamp(limit_down, limit_up);
     
     ((trend_weight, mr_weight, momentum_weight), clamped)
 }
@@ -279,6 +286,8 @@ fn calculate_prediction_range(
     expected: f64,
     volatility: f64,
     level: &VolatilityLevel,
+    limit_down: f64,
+    limit_up: f64,
 ) -> (f64, f64) {
     let base_width = volatility * 100.0 * 2.0;  // 基于波动率
     
@@ -293,8 +302,8 @@ fn calculate_prediction_range(
     
     let half_width = base_width * width_multiplier;
     
-    let lower = (expected - half_width).max(-9.5);
-    let upper = (expected + half_width).min(9.5);
+    let lower = (expected - half_width).max(limit_down);
+    let upper = (expected + half_width).min(limit_up);
     
     (lower, upper)
 }
@@ -396,4 +405,3 @@ mod tests {
         assert!(bearish < 0.0);
     }
 }
-

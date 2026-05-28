@@ -172,6 +172,7 @@ pub struct RiskAssessment {
 
 /// 预测引擎上下文（汇聚所有分析结果）
 pub struct PredictionContext {
+    pub stock_code: Option<String>,
     pub current_price: f64,
     pub market_regime: MarketRegimeAnalysis,
     pub trend_analysis: TrendAnalysis,
@@ -211,6 +212,8 @@ pub mod a_share_limits {
 pub fn get_stock_price_limits(stock_code: Option<&str>) -> (f64, f64) {
     match stock_code {
         Some(code) => {
+            let code = code.trim();
+            let code = code.trim_start_matches(|c: char| !c.is_ascii_digit());
             // 科创板：688开头
             if code.starts_with("688") {
                 (a_share_limits::KC_CY_LIMIT_DOWN, a_share_limits::KC_CY_LIMIT_UP)
