@@ -148,11 +148,20 @@ export interface ModelInfo {
   target: string;
   prediction_days: number;
   accuracy: number;
+  training_start_date?: string | null;
+  training_end_date?: string | null;
+  training_samples?: number | null;
+  test_samples?: number | null;
+  mae?: number | null;
+  rmse?: number | null;
 }
 
 export interface TrainingResult {
   metadata: ModelInfo;
   accuracy: number;
+  test_samples: number;
+  mae: number;
+  rmse: number;
 }
 
 export interface EvaluationResult {
@@ -166,6 +175,8 @@ export interface EvaluationResult {
   mae: number;
   rmse: number;
   evaluation_date: string;
+  evaluation_scope: string;
+  evaluation_note: string;
 }
 
 // =============================================================================

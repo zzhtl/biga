@@ -126,6 +126,12 @@ pub struct ModelInfo {
     pub target: String,
     pub prediction_days: usize,
     pub accuracy: f64,
+    pub training_start_date: Option<String>,
+    pub training_end_date: Option<String>,
+    pub training_samples: Option<usize>,
+    pub test_samples: Option<usize>,
+    pub mae: Option<f64>,
+    pub rmse: Option<f64>,
 }
 
 /// 训练结果
@@ -133,6 +139,9 @@ pub struct ModelInfo {
 pub struct TrainingResult {
     pub metadata: ModelInfo,
     pub accuracy: f64,
+    pub test_samples: usize,
+    pub mae: f64,
+    pub rmse: f64,
 }
 
 /// 评估结果
@@ -148,6 +157,8 @@ pub struct EvaluationResult {
     pub mae: f64,
     pub rmse: f64,
     pub evaluation_date: String,
+    pub evaluation_scope: String,
+    pub evaluation_note: String,
 }
 
 // =============================================================================

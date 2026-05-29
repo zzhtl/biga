@@ -6,13 +6,15 @@ use biga_lib::db::connection::create_pool;
 use biga_lib::db::models::HistoricalData;
 use biga_lib::db::repository::get_recent_historical_data;
 use biga_lib::prediction::cross_section::{
-    build_panel, factor_ic_order, orthogonalize_panel, pearson, rank_latest, walk_forward,
+    build_panel, pearson, rank_latest, walk_forward, walk_forward_orthogonalized,
 };
 use biga_lib::prediction::factor::{factor_dim, factor_names};
 use sqlx::Row;
 
-const HORIZON: usize = 5;
-const WINDOW: usize = 120;
+// 默认持有期/估计窗口（诊断用）。注意：该技术截面信号样本外不稳定、对票池敏感，
+// 无可泛化净 alpha；持有期/窗口的最优值随票池漂移，用 `factor_sweep` 按当前票池重扫。
+const HORIZON: usize = 15;
+const WINDOW: usize = 250;
 
 #[tokio::main]
 async fn main() {
@@ -54,9 +56,9 @@ async fn main() {
     let mut cnt = 0usize;
     for day in &panel {
         let ys: Vec<f64> = day.iter().map(|r| r.fwd_return).collect();
-        for d in 0..dim {
+        for (d, ic) in fic.iter_mut().enumerate().take(dim) {
             let xs: Vec<f64> = day.iter().map(|r| r.factors[d]).collect();
-            fic[d] += pearson(&xs, &ys);
+            *ic += pearson(&xs, &ys);
         }
         cnt += 1;
     }
@@ -97,11 +99,9 @@ async fn main() {
         );
     }
 
-    // 基线 vs 正交化：前向滚动对比
-    let rep = walk_forward(&panel, WINDOW);
-    let order = factor_ic_order(&panel);
-    let ortho = orthogonalize_panel(panel, &order);
-    let rep_o = walk_forward(&ortho, WINDOW);
+    // 基线 vs 正交化：前向滚动对比。正交化顺序也只用样本外日前的滚动窗口估计。
+    let rep = walk_forward(&panel, WINDOW, HORIZON);
+    let rep_o = walk_forward_orthogonalized(&panel, WINDOW, HORIZON);
 
     let cost = 0.003_f64; // 每期(5日)多空双边交易成本假设 0.3%
     println!("\n========= 前向滚动多因子（窗口{WINDOW}日，{}个样本外日）=========", rep.oos_days);

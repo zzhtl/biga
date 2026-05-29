@@ -22,6 +22,12 @@
         target: string;
         prediction_days: number;
         accuracy: number;
+        training_start_date?: string | null;
+        training_end_date?: string | null;
+        training_samples?: number | null;
+        test_samples?: number | null;
+        mae?: number | null;
+        rmse?: number | null;
     }
     
     interface TechnicalIndicatorValues {
@@ -65,7 +71,10 @@
     interface ModelComparisonItem {
         name: string;
         type: string;
+        training_days: number;
         accuracy: number;
+        training_samples?: number | null;
+        test_samples?: number | null;
         created_at: string;
     }
     
@@ -216,6 +225,8 @@
     
     // 使用类型
     let modelList: ModelInfo[] = [];
+    let modelListRequestSeq = 0;
+    let modelSelectionManuallySelected = false;
     let predictions: Prediction[] = [];
     let modelAccuracy: number | null = null;
     let lastRealData: LastRealData | null = null; // 新增：最新真实数据
@@ -224,7 +235,7 @@
     
     // 模型训练参数
     let newModelName = "模型-" + new Date().toISOString().slice(0, 10);
-    let modelType = "candle_mlp"; // 默认使用Candle的MLP模型
+    let modelType = "candle_mlp_horizon"; // 默认使用按预测天数训练的 Candle MLP 模型
     let lookbackDays = 1500; // 默认使用更长真实历史数据
     let trainTestSplit = 0.8;
     let features = ["close", "volume", "change_percent", "ma_trend", "price_position", "volatility", "rsi_signal", "macd_momentum", "ma5", "ma10", "ma20", "rsi", "macd", "bollinger", "stochastic_k", "stochastic_d", "momentum", "kdj_k", "kdj_d", "kdj_j", "cci", "obv", "macd_dif", "macd_dea", "macd_histogram"];
@@ -248,6 +259,25 @@
     let backtestStartDate = "";
     let backtestEndDate = "";
     let backtestInterval = 7; // 默认每7天进行一次预测
+    let backtestMode: "model" | "rule" = "model";
+
+    function getModelTrainingDays(model: ModelInfo): number {
+        return model.model_type === "candle_mlp_horizon" ? Math.max(model.prediction_days || 1, 1) : 1;
+    }
+
+    function formatModelOption(model: ModelInfo): string {
+        return `${model.name} (${getModelTrainingDays(model)}日模型, 测试准确率: ${(model.accuracy * 100).toFixed(2)}%)`;
+    }
+
+    function chooseDefaultModel(models: ModelInfo[]): ModelInfo {
+        const targetDays = Math.max(daysToPredict || 1, 1);
+        const matched = models.filter(model => getModelTrainingDays(model) === targetDays);
+        const candidates = matched.length > 0 ? matched : models;
+
+        return candidates.reduce((a, b) => (
+            b.accuracy > a.accuracy || (b.accuracy === a.accuracy && b.created_at > a.created_at) ? b : a
+        ));
+    }
     let expandedEntryIndex: number | null = null; // 展开查看的回测条目索引
 
     // 预测结果展示：折叠/展开状态
@@ -259,13 +289,17 @@
     let showTechnicalOnly = true;
     let tabManuallySelected = false; // 用户是否手动切过 tab（手动后不再自动跳转）
     let technicalHistoryDays = 1500; // 使用多少天历史数据
-    let technicalPredictionDays = 7; // 预测未来多少天
+    let technicalPredictionDays = 5; // 预测未来多少天
     let isTechnicalPredicting = false;
 
     function normalizeNumber(value: any, fallback = 0): number {
         // 统一处理后端返回的 number/string/undefined，避免模板渲染阶段直接异常。
         const parsed = Number(value);
         return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function normalizedStockCode(): string {
+        return stockCode.trim();
     }
 
     function normalizePrediction(raw: any): Prediction {
@@ -377,7 +411,8 @@
     
     // 纯技术分析预测函数
     async function predictWithTechnicalOnly() {
-        if (!stockCode) {
+        const symbol = normalizedStockCode();
+        if (!symbol) {
             errorMessage = "请先选择股票";
             return;
         }
@@ -392,7 +427,7 @@
         
         try {
             const request = {
-                stock_code: stockCode,
+                stock_code: symbol,
                 history_days: technicalHistoryDays,
                 prediction_days: technicalPredictionDays
             };
@@ -463,16 +498,35 @@
         }
     });
 
-    async function loadModelList() {
-        if (!stockCode) return;
+    async function loadModelList(preferredModelId = "") {
+        const requestSeq = ++modelListRequestSeq;
+        const symbol = normalizedStockCode();
+        if (!symbol) {
+            modelList = [];
+            selectedModelName = "";
+            modelSelectionManuallySelected = false;
+            return;
+        }
         
         try {
-            const models: ModelInfo[] = await invoke('list_stock_prediction_models', { symbol: stockCode });
+            const models: ModelInfo[] = await invoke('list_stock_prediction_models', { symbol });
+            if (requestSeq !== modelListRequestSeq || symbol !== normalizedStockCode()) {
+                return;
+            }
             modelList = models;
             if (modelList.length > 0) {
-                // 默认选中准确率最高的模型
-                const best = modelList.reduce((a, b) => (b.accuracy > a.accuracy ? b : a));
-                selectedModelName = best.name;
+                const preferredExists = preferredModelId !== "" && modelList.some(model => model.id === preferredModelId);
+                const currentExists = selectedModelName !== "" && modelList.some(model => model.id === selectedModelName);
+                if (preferredExists) {
+                    selectedModelName = preferredModelId;
+                    modelSelectionManuallySelected = true;
+                } else if (modelSelectionManuallySelected && currentExists) {
+                    // 保留用户手动指定的模型，避免后台刷新覆盖选择。
+                } else {
+                    // 默认优先选中训练周期匹配当前预测天数的模型；否则回退到准确率最高的可用模型
+                    selectedModelName = chooseDefaultModel(modelList).id;
+                    modelSelectionManuallySelected = false;
+                }
                 // 优先展示「使用现有模型」tab（除非用户已手动切过 tab）
                 if (!tabManuallySelected) {
                     showTechnicalOnly = false;
@@ -481,12 +535,22 @@
                 }
             } else if (!tabManuallySelected) {
                 // 无可用模型时回退到「纯技术分析」（无需训练、始终可用）
+                selectedModelName = "";
+                modelSelectionManuallySelected = false;
                 showTechnicalOnly = true;
                 showBacktestReport = false;
+            } else {
+                selectedModelName = "";
+                modelSelectionManuallySelected = false;
             }
         } catch (error) {
+            if (requestSeq !== modelListRequestSeq) {
+                return;
+            }
             errorMessage = `加载模型列表失败: ${error}`;
             modelList = [];
+            selectedModelName = "";
+            modelSelectionManuallySelected = false;
         }
     }
 
@@ -511,7 +575,8 @@
     }
 
     async function trainModel() {
-        if (!stockCode) {
+        const symbol = normalizedStockCode();
+        if (!symbol) {
             errorMessage = "请先输入股票代码";
             return;
         }
@@ -534,7 +599,7 @@
             console.log(`📅 训练数据范围: ${startDate} 到 ${endDate} (${totalDays}天，含节假日缓冲)`);
 
             const trainRequest = {
-                stock_code: stockCode,
+                stock_code: symbol,
                 model_name: newModelName,
                 start_date: startDate,
                 end_date: endDate,
@@ -549,7 +614,7 @@
                 train_test_split: trainTestSplit
             };
 
-            const result = await invoke<{metadata: ModelInfo, accuracy: number}>('train_candle_model', { request: trainRequest });
+            const result = await invoke<{metadata: ModelInfo, accuracy: number, test_samples: number, mae: number, rmse: number}>('train_candle_model', { request: trainRequest });
             
             clearInterval(progressInterval);
             trainingProgress = 100;
@@ -560,14 +625,14 @@
             // 添加训练完成日志
             trainingLogs = [...trainingLogs, {
                 epoch: epochs,
-                loss: "训练完成",
+                loss: `MAE ${result.mae.toFixed(3)} / RMSE ${result.rmse.toFixed(3)}`,
                 timestamp: new Date().toLocaleTimeString(),
                 accuracy: (modelAccuracy * 100).toFixed(2) + "%"
             }];
             
-            await loadModelList();
+            await loadModelList(metadata.id);
             useExistingModel = true;
-            alert(`模型训练成功: ${metadata.name}, 准确率: ${(modelAccuracy * 100).toFixed(2)}%`);
+            alert(`模型训练成功: ${metadata.name}\n测试样本: ${result.test_samples}\n方向准确率: ${(modelAccuracy * 100).toFixed(2)}%\nMAE: ${result.mae.toFixed(3)}\nRMSE: ${result.rmse.toFixed(3)}`);
             
             // 自动加载模型对比数据
             await loadModelComparison();
@@ -582,14 +647,18 @@
 
     // 加载模型性能对比数据
     async function loadModelComparison() {
-        if (!stockCode) return;
+        const symbol = normalizedStockCode();
+        if (!symbol) return;
         
         try {
-            const models = await invoke('list_stock_prediction_models', { symbol: stockCode }) as ModelInfo[];
+            const models = await invoke('list_stock_prediction_models', { symbol }) as ModelInfo[];
             modelComparison = models.map((model: ModelInfo) => ({
                 name: model.name,
                 type: model.model_type,
+                training_days: getModelTrainingDays(model),
                 accuracy: model.accuracy * 100,
+                training_samples: model.training_samples,
+                test_samples: model.test_samples,
                 created_at: new Date(model.created_at < 1000000000000 ? model.created_at * 1000 : model.created_at).toLocaleString('zh-CN', {
                     year: 'numeric',
                     month: '2-digit',
@@ -644,7 +713,8 @@
     }
 
     async function predictStock() {
-        if (!stockCode) {
+        const symbol = normalizedStockCode();
+        if (!symbol) {
             errorMessage = "请先输入股票代码";
             return;
         }
@@ -662,7 +732,7 @@
 
         try {
             const request = {
-                stock_code: stockCode,
+                stock_code: symbol,
                 model_name: useExistingModel ? selectedModelName : null,
                 prediction_days: daysToPredict,
                 use_candle: true
@@ -710,7 +780,8 @@
     
     // 新增：使用专业策略预测
     async function predictWithProfessionalStrategy() {
-        if (!stockCode) {
+        const symbol = normalizedStockCode();
+        if (!symbol) {
             errorMessage = "请先输入股票代码";
             return;
         }
@@ -728,7 +799,7 @@
         
         try {
             const request = {
-                stock_code: stockCode,
+                stock_code: symbol,
                 model_name: useExistingModel ? selectedModelName : null,
                 prediction_days: daysToPredict,
                 use_candle: true
@@ -777,12 +848,20 @@
     }
     
     async function handleStockCodeChange() {
+        selectedModelName = "";
+        modelSelectionManuallySelected = false;
         await loadModelList();
     }
-    
-    // 监听stockCode变化，自动刷新模型列表
-    $: if (stockCode) {
-        loadModelList();
+
+    function selectModel(modelId: string) {
+        selectedModelName = modelId;
+        modelSelectionManuallySelected = true;
+    }
+
+    function handlePredictionDaysChange() {
+        if (!modelSelectionManuallySelected && modelList.length > 0) {
+            selectedModelName = chooseDefaultModel(modelList).id;
+        }
     }
 
     // ===== 核心结论（展示在预测结果最顶部，先给实质判断）=====
@@ -855,7 +934,7 @@
         
         // 确认重训练
         const confirmed = await confirm(
-            `确定要重新训练模型 "${modelName}" 吗？\n\n训练参数:\n- 训练轮数: ${epochs}\n- 批次大小: ${batchSize}\n- 学习率: ${learningRate}`,
+            `确定要重新训练模型 "${modelName}" 吗？\n\n训练参数:\n- 数据窗口: 最近800个交易日\n- 训练轮数: ${epochs}\n- 批次大小: ${batchSize}\n- 学习率: ${learningRate}`,
             { title: '重新训练模型' }
         );
         
@@ -886,11 +965,14 @@
     // 获取模型评估信息
     async function evaluateModel(modelId: string) {
         try {
-            const result = await invoke<{accuracy: number, confusion_matrix: any}>('evaluate_candle_model', { modelId });
-            const accuracy = result.accuracy;
-            const confusion_matrix = result.confusion_matrix;
+            const result = await invoke<{accuracy: number, test_samples: number, mae: number, rmse: number, evaluation_scope?: string, evaluation_note?: string}>('evaluate_candle_model', { modelId });
+            const model = modelList.find(m => m.id === modelId);
+            const trainingDays = model ? getModelTrainingDays(model) : null;
+            const horizonLine = trainingDays ? `\n训练周期: ${trainingDays}日` : "";
+            const scope = result.evaluation_scope || "最近历史样本评估";
+            const noteLine = result.evaluation_note ? `\n说明: ${result.evaluation_note}` : "";
             
-            alert(`模型评估结果:\n准确率: ${(accuracy * 100).toFixed(2)}%\n混淆矩阵: ${JSON.stringify(confusion_matrix)}`);
+            alert(`${scope}:${horizonLine}\n测试样本: ${result.test_samples}\n方向准确率: ${(result.accuracy * 100).toFixed(2)}%\nMAE: ${result.mae.toFixed(3)}\nRMSE: ${result.rmse.toFixed(3)}${noteLine}`);
         } catch (error) {
             errorMessage = `评估失败: ${error}`;
         }
@@ -903,7 +985,8 @@
     
     // 执行回测
     async function runBacktest() {
-        if (!stockCode) {
+        const symbol = normalizedStockCode();
+        if (!symbol) {
             errorMessage = "请先输入股票代码";
             return;
         }
@@ -912,14 +995,19 @@
             errorMessage = "请选择回测日期范围";
             return;
         }
+
+        if (backtestMode === "model" && !selectedModelName) {
+            errorMessage = "请先选择模型或切换为规则引擎回测";
+            return;
+        }
         
         isBacktesting = true;
         errorMessage = "";
         
         try {
             const backtestRequest: BacktestRequest = {
-                stock_code: stockCode,
-                model_name: useExistingModel ? selectedModelName : undefined,
+                stock_code: symbol,
+                model_name: backtestMode === "model" ? selectedModelName : undefined,
                 start_date: backtestStartDate,
                 end_date: backtestEndDate,
                 prediction_days: daysToPredict,
@@ -1003,7 +1091,7 @@
                 <div class="form-group">
                     <label>预测天数：</label>
                     <input type="number" bind:value={technicalPredictionDays} min="1" max="30" />
-                    <small>预测未来1-30天的走势</small>
+                    <small>建议预测未来1-5天，长周期仅作参考</small>
                 </div>
                 
                 <button
@@ -1035,12 +1123,19 @@
             {:else}
                 <div class="model-list">
                     {#each modelList as model}
-                        <div class="model-item" class:selected={selectedModelName === model.name}>
-                            <div class="model-info" on:click={() => selectedModelName = model.name}>
+                        <div class="model-item" class:selected={selectedModelName === model.id}>
+                            <div class="model-info" on:click={() => selectModel(model.id)}>
                                 <h3>{model.name}</h3>
                                 <div class="model-details">
                                     <span>类型：{model.model_type}</span>
-                                    <span>准确率：{(model.accuracy * 100).toFixed(2)}%</span>
+                                    <span>训练周期：{getModelTrainingDays(model)}日</span>
+                                    <span>测试集方向准确率：{(model.accuracy * 100).toFixed(2)}%</span>
+                                    {#if model.training_samples != null}
+                                        <span>训练样本：{model.training_samples}</span>
+                                    {/if}
+                                    {#if model.test_samples != null}
+                                        <span>测试样本：{model.test_samples}</span>
+                                    {/if}
                                     <span>创建时间：{new Date(model.created_at < 1000000000000 ? model.created_at * 1000 : model.created_at).toLocaleString('zh-CN', {
                                         year: 'numeric',
                                         month: '2-digit',
@@ -1063,7 +1158,7 @@
             <div class="prediction-settings">
                 <label>
                     预测天数:
-                    <input type="number" bind:value={daysToPredict} min="1" max="30" />
+                    <input type="number" bind:value={daysToPredict} min="1" max="30" on:change={handlePredictionDaysChange} />
                 </label>
                 
                 <button
@@ -1105,13 +1200,7 @@
                 <div class="form-group">
                     <label>模型类型:</label>
                     <select bind:value={modelType}>
-                        <option value="candle_mlp">Candle多层感知机</option>
-                        <option value="candle_lstm">Candle LSTM</option>
-                        <option value="candle_gru">Candle GRU</option>
-                        <option value="candle_transformer">Candle Transformer</option>
-                        <option value="linear">线性回归</option>
-                        <option value="decision_tree">决策树</option>
-                        <option value="svm">支持向量机</option>
+                        <option value="candle_mlp_horizon">Candle多层感知机（按预测天数训练）</option>
                     </select>
                 </div>
                 
@@ -1439,7 +1528,10 @@
                                     <tr>
                                         <th>模型名称</th>
                                         <th>模型类型</th>
-                                        <th>准确率</th>
+                                        <th>训练周期</th>
+                                        <th>训练样本</th>
+                                        <th>测试样本</th>
+                                        <th>测试集方向准确率</th>
                                         <th>创建时间</th>
                                         <th>性能条</th>
                                     </tr>
@@ -1449,6 +1541,9 @@
                                         <tr>
                                             <td>{model.name}</td>
                                             <td>{model.type}</td>
+                                            <td>{model.training_days}日</td>
+                                            <td>{model.training_samples ?? '-'}</td>
+                                            <td>{model.test_samples ?? '-'}</td>
                                             <td>{model.accuracy.toFixed(2)}%</td>
                                             <td>{model.created_at}</td>
                                             <td>
@@ -1474,14 +1569,24 @@
             
             <div class="backtest-settings">
                 <div class="form-group">
-                    <label>选择模型:</label>
-                    <select bind:value={selectedModelName} disabled={modelList.length === 0}>
-                        <option value="">请选择模型</option>
-                        {#each modelList as model}
-                            <option value={model.name}>{model.name} (准确率: {(model.accuracy * 100).toFixed(2)}%)</option>
-                        {/each}
+                    <label for="backtest-mode">回测对象:</label>
+                    <select id="backtest-mode" bind:value={backtestMode}>
+                        <option value="model">已训练模型</option>
+                        <option value="rule">规则引擎</option>
                     </select>
                 </div>
+
+                {#if backtestMode === "model"}
+                    <div class="form-group">
+                        <label>选择模型:</label>
+                        <select bind:value={selectedModelName} disabled={modelList.length === 0} on:change={() => modelSelectionManuallySelected = true}>
+                            <option value="">请选择模型</option>
+                            {#each modelList as model}
+                                <option value={model.id}>{formatModelOption(model)}</option>
+                            {/each}
+                        </select>
+                    </div>
+                {/if}
                 
                 <div class="form-group">
                     <label>回测开始日期:</label>
@@ -1495,7 +1600,7 @@
                 
                 <div class="form-group">
                     <label>预测天数:</label>
-                    <input type="number" bind:value={daysToPredict} min="1" max="10" />
+                    <input type="number" bind:value={daysToPredict} min="1" max="10" on:change={handlePredictionDaysChange} />
                 </div>
                 
                 <div class="form-group">
@@ -1527,6 +1632,10 @@
                         <div class="summary-card">
                             <h4>总体准确率</h4>
                             <div class="summary-stats">
+                                <div class="stat-item">
+                                    <span class="stat-label">回测对象:</span>
+                                    <span class="stat-value model-name-value">{backtestReport.model_name}</span>
+                                </div>
                                 <div class="stat-item">
                                     <span class="stat-label">价格准确率:</span>
                                     <span class="stat-value">{(backtestReport.overall_price_accuracy * 100).toFixed(2)}%</span>
@@ -2055,7 +2164,7 @@
                                             </div>
                                         </td>
                                         <td>
-                                            <span class="signal-badge {prediction.trading_signal?.includes('买入') ? 'buy-signal' : prediction.trading_signal?.includes('卖出') ? 'sell-signal' : 'hold-signal'}">
+                                            <span class="signal-badge {prediction.trading_signal?.includes('买入') || prediction.trading_signal?.includes('看涨') ? 'buy-signal' : prediction.trading_signal?.includes('卖出') || prediction.trading_signal?.includes('看跌') ? 'sell-signal' : 'hold-signal'}">
                                                 {prediction.trading_signal || '持有'}
                                             </span>
                                             {#if prediction.signal_strength}
@@ -3223,6 +3332,12 @@
         font-size: 1.25rem;
         font-weight: bold;
         color: #10b981;
+    }
+
+    .model-name-value {
+        font-size: 1rem;
+        text-align: right;
+        overflow-wrap: anywhere;
     }
     
     .accuracy-trend {

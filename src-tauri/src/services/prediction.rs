@@ -39,7 +39,7 @@ pub async fn evaluate_model(model_id: String) -> Result<EvaluationResult, String
 
 /// 列出模型
 pub fn list_models(stock_code: &str) -> Vec<ModelInfo> {
-    management::list_models(stock_code)
+    management::list_available_models(stock_code)
 }
 
 /// 删除模型
@@ -88,4 +88,3 @@ pub async fn get_latest_multi_timeframe_signal(symbol: String) -> Result<Option<
     
     Ok(signal)
 }
-

@@ -379,6 +379,27 @@ pub async fn get_symbols_with_min_bars(
     Ok(rows.into_iter().map(|(s,)| s).collect())
 }
 
+/// 获取同时满足「历史 ≥ min_bars 根」且「流通市值 ≥ min_cap（元）」的股票代码。
+///
+/// 用于把截面排名限定在可投资的流动大中盘域——截面技术信号在小盘上反向且不可交易。
+pub async fn get_symbols_with_min_bars_and_cap(
+    min_bars: i64,
+    min_cap: f64,
+    pool: &SqlitePool,
+) -> Result<Vec<String>, AppError> {
+    let rows: Vec<(String,)> = sqlx::query_as(&format!(
+        "SELECT h.symbol FROM historical_data h \
+         JOIN stock_capital c ON c.symbol = h.symbol \
+         WHERE {VALID_HISTORICAL_BAR_FILTER} AND c.circulating_market_cap >= ? \
+         GROUP BY h.symbol HAVING COUNT(*) >= ? ORDER BY h.symbol"
+    ))
+    .bind(min_cap)
+    .bind(min_bars)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(s,)| s).collect())
+}
+
 /// 获取最新收盘价
 pub async fn get_latest_close_price(
     symbol: &str,

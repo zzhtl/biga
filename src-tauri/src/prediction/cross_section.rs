@@ -9,6 +9,7 @@ use chrono::NaiveDate;
 use std::collections::BTreeMap;
 
 /// 单个截面样本（因子已截面标准化）
+#[derive(Debug, Clone)]
 pub struct PanelRow {
     pub date: NaiveDate,
     pub symbol: String,
@@ -183,8 +184,7 @@ pub fn orthogonalize_panel(mut panel: Vec<Vec<PanelRow>>, order: &[usize]) -> Ve
         }
 
         // 各列重新 z-score 后写回
-        for d in 0..dim {
-            let col = &cols[d];
+        for (d, col) in cols.iter().enumerate().take(dim) {
             let mean = col.iter().sum::<f64>() / n as f64;
             let var = col.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
             let sd = var.sqrt();
@@ -206,9 +206,9 @@ pub fn factor_ic_order(panel: &[Vec<PanelRow>]) -> Vec<usize> {
             continue;
         }
         let ys: Vec<f64> = day.iter().map(|r| r.fwd_return).collect();
-        for d in 0..dim {
+        for (d, factor_ic) in ic.iter_mut().enumerate().take(dim) {
             let xs: Vec<f64> = day.iter().map(|r| r.factors[d]).collect();
-            ic[d] += pearson(&xs, &ys);
+            *factor_ic += pearson(&xs, &ys);
         }
         cnt += 1;
     }
@@ -231,9 +231,9 @@ fn estimate_weights(days: &[Vec<PanelRow>], dim: usize) -> Vec<f64> {
             continue;
         }
         let ys: Vec<f64> = day.iter().map(|r| r.fwd_return).collect();
-        for d in 0..dim {
+        for (d, weight) in w.iter_mut().enumerate().take(dim) {
             let xs: Vec<f64> = day.iter().map(|r| r.factors[d]).collect();
-            w[d] += pearson(&xs, &ys);
+            *weight += pearson(&xs, &ys);
         }
         cnt += 1;
     }
@@ -250,19 +250,78 @@ fn composite(row: &PanelRow, w: &[f64]) -> f64 {
     row.factors.iter().zip(w).map(|(f, wi)| f * wi).sum()
 }
 
-/// 前向滚动评估：每期用过去 `window` 个截面日估权重，对当日样本外评估。
-pub fn walk_forward(panel: &[Vec<PanelRow>], window: usize) -> WalkForwardReport {
+/// 前向滚动评估：每期只用预测日前已完成的历史收益估权重。
+pub fn walk_forward(panel: &[Vec<PanelRow>], window: usize, horizon: usize) -> WalkForwardReport {
     let dim = factor_dim();
+    let horizon = horizon.max(1);
     let (mut ic_sum, mut ic_n) = (0.0, 0usize);
     let (mut correct, mut total) = (0usize, 0usize);
     let (mut ls_sum, mut ls_n) = (0.0, 0usize);
 
-    for t in window..panel.len() {
-        let w = estimate_weights(&panel[t - window..t], dim);
+    for t in window + horizon - 1..panel.len() {
+        let train_end = t - horizon + 1;
+        let w = estimate_weights(&panel[train_end - window..train_end], dim);
         let day = &panel[t];
         if day.len() < MIN_CROSS {
             continue;
         }
+        let comp: Vec<f64> = day.iter().map(|r| composite(r, &w)).collect();
+        let ys: Vec<f64> = day.iter().map(|r| r.fwd_return).collect();
+
+        for (c, y) in comp.iter().zip(&ys) {
+            if (*c > 0.0 && *y > 0.0) || (*c < 0.0 && *y < 0.0) {
+                correct += 1;
+            }
+            total += 1;
+        }
+        ic_sum += pearson(&comp, &ys);
+        ic_n += 1;
+
+        let mut order: Vec<usize> = (0..day.len()).collect();
+        order.sort_by(|&a, &b| comp[b].partial_cmp(&comp[a]).unwrap());
+        let k = (day.len() as f64 * 0.2).ceil() as usize;
+        if k >= 1 {
+            let top = order[..k].iter().map(|&j| ys[j]).sum::<f64>() / k as f64;
+            let bot = order[day.len() - k..].iter().map(|&j| ys[j]).sum::<f64>() / k as f64;
+            ls_sum += top - bot;
+            ls_n += 1;
+        }
+    }
+
+    WalkForwardReport {
+        oos_days: ic_n,
+        rank_ic: ic_sum / ic_n.max(1) as f64,
+        direction_accuracy: correct as f64 / total.max(1) as f64,
+        long_short_spread: ls_sum / ls_n.max(1) as f64,
+    }
+}
+
+/// 前向滚动正交化评估：每期只用预测日前已完成的历史收益决定因子顺序和权重。
+pub fn walk_forward_orthogonalized(
+    panel: &[Vec<PanelRow>],
+    window: usize,
+    horizon: usize,
+) -> WalkForwardReport {
+    let dim = factor_dim();
+    let horizon = horizon.max(1);
+    let (mut ic_sum, mut ic_n) = (0.0, 0usize);
+    let (mut correct, mut total) = (0usize, 0usize);
+    let (mut ls_sum, mut ls_n) = (0.0, 0usize);
+
+    for t in window + horizon - 1..panel.len() {
+        let train_end = t - horizon + 1;
+        let train_panel = panel[train_end - window..train_end].to_vec();
+        let order = factor_ic_order(&train_panel);
+        let train_panel = orthogonalize_panel(train_panel, &order);
+        let w = estimate_weights(&train_panel, dim);
+        let day = orthogonalize_panel(vec![panel[t].clone()], &order)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        if day.len() < MIN_CROSS {
+            continue;
+        }
+
         let comp: Vec<f64> = day.iter().map(|r| composite(r, &w)).collect();
         let ys: Vec<f64> = day.iter().map(|r| r.fwd_return).collect();
 
@@ -305,14 +364,14 @@ pub fn walk_forward_rank_signals(
         return Vec::new();
     }
 
-    let order = factor_ic_order(&hist_panel);
-    let panel = orthogonalize_panel(hist_panel, &order);
     let dim = factor_dim();
     let mut signals = Vec::new();
 
-    for t in window..panel.len() {
-        let w = estimate_weights(&panel[t - window..t], dim);
-        let day = &panel[t];
+    let horizon = horizon.max(1);
+    for t in window + horizon - 1..hist_panel.len() {
+        let train_end = t - horizon + 1;
+        let w = estimate_weights(&hist_panel[train_end - window..train_end], dim);
+        let day = &hist_panel[t];
         if day.len() < MIN_CROSS {
             continue;
         }
@@ -347,13 +406,11 @@ pub fn daily_bias_from_rank(rank: usize, total: usize) -> f64 {
 
     let percentile = (rank - 1) as f64 / (total - 1) as f64;
     if percentile <= 0.20 {
-        0.08
+        0.005
     } else if percentile <= 0.40 {
-        0.03
+        0.0
     } else if percentile >= 0.80 {
-        -0.08
-    } else if percentile >= 0.60 {
-        -0.03
+        -0.005
     } else {
         0.0
     }
@@ -368,20 +425,42 @@ pub fn rank_latest(
     window: usize,
 ) -> Vec<RankedStock> {
     let dim = factor_dim();
+    let horizon = horizon.max(1);
+    let min_visible_len = min_visible_len(horizon, window);
 
-    // 1. 历史面板（带 fwd）→ 正交化（去冗余）→ 估权重
-    let hist_panel = build_panel(stocks, horizon.max(1));
+    let Some(ranking_date) = latest_broad_cross_section_date(stocks, horizon, window) else {
+        return Vec::new();
+    };
+    let training_stocks: Vec<(String, Vec<HistoricalData>)> = stocks
+        .iter()
+        .filter_map(|(sym, hist)| {
+            let visible: Vec<HistoricalData> = hist
+                .iter()
+                .take_while(|bar| bar.date <= ranking_date)
+                .cloned()
+                .collect();
+            if visible.len() >= min_visible_len {
+                Some((sym.clone(), visible))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // 1. 历史面板（带 fwd）→ 估权重
+    let hist_panel = build_panel(&training_stocks, horizon);
     if hist_panel.len() < window.max(20) {
         return Vec::new();
     }
-    let order = factor_ic_order(&hist_panel);
-    let ortho_hist = orthogonalize_panel(hist_panel, &order);
-    let w = estimate_weights(&ortho_hist[ortho_hist.len() - window..], dim);
+    let w = estimate_weights(&hist_panel[hist_panel.len() - window..], dim);
 
-    // 2. 最新一日截面（无 fwd）：取每只股票最后一根的因子
+    // 2. 最新一日截面（无 fwd）：使用覆盖足够股票数的最近共同交易日。
     let mut latest: Vec<(String, Vec<f64>, f64)> = Vec::new();
-    for (sym, hist) in stocks {
+    for (sym, hist) in &training_stocks {
         if hist.len() <= FACTOR_LOOKBACK {
+            continue;
+        }
+        if hist.last().is_none_or(|bar| bar.date != ranking_date) {
             continue;
         }
         if let Some(f) = compute_factor_row(hist, hist.len() - 1) {
@@ -391,12 +470,8 @@ pub fn rank_latest(
     if latest.len() < MIN_CROSS {
         return Vec::new();
     }
-    // 截面标准化 + 同序正交化（与历史一致）
+    // 截面标准化（与历史一致）
     let today = standardize(NaiveDate::MIN, latest, dim);
-    let today = orthogonalize_panel(vec![today], &order)
-        .into_iter()
-        .next()
-        .unwrap_or_default();
 
     // 3. 打分排序（降序）
     let mut scored: Vec<(String, f64)> = today
@@ -414,4 +489,249 @@ pub fn rank_latest(
             rank: idx + 1,
         })
         .collect()
+}
+
+fn latest_broad_cross_section_date(
+    stocks: &[(String, Vec<HistoricalData>)],
+    horizon: usize,
+    window: usize,
+) -> Option<NaiveDate> {
+    let min_visible_len = min_visible_len(horizon, window);
+    // 有效股票数：历史足够长、能进入截面的票。
+    let n_eligible = stocks
+        .iter()
+        .filter(|(_, hist)| hist.len() >= min_visible_len)
+        .count();
+    if n_eligible < MIN_CROSS {
+        return None;
+    }
+    // 要求覆盖到「大多数」有效股票，否则少数数据更新更早/更晚的票（如分批刷新导致
+    // 末日期错位）会把截面日拽到只有零星几只的稀疏日期，漏掉主体票池。
+    let required = MIN_CROSS.max((n_eligible as f64 * 0.7).ceil() as usize);
+    let mut counts: BTreeMap<NaiveDate, usize> = BTreeMap::new();
+    for (_, hist) in stocks {
+        for bar in hist.iter().skip(min_visible_len - 1) {
+            *counts.entry(bar.date).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .rev()
+        .find_map(|(date, count)| (count >= required).then_some(date))
+}
+
+fn min_visible_len(horizon: usize, window: usize) -> usize {
+    FACTOR_LOOKBACK + horizon.max(1) + window.max(20)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    fn synthetic_panel(days: usize, cross: usize) -> Vec<Vec<PanelRow>> {
+        let dim = factor_dim();
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        (0..days)
+            .map(|d| {
+                (0..cross)
+                    .map(|s| {
+                        let signal = s as f64 - (cross as f64 - 1.0) / 2.0;
+                        let mut factors = vec![0.0; dim];
+                        factors[0] = signal;
+                        factors[1] = -signal * 0.5 + d as f64 * 0.001;
+                        PanelRow {
+                            date: start + Duration::days(d as i64),
+                            symbol: format!("s{s}"),
+                            factors,
+                            fwd_return: signal * 0.01,
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn make_history(symbol: &str, days: usize, price_offset: f64) -> Vec<HistoricalData> {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        (0..days)
+            .map(|d| {
+                let close = 10.0 + price_offset + d as f64 * 0.05;
+                HistoricalData {
+                    symbol: symbol.to_string(),
+                    date: start + Duration::days(d as i64),
+                    open: close - 0.02,
+                    close,
+                    high: close + 0.2,
+                    low: close - 0.2,
+                    volume: 100_000 + d as i64 * 100,
+                    amount: close * 100_000.0,
+                    amplitude: 2.0,
+                    turnover_rate: 2.0 + price_offset * 0.1,
+                    volume_ratio: 1.0,
+                    change_percent: 0.5,
+                    change: 0.05,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_walk_forward_orthogonalized_uses_oos_windows() {
+        let panel = synthetic_panel(16, 6);
+        let report = walk_forward_orthogonalized(&panel, 6, 2);
+
+        assert_eq!(report.oos_days, 9);
+        assert!(report.rank_ic.is_finite());
+        assert!(report.direction_accuracy > 0.5);
+        assert!(report.long_short_spread > 0.0);
+    }
+
+    #[test]
+    fn test_daily_bias_from_rank_boundaries() {
+        assert_eq!(daily_bias_from_rank(0, 10), 0.0);
+        assert_eq!(daily_bias_from_rank(1, 10), 0.005);
+        assert_eq!(daily_bias_from_rank(4, 10), 0.0);
+        assert_eq!(daily_bias_from_rank(6, 10), 0.0);
+        assert_eq!(daily_bias_from_rank(8, 10), 0.0);
+        assert_eq!(daily_bias_from_rank(10, 10), -0.005);
+    }
+
+    #[test]
+    fn test_rank_latest_filters_stale_symbols() {
+        let mut stocks = (0..5)
+            .map(|idx| {
+                let symbol = format!("fresh{idx}");
+                (symbol, make_history(&format!("fresh{idx}"), 60, idx as f64))
+            })
+            .collect::<Vec<_>>();
+        stocks.push(("stale".to_string(), make_history("stale", 59, 10.0)));
+
+        let ranking = rank_latest(&stocks, 1, 20);
+
+        assert!(!ranking.is_empty());
+        assert_eq!(ranking.len(), 5);
+        assert!(ranking.iter().all(|ranked| ranked.symbol != "stale"));
+    }
+
+    #[test]
+    fn test_rank_latest_ignores_sparse_fresher_date_from_batch_refresh() {
+        // 主体 12 只数据停在 D；少数 6 只更新到 D+2（模拟分批刷新末日期错位）。
+        // 新批次 6 只 ≥ MIN_CROSS(5) 但远不足七成，应回退到 D 排主体票池，而非只排这 6 只。
+        let mut stocks = (0..12)
+            .map(|idx| {
+                let symbol = format!("seasoned{idx}");
+                (symbol.clone(), make_history(&symbol, 60, idx as f64))
+            })
+            .collect::<Vec<_>>();
+        stocks.extend((0..6).map(|idx| {
+            let symbol = format!("fresh{idx}");
+            let mut hist = make_history(&symbol, 60, idx as f64 + 20.0);
+            for bar in hist.iter_mut() {
+                bar.date += Duration::days(2);
+            }
+            (symbol, hist)
+        }));
+
+        let ranking = rank_latest(&stocks, 1, 20);
+
+        // 回退到主体共同日 D：18 只全部参与（而非塌缩到 6 只新票）。
+        assert_eq!(ranking.len(), 18);
+        assert!(ranking.iter().any(|ranked| ranked.symbol == "seasoned0"));
+    }
+
+    #[test]
+    fn test_rank_latest_falls_back_to_recent_broad_date() {
+        let mut stocks = (0..4)
+            .map(|idx| {
+                let symbol = format!("latest{idx}");
+                (symbol, make_history(&format!("latest{idx}"), 60, idx as f64))
+            })
+            .collect::<Vec<_>>();
+        stocks.extend((0..2).map(|idx| {
+            let symbol = format!("fallback{idx}");
+            (symbol, make_history(&format!("fallback{idx}"), 59, idx as f64 + 4.0))
+        }));
+
+        let ranking = rank_latest(&stocks, 1, 20);
+
+        assert_eq!(ranking.len(), 6);
+        assert!(ranking.iter().any(|ranked| ranked.symbol == "fallback0"));
+        assert!(ranking.iter().any(|ranked| ranked.symbol == "latest0"));
+    }
+
+    #[test]
+    fn test_rank_latest_ignores_short_history_when_selecting_broad_date() {
+        let mut stocks = (0..5)
+            .map(|idx| {
+                let symbol = format!("seasoned{idx}");
+                (symbol, make_history(&format!("seasoned{idx}"), 60, idx as f64))
+            })
+            .collect::<Vec<_>>();
+
+        stocks.extend((0..5).map(|idx| {
+            let symbol = format!("short{idx}");
+            let mut hist = make_history(&symbol, 10, idx as f64 + 10.0);
+            for bar in hist.iter_mut() {
+                bar.date += Duration::days(80);
+            }
+            (symbol, hist)
+        }));
+
+        let ranking = rank_latest(&stocks, 1, 20);
+
+        assert_eq!(ranking.len(), 5);
+        assert!(ranking.iter().all(|ranked| ranked.symbol.starts_with("seasoned")));
+    }
+
+    #[test]
+    fn test_rank_latest_ignores_symbols_without_full_training_window() {
+        let mut stocks = (0..5)
+            .map(|idx| {
+                let symbol = format!("seasoned{idx}");
+                (symbol, make_history(&format!("seasoned{idx}"), 60, idx as f64))
+            })
+            .collect::<Vec<_>>();
+
+        stocks.extend((0..5).map(|idx| {
+            let symbol = format!("partial{idx}");
+            let mut hist = make_history(&symbol, FACTOR_LOOKBACK + 5, idx as f64 + 20.0);
+            for bar in hist.iter_mut() {
+                bar.date += Duration::days(80);
+            }
+            (symbol, hist)
+        }));
+
+        let ranking = rank_latest(&stocks, 1, 20);
+
+        assert_eq!(ranking.len(), 5);
+        assert!(ranking.iter().all(|ranked| ranked.symbol.starts_with("seasoned")));
+    }
+
+    #[test]
+    fn test_rank_latest_ignores_same_date_partial_training_window() {
+        let mut stocks = (0..5)
+            .map(|idx| {
+                let symbol = format!("seasoned{idx}");
+                (symbol, make_history(&format!("seasoned{idx}"), 60, idx as f64))
+            })
+            .collect::<Vec<_>>();
+
+        let seasoned_last_date = stocks[0].1.last().unwrap().date;
+        stocks.extend((0..2).map(|idx| {
+            let symbol = format!("partial{idx}");
+            let mut hist = make_history(&symbol, FACTOR_LOOKBACK + 5, idx as f64 + 20.0);
+            let partial_last_date = hist.last().unwrap().date;
+            let shift = seasoned_last_date - partial_last_date;
+            for bar in hist.iter_mut() {
+                bar.date += shift;
+            }
+            (symbol, hist)
+        }));
+
+        let ranking = rank_latest(&stocks, 1, 20);
+
+        assert_eq!(ranking.len(), 5);
+        assert!(ranking.iter().all(|ranked| ranked.symbol.starts_with("seasoned")));
+    }
 }

@@ -1,21 +1,19 @@
 //! 真实走步回测框架
 //!
-//! 对历史数据做 walk-forward 回测：每个交易日仅用其之前的数据运行完整分析管线
-//! （[`crate::prediction::model::inference::analyze`]），将预测涨跌幅与未来真实涨跌幅
+//! 对历史数据做 walk-forward 回测：每个交易日仅用其之前的数据运行生产预测路径
+//! （[`crate::prediction::model::inference::predict_from_historical`]），将预测涨跌幅与未来真实涨跌幅
 //! 对比，量化方向准确率、误差与简单策略收益。
 
 pub mod metrics;
 
 use crate::db::models::HistoricalData;
-use crate::prediction::model::inference::{
-    analyze, calibrate_professional_result, AnalysisOptions,
-};
+use crate::prediction::model::inference::{predict_from_historical, MAX_ANALYSIS_DAYS};
+use crate::prediction::types::{PredictionRequest, PredictionResponse};
 use chrono::NaiveDate;
 use metrics::{compute_metrics, BacktestMetrics, BacktestSample};
 
 /// 回测最小回看窗口（分析管线要求 ≥60 个交易日）
 pub const MIN_LOOKBACK: usize = 60;
-const BACKTEST_ANALYSIS_WINDOW: usize = 800;
 
 /// 回测报告
 #[derive(Debug, Clone)]
@@ -36,10 +34,13 @@ pub struct BacktestObservation {
     pub target_date: NaiveDate,
     pub base_price: f64,
     pub predicted_price: f64,
+    pub predicted_daily_changes: Vec<f64>,
     pub actual_price: f64,
     pub predicted_change: f64,
     pub actual_change: f64,
     pub confidence: f64,
+    pub key_factors: Vec<String>,
+    pub prediction_reason: Option<String>,
 }
 
 /// 走步回测。
@@ -69,6 +70,30 @@ pub fn run_backtest_window(
     start_date: Option<NaiveDate>,
     end_date: Option<NaiveDate>,
 ) -> Result<BacktestReport, String> {
+    run_backtest_window_with_predictor(
+        stock_code,
+        historical,
+        lookback,
+        horizon,
+        step,
+        start_date,
+        end_date,
+        predict_from_historical,
+    )
+}
+
+/// 按预测发起日期窗口做走步回测，并允许调用方注入生产预测函数。
+#[allow(clippy::too_many_arguments)]
+pub fn run_backtest_window_with_predictor(
+    stock_code: &str,
+    historical: &[HistoricalData],
+    lookback: usize,
+    horizon: usize,
+    step: usize,
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    mut predict: impl FnMut(&PredictionRequest, &[HistoricalData]) -> Result<PredictionResponse, String>,
+) -> Result<BacktestReport, String> {
     let lookback = lookback.max(MIN_LOOKBACK);
     let step = step.max(1);
 
@@ -83,12 +108,6 @@ pub fn run_backtest_window(
         ));
     }
 
-    let closes: Vec<f64> = historical.iter().map(|h| h.close).collect();
-    let highs: Vec<f64> = historical.iter().map(|h| h.high).collect();
-    let lows: Vec<f64> = historical.iter().map(|h| h.low).collect();
-    let volumes: Vec<i64> = historical.iter().map(|h| h.volume).collect();
-    let opens: Vec<f64> = historical.iter().map(|h| h.open).collect();
-
     let mut samples = Vec::new();
     let mut observations = Vec::new();
     let mut t = lookback;
@@ -101,32 +120,28 @@ pub fn run_backtest_window(
             continue;
         }
 
-        // 仅使用 [0, t) 的数据（最后一条索引 t-1）
-        let analysis_start = t.saturating_sub(BACKTEST_ANALYSIS_WINDOW);
-        let bundle = analyze(
-            &closes[analysis_start..t],
-            &highs[analysis_start..t],
-            &lows[analysis_start..t],
-            &volumes[analysis_start..t],
-            &opens[analysis_start..t],
-            AnalysisOptions {
-                turnover_rate: historical[t - 1].turnover_rate,
-                prediction_days: horizon,
-                stock_code: Some(stock_code),
-            },
-        );
-        let mut professional_result = bundle.professional_result;
-        calibrate_professional_result(
-            &historical[..t],
-            &mut professional_result,
-            horizon,
-            Some(stock_code),
-        );
+        // 仅使用预测日前可见数据，并裁到生产预测同款最大窗口。
+        let visible_start = visible_history_start(t, MAX_ANALYSIS_DAYS);
+        let request = PredictionRequest {
+            stock_code: stock_code.to_string(),
+            model_name: None,
+            prediction_days: horizon,
+            use_candle: false,
+        };
+        let response = predict(&request, &historical[visible_start..t])?;
+        let prediction = response
+            .predictions
+            .last()
+            .ok_or_else(|| "未生成预测结果".to_string())?;
 
-        let predicted_change = professional_result.expected_change;
-        let base = closes[t - 1];
-        let predicted_price = base * (1.0 + predicted_change / 100.0);
-        let future = closes[t - 1 + horizon];
+        let base = historical[t - 1].close;
+        let predicted_price = prediction.predicted_price;
+        let predicted_change = if base > 0.0 {
+            (predicted_price - base) / base * 100.0
+        } else {
+            0.0
+        };
+        let future = historical[t - 1 + horizon].close;
         let actual_change = if base > 0.0 {
             (future - base) / base * 100.0
         } else {
@@ -142,10 +157,17 @@ pub fn run_backtest_window(
             target_date: historical[t - 1 + horizon].date,
             base_price: base,
             predicted_price,
+            predicted_daily_changes: response
+                .predictions
+                .iter()
+                .map(|prediction| prediction.predicted_change_percent)
+                .collect(),
             actual_price: future,
             predicted_change,
             actual_change,
-            confidence: professional_result.confidence,
+            confidence: prediction.confidence,
+            key_factors: prediction.key_factors.clone().unwrap_or_default(),
+            prediction_reason: prediction.prediction_reason.clone(),
         });
         t += step;
     }
@@ -156,4 +178,105 @@ pub fn run_backtest_window(
         metrics: compute_metrics(&samples),
         observations,
     })
+}
+
+fn visible_history_start(end: usize, max_window: usize) -> usize {
+    end.saturating_sub(max_window.max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    fn synthetic_history(days: usize) -> Vec<HistoricalData> {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        (0..days)
+            .map(|i| {
+                let close = 100.0 + i as f64 * 0.1;
+                HistoricalData {
+                    symbol: "test".to_string(),
+                    date: start + Duration::days(i as i64),
+                    open: close,
+                    close,
+                    high: close + 0.5,
+                    low: close - 0.5,
+                    volume: 10_000 + i as i64,
+                    amount: close * 10_000.0,
+                    amplitude: 1.0,
+                    turnover_rate: 1.0,
+                    volume_ratio: 1.0,
+                    change_percent: 0.1,
+                    change: 0.1,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_backtest_window_end_date_is_prediction_date() {
+        let historical = synthetic_history(75);
+        let prediction_date = historical[64].date;
+
+        let report = run_backtest_window(
+            "test",
+            &historical,
+            60,
+            5,
+            1,
+            Some(prediction_date),
+            Some(prediction_date),
+        )
+        .unwrap();
+
+        assert_eq!(report.observations.len(), 1);
+        assert_eq!(report.observations[0].prediction_date, prediction_date);
+        assert_eq!(report.observations[0].target_date, historical[69].date);
+    }
+
+    #[test]
+    fn test_visible_history_start_matches_production_window_limit() {
+        assert_eq!(visible_history_start(100, 3000), 0);
+        assert_eq!(visible_history_start(3500, 3000), 500);
+        assert_eq!(visible_history_start(10, 0), 9);
+    }
+
+    #[test]
+    fn test_backtest_window_uses_injected_predictor() {
+        let historical = synthetic_history(75);
+        let prediction_date = historical[64].date;
+        let mut calls = 0usize;
+
+        let report = run_backtest_window_with_predictor(
+            "test",
+            &historical,
+            60,
+            5,
+            1,
+            Some(prediction_date),
+            Some(prediction_date),
+            |_request, visible_history| {
+                calls += 1;
+                let last = visible_history.last().unwrap();
+                Ok(PredictionResponse {
+                    predictions: vec![crate::prediction::types::Prediction {
+                        target_date: "2026-01-01".to_string(),
+                        predicted_price: last.close * 1.10,
+                        predicted_change_percent: 10.0,
+                        confidence: 0.8,
+                        trading_signal: Some("看涨".to_string()),
+                        signal_strength: Some(0.8),
+                        technical_indicators: None,
+                        prediction_reason: Some("injected".to_string()),
+                        key_factors: None,
+                    }],
+                    last_real_data: None,
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(calls, 1);
+        assert!((report.observations[0].predicted_change - 10.0).abs() < 1e-9);
+    }
 }

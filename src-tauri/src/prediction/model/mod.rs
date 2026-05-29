@@ -9,7 +9,8 @@ pub mod features;
 pub mod network;
 pub mod ml_inference;
 
+pub const HORIZON_AWARE_MODEL_TYPE: &str = "candle_mlp_horizon";
+
 pub use training::*;
 pub use inference::*;
 pub use management::*;
-

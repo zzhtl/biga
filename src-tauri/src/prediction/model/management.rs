@@ -87,6 +87,28 @@ pub fn list_models(stock_code: &str) -> Vec<ModelInfo> {
     models
 }
 
+/// 列出指定股票所有权重文件可用的模型。
+pub fn list_available_models(stock_code: &str) -> Vec<ModelInfo> {
+    filter_available_models(list_models(stock_code), model_exists)
+}
+
+fn filter_available_models(
+    models: Vec<ModelInfo>,
+    model_exists: impl Fn(&str) -> bool,
+) -> Vec<ModelInfo> {
+    models
+        .into_iter()
+        .filter(|model| model_exists(&model.id))
+        .collect()
+}
+
+/// 判断用户传入的模型标识是否命中模型。
+///
+/// 新前端传模型 ID；保留按名称匹配以兼容旧调用。
+pub fn model_matches_identifier(model: &ModelInfo, identifier: &str) -> bool {
+    model.id == identifier || model.name == identifier
+}
+
 /// 删除模型
 pub fn delete_model(model_id: &str) -> Result<(), String> {
     let model_path = get_model_file_path(model_id);
@@ -116,3 +138,68 @@ pub fn get_model_size(model_id: &str) -> Option<u64> {
     fs::metadata(&path).ok().map(|m| m.len())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model() -> ModelInfo {
+        ModelInfo {
+            id: "model-id".to_string(),
+            name: "同名模型".to_string(),
+            stock_code: "600000".to_string(),
+            created_at: 1,
+            model_type: "candle_mlp_horizon".to_string(),
+            features: Vec::new(),
+            target: "close".to_string(),
+            prediction_days: 5,
+            accuracy: 0.6,
+            training_start_date: None,
+            training_end_date: None,
+            training_samples: None,
+            test_samples: None,
+            mae: None,
+            rmse: None,
+        }
+    }
+
+    #[test]
+    fn test_model_matches_identifier_accepts_id_or_legacy_name() {
+        let model = model();
+
+        assert!(model_matches_identifier(&model, "model-id"));
+        assert!(model_matches_identifier(&model, "同名模型"));
+        assert!(!model_matches_identifier(&model, "missing"));
+    }
+
+    #[test]
+    fn test_model_metadata_accepts_legacy_json_without_training_window() {
+        let json = r#"{
+            "id": "legacy-id",
+            "name": "legacy",
+            "stock_code": "600000",
+            "created_at": 1,
+            "model_type": "candle_mlp",
+            "features": [],
+            "target": "close",
+            "prediction_days": 5,
+            "accuracy": 0.6
+        }"#;
+
+        let model = serde_json::from_str::<ModelInfo>(json).unwrap();
+
+        assert_eq!(model.id, "legacy-id");
+        assert_eq!(model.training_end_date, None);
+        assert_eq!(model.test_samples, None);
+    }
+
+    #[test]
+    fn test_filter_available_models_keeps_only_models_with_weights() {
+        let mut missing = model();
+        missing.id = "missing-weight".to_string();
+
+        let available = filter_available_models(vec![model(), missing], |model_id| model_id == "model-id");
+
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].id, "model-id");
+    }
+}

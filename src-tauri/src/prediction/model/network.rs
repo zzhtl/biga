@@ -8,7 +8,7 @@ use std::path::Path;
 /// 隐藏层维度
 pub const HIDDEN: usize = 16;
 
-/// 三层感知机：FEATURE_DIM → HIDDEN → HIDDEN → 1（回归次日收益率）
+/// 三层感知机：FEATURE_DIM → HIDDEN → HIDDEN → 1（回归训练周期收益率）
 pub struct Mlp {
     l1: Linear,
     l2: Linear,
@@ -36,13 +36,14 @@ pub struct TrainOutcome {
     pub direction_accuracy: f64,
     pub mae: f64,
     pub rmse: f64,
+    pub train_samples: usize,
     pub test_samples: usize,
 }
 
 /// 训练 MLP 并保存权重到 `save_path`（safetensors）。
 ///
 /// - `features`：扁平 n×FEATURE_DIM
-/// - `labels`：n（次日收益率%）
+/// - `labels`：n（训练周期收益率%）
 /// - 按 `split` 切分训练/测试，返回测试集上的方向准确率与误差。
 pub fn train_and_save(
     features: &[f32],
@@ -53,13 +54,35 @@ pub fn train_and_save(
     split: f64,
     save_path: &Path,
 ) -> Result<TrainOutcome, String> {
+    train_and_save_with_gap(features, labels, n, epochs, learning_rate, split, 0, save_path)
+}
+
+/// 训练 MLP 并保存权重，测试集与训练集之间跳过 `test_gap` 个连续样本。
+///
+/// 多日标签会覆盖未来多个交易日；留出间隔可避免测试样本特征期与训练标签窗口重叠。
+#[allow(clippy::too_many_arguments)]
+pub fn train_and_save_with_gap(
+    features: &[f32],
+    labels: &[f32],
+    n: usize,
+    epochs: usize,
+    learning_rate: f64,
+    split: f64,
+    test_gap: usize,
+    save_path: &Path,
+) -> Result<TrainOutcome, String> {
     if n < 20 {
         return Err(format!("样本不足，无法训练（n={n}）"));
     }
     let device = Device::Cpu;
     let split = split.clamp(0.5, 0.95);
-    let n_train = ((n as f64 * split) as usize).clamp(10, n - 1);
-    let n_test = n - n_train;
+    let max_train = n.saturating_sub(test_gap).saturating_sub(1);
+    if max_train < 10 {
+        return Err(format!("样本不足，无法在测试集前留出间隔（n={n}, gap={test_gap}）"));
+    }
+    let n_train = ((n as f64 * split) as usize).clamp(10, max_train);
+    let test_start = n_train + test_gap;
+    let n_test = n - test_start;
 
     let to_tensor = |feats: &[f32], rows: usize| -> Result<Tensor, String> {
         Tensor::from_vec(feats.to_vec(), (rows, FEATURE_DIM), &device).map_err(|e| e.to_string())
@@ -70,7 +93,7 @@ pub fn train_and_save(
 
     let x_train = to_tensor(&features[..n_train * FEATURE_DIM], n_train)?;
     let y_train = to_label(&labels[..n_train], n_train)?;
-    let x_test = to_tensor(&features[n_train * FEATURE_DIM..], n_test)?;
+    let x_test = to_tensor(&features[test_start * FEATURE_DIM..], n_test)?;
 
     // 初始化网络与优化器
     let varmap = VarMap::new();
@@ -98,7 +121,7 @@ pub fn train_and_save(
         .flatten_all()
         .and_then(|t| t.to_vec1::<f32>())
         .map_err(|e| e.to_string())?;
-    let actuals = &labels[n_train..];
+    let actuals = &labels[test_start..];
 
     let mut direction_correct = 0usize;
     let mut abs_sum = 0.0f64;
@@ -124,6 +147,7 @@ pub fn train_and_save(
         direction_accuracy: direction_correct as f64 / count,
         mae: abs_sum / count,
         rmse: (sq_sum / count).sqrt(),
+        train_samples: n_train,
         test_samples: preds.len(),
     })
 }
@@ -196,6 +220,7 @@ pub fn train_eval(
         direction_accuracy: direction_correct as f64 / count,
         mae: abs_sum / count,
         rmse: (sq_sum / count).sqrt(),
+        train_samples: n_train,
         test_samples: preds.len(),
     })
 }
@@ -273,7 +298,33 @@ mod tests {
         assert!(outcome.direction_accuracy.is_finite());
         assert!((0.0..=1.0).contains(&outcome.direction_accuracy));
         assert!(outcome.mae.is_finite());
+        assert_eq!(outcome.train_samples, 64);
         assert!(outcome.test_samples > 0);
+        assert!(path.exists(), "权重文件应已保存");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_train_and_save_with_gap_skips_test_overlap() {
+        let n = 80;
+        let mut features = Vec::with_capacity(n * FEATURE_DIM);
+        let mut labels = Vec::with_capacity(n);
+        for i in 0..n {
+            let f0 = (i as f32 / n as f32) - 0.5;
+            for j in 0..FEATURE_DIM {
+                features.push(if j == 0 { f0 } else { 0.0 });
+            }
+            labels.push(f0 * 10.0);
+        }
+
+        let path = std::env::temp_dir()
+            .join(format!("biga_test_model_gap_{}.safetensors", std::process::id()));
+        let outcome = train_and_save_with_gap(&features, &labels, n, 100, 0.05, 0.8, 5, &path)
+            .expect("training failed");
+
+        assert_eq!(outcome.train_samples, 64);
+        assert_eq!(outcome.test_samples, 11);
         assert!(path.exists(), "权重文件应已保存");
 
         std::fs::remove_file(&path).ok();

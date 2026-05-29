@@ -20,7 +20,7 @@ use sqlx::sqlite::SqlitePool;
 /// 列出所有股票预测模型
 #[tauri::command]
 pub async fn list_stock_prediction_models(symbol: String) -> Result<Vec<ModelInfo>, String> {
-    Ok(management::list_models(&symbol))
+    Ok(management::list_available_models(&symbol))
 }
 
 /// 删除股票预测模型
@@ -91,7 +91,10 @@ pub async fn evaluate_candle_model(model_id: String) -> Result<EvaluationResult,
 /// 执行回测（真实 walk-forward：逐日仅用历史数据预测并与未来真实涨跌对比）
 #[tauri::command]
 pub async fn run_model_backtest(request: BacktestRequest) -> Result<BacktestReport, String> {
-    use crate::prediction::backtest::{run_backtest_window, MIN_LOOKBACK};
+    use crate::prediction::backtest::{
+        run_backtest_window, run_backtest_window_with_predictor, MIN_LOOKBACK,
+    };
+    use crate::prediction::model::ml_inference::MlPredictor;
 
     let pool = create_temp_pool().await?;
     let start_date = NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d")
@@ -102,7 +105,8 @@ pub async fn run_model_backtest(request: BacktestRequest) -> Result<BacktestRepo
         return Err("回测结束日期不能早于开始日期".to_string());
     }
 
-    let historical = get_historical_data(&request.stock_code, "1900-01-01", &request.end_date, &pool)
+    // 结束日期限制的是预测发起日；仍需查询之后的真实K线来评估 horizon 收益。
+    let historical = get_historical_data(&request.stock_code, "1900-01-01", "9999-12-31", &pool)
         .await
         .map_err(|e| format!("获取历史数据失败: {e}"))?;
 
@@ -110,16 +114,55 @@ pub async fn run_model_backtest(request: BacktestRequest) -> Result<BacktestRepo
         return Err("未找到历史数据".to_string());
     }
 
+    let selected_model_name = request
+        .model_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let loaded_model = if let Some(name) = selected_model_name {
+        let model = management::list_models(&request.stock_code)
+            .into_iter()
+            .find(|model| {
+                management::model_matches_identifier(model, name)
+                    && management::get_model_file_path(&model.id).exists()
+            })
+            .ok_or_else(|| format!("选择的模型 `{name}` 不存在或权重文件不存在"))?;
+        let predictor = MlPredictor::load(&management::get_model_file_path(&model.id))?;
+        Some((model, predictor))
+    } else {
+        None
+    };
+
     let horizon = request.prediction_days.max(1);
-    let report = run_backtest_window(
-        &request.stock_code,
-        &historical,
-        MIN_LOOKBACK,
-        horizon,
-        request.backtest_interval,
-        Some(start_date),
-        Some(end_date),
-    )?;
+    let report = if let Some((model, predictor)) = loaded_model.as_ref() {
+        run_backtest_window_with_predictor(
+            &request.stock_code,
+            &historical,
+            MIN_LOOKBACK,
+            horizon,
+            request.backtest_interval,
+            Some(start_date),
+            Some(end_date),
+            |prediction_request, visible_history| {
+                inference::predict_with_model_from_historical(
+                    prediction_request,
+                    visible_history,
+                    model,
+                    predictor,
+                )
+            },
+        )?
+    } else {
+        run_backtest_window(
+            &request.stock_code,
+            &historical,
+            MIN_LOOKBACK,
+            horizon,
+            request.backtest_interval,
+            Some(start_date),
+            Some(end_date),
+        )?
+    };
     let m = &report.metrics;
     if m.total == 0 {
         return Err("指定日期范围内没有可回测样本，请扩大区间或确认历史数据覆盖范围".to_string());
@@ -127,10 +170,28 @@ pub async fn run_model_backtest(request: BacktestRequest) -> Result<BacktestRepo
 
     // 价格准确率：由平均绝对误差换算的有界评分（误差 10 个百分点对应 0 分）
     let price_accuracy = (1.0 - m.mean_abs_error / 10.0).clamp(0.0, 1.0);
+    let report_model_name = loaded_model
+        .as_ref()
+        .map(|(model, _)| {
+            let training_days = if model.model_type == crate::prediction::model::HORIZON_AWARE_MODEL_TYPE {
+                model.prediction_days.max(1)
+            } else {
+                1
+            };
+            format!("{}（{}日Candle模型）", model.name, training_days)
+        })
+        .unwrap_or_else(|| "规则引擎+真实数据校准".to_string());
+    let prediction_reason = if loaded_model.is_some() {
+        "固定权重模型走步回测：每次预测输入仅使用预测日前历史数据"
+    } else {
+        "规则引擎走步回测：仅使用预测日前历史数据"
+    };
     let backtest_entries: Vec<BacktestEntry> = report
         .observations
         .iter()
-        .map(backtest_entry_from_observation)
+        .map(|observation| {
+            backtest_entry_from_observation(observation, prediction_reason, &report_model_name)
+        })
         .collect();
     let accuracy_trend = backtest_entries
         .iter()
@@ -159,10 +220,9 @@ pub async fn run_model_backtest(request: BacktestRequest) -> Result<BacktestRepo
             )
         })
         .collect();
-
     Ok(BacktestReport {
         stock_code: request.stock_code,
-        model_name: "规则引擎+真实数据校准".to_string(),
+        model_name: report_model_name,
         backtest_period: format!("{} 至 {}", request.start_date, request.end_date),
         total_predictions: m.total,
         backtest_entries,
@@ -179,6 +239,8 @@ pub async fn run_model_backtest(request: BacktestRequest) -> Result<BacktestRepo
 
 fn backtest_entry_from_observation(
     observation: &crate::prediction::backtest::BacktestObservation,
+    prediction_reason: &str,
+    model_name: &str,
 ) -> BacktestEntry {
     let error_percent = (observation.predicted_change - observation.actual_change).abs();
     let price_accuracy = (1.0 - error_percent / 10.0).clamp(0.0, 1.0);
@@ -198,8 +260,9 @@ fn backtest_entry_from_observation(
             trading_signal: Some(signal_from_change(observation.predicted_change).to_string()),
             signal_strength: Some(observation.confidence),
             technical_indicators: None,
-            prediction_reason: Some("真实走步回测：仅使用预测日前历史数据".to_string()),
+            prediction_reason: Some(prediction_reason.to_string()),
             key_factors: Some(vec![
+                format!("回测对象: {model_name}"),
                 format!("预测发起日: {}", observation.prediction_date.format("%Y-%m-%d")),
                 format!("基准价格: {:.2}", observation.base_price),
                 format!("实际涨跌幅: {:+.2}%", observation.actual_change),
@@ -232,30 +295,34 @@ fn signal_from_change(change: f64) -> &'static str {
 // 截面相对强弱排名（市场中性多因子）
 // =============================================================================
 
-/// 滚动截面多因子排名：对库内历史足够的股票，输出按相对强弱打分的排名。
+/// 滚动截面多因子相对强弱排名（限可投资的流动大中盘域）。
 ///
-/// 经走步回测验证有正样本外 Rank IC（低波动/低换手 + 量比×换手率组合等因子）。
+/// ⚠️ 这是**弱相对强弱描述指标**，不是经证实的收益预测器：无前视走步评估显示该技术
+/// 截面信号样本外不稳定（t<2、对票池构成敏感、在小盘上反向），详见 .claude/CLAUDE.md。
+/// 仅限流通市值 ≥ 200 亿的大中盘排名——小盘上信号反向且不可交易。
 #[tauri::command]
 pub async fn cross_sectional_ranking() -> Result<Vec<crate::prediction::cross_section::RankedStock>, String> {
-    use crate::db::repository::get_symbols_with_min_bars;
+    use crate::db::repository::get_symbols_with_min_bars_and_cap;
     use crate::prediction::cross_section::rank_latest;
 
     let pool = create_temp_pool().await?;
-    let symbols = get_symbols_with_min_bars(150, &pool)
+    // 历史 ≥300 根（FACTOR_LOOKBACK+horizon+window≈285，留余量）且流通市值 ≥200 亿。
+    let symbols = get_symbols_with_min_bars_and_cap(300, 200.0e8, &pool)
         .await
         .map_err(|e| format!("获取股票列表失败: {e}"))?;
     if symbols.len() < 5 {
-        return Err("历史数据足够的股票不足 5 只，无法做截面排名".to_string());
+        return Err("满足流动域门槛（≥300根且市值≥200亿）的股票不足 5 只，无法做截面排名".to_string());
     }
 
     let stocks = get_recent_historical_data_for_symbols(&symbols, 800, &pool)
         .await
         .map_err(|e| format!("获取截面历史数据失败: {e}"))?
         .into_iter()
-        .filter(|(_, hist)| hist.len() >= 150)
+        .filter(|(_, hist)| hist.len() >= 300)
         .collect::<Vec<_>>();
 
-    let ranking = rank_latest(&stocks, 5, 120);
+    // 持有期 15 日 + IC 估计窗口 250 日（降换手、稳权重；非收益保证）。
+    let ranking = rank_latest(&stocks, 15, 250);
     if ranking.is_empty() {
         return Err("数据不足以生成截面排名".to_string());
     }
@@ -388,6 +455,7 @@ async fn predict_with_professional_strategy_inner(
     let current_price = *prices.last().unwrap();
     let last_data = historical.last().unwrap();
     
+    let prediction_days = request.prediction_days.max(1);
     let analysis = inference::analyze(
         &prices,
         &highs,
@@ -396,25 +464,29 @@ async fn predict_with_professional_strategy_inner(
         &opens,
         inference::AnalysisOptions {
             turnover_rate: last_data.turnover_rate,
-            prediction_days: request.prediction_days,
+            prediction_days,
             stock_code: Some(&request.stock_code),
         },
     );
     let mut professional_result = analysis.professional_result.clone();
-    let calibration_horizon = if request.use_candle {
-        request.prediction_days.max(1)
-    } else {
-        1
-    };
     inference::calibrate_professional_result(
         &historical,
         &mut professional_result,
-        calibration_horizon,
+        prediction_days,
         Some(&request.stock_code),
     );
-    if let Some(adjustment) = latest_cross_section_adjustment(&request.stock_code, &pool).await? {
-        append_prediction_factor(&mut predictions, &adjustment.summary);
-        professional_result.key_factors.push(adjustment.summary);
+    if let Some(adjustment) =
+        latest_cross_section_adjustment(&request.stock_code, prediction_days, &pool).await?
+    {
+        if apply_cross_section_adjustment(
+            &mut predictions,
+            adjustment.daily_bias,
+            current_price,
+            &request.stock_code,
+        ) {
+            append_prediction_factor(&mut predictions, &adjustment.summary);
+            professional_result.key_factors.push(adjustment.summary);
+        }
     }
     let risk = &professional_result.risk_assessment;
     
@@ -449,7 +521,7 @@ async fn predict_with_professional_strategy_inner(
                 format!("策略建议: {}", professional_result.suggested_action),
             ],
             confidence: professional_result.confidence,
-            accuracy_rate: Some(0.65),
+            accuracy_rate: None,
         });
     }
     
@@ -480,7 +552,7 @@ async fn predict_with_professional_strategy_inner(
                 format!("策略建议: {}", professional_result.suggested_action),
             ],
             confidence: professional_result.confidence,
-            accuracy_rate: Some(0.65),
+            accuracy_rate: None,
         });
     }
 
@@ -522,13 +594,20 @@ pub async fn predict_with_technical_only(request: TechnicalOnlyRequest) -> Resul
 
 struct CrossSectionAdjustment {
     summary: String,
+    daily_bias: f64,
 }
 
 async fn latest_cross_section_adjustment(
     stock_code: &str,
+    prediction_days: usize,
     pool: &SqlitePool,
 ) -> Result<Option<CrossSectionAdjustment>, String> {
     use crate::prediction::cross_section::{daily_bias_from_rank, rank_latest};
+
+    let horizon = prediction_days.max(1);
+    if horizon != 5 {
+        return Ok(None);
+    }
 
     let symbols = get_symbols_with_min_bars(150, pool)
         .await
@@ -543,7 +622,7 @@ async fn latest_cross_section_adjustment(
         .into_iter()
         .filter(|(_, hist)| hist.len() >= 150)
         .collect::<Vec<_>>();
-    let ranking = rank_latest(&stocks, 5, 120);
+    let ranking = rank_latest(&stocks, horizon, 120);
     if ranking.len() < 20 {
         return Ok(None);
     }
@@ -574,7 +653,48 @@ async fn latest_cross_section_adjustment(
             "截面强弱参考: 全市场第{}/{}名，相对强度{:.0}%，方向偏置参考{:+.2}%",
             ranked.rank, total, relative_strength, daily_bias
         ),
+        daily_bias,
     }))
+}
+
+fn apply_cross_section_adjustment(
+    predictions: &mut PredictionResponse,
+    daily_bias: f64,
+    current_price: f64,
+    stock_code: &str,
+) -> bool {
+    if daily_bias == 0.0 || !current_price.is_finite() || current_price <= 0.0 {
+        return false;
+    }
+    if !cross_section_bias_aligns_with_prediction(predictions, daily_bias) {
+        return false;
+    }
+
+    let (limit_down, limit_up) =
+        crate::prediction::strategy::professional_engine::get_stock_price_limits(Some(stock_code));
+    let mut last_price = current_price;
+    for prediction in predictions.predictions.iter_mut() {
+        let adjusted_change = (prediction.predicted_change_percent + daily_bias)
+            .clamp(limit_down, limit_up);
+        prediction.predicted_change_percent = adjusted_change;
+        prediction.predicted_price = last_price * (1.0 + adjusted_change / 100.0);
+        prediction.trading_signal = Some(signal_from_change(adjusted_change).to_string());
+        last_price = prediction.predicted_price;
+    }
+    true
+}
+
+fn cross_section_bias_aligns_with_prediction(
+    predictions: &PredictionResponse,
+    daily_bias: f64,
+) -> bool {
+    predictions
+        .predictions
+        .first()
+        .is_some_and(|prediction| {
+            let change = prediction.predicted_change_percent;
+            change != 0.0 && change.signum() == daily_bias.signum()
+        })
 }
 
 fn append_prediction_factor(predictions: &mut PredictionResponse, summary: &str) {
@@ -705,5 +825,101 @@ mod tests {
             response.predictions[0].key_factors.as_ref().unwrap()[0],
             "截面测试"
         );
+    }
+
+    #[test]
+    fn test_apply_cross_section_adjustment_updates_chained_prices() {
+        let mut response = PredictionResponse {
+            predictions: vec![
+                Prediction {
+                    target_date: "2026-01-02".to_string(),
+                    predicted_price: 101.0,
+                    predicted_change_percent: 1.0,
+                    confidence: 0.6,
+                    trading_signal: Some("看涨".to_string()),
+                    signal_strength: Some(0.6),
+                    technical_indicators: None,
+                    prediction_reason: None,
+                    key_factors: None,
+                },
+                Prediction {
+                    target_date: "2026-01-05".to_string(),
+                    predicted_price: 102.01,
+                    predicted_change_percent: 1.0,
+                    confidence: 0.6,
+                    trading_signal: Some("看涨".to_string()),
+                    signal_strength: Some(0.6),
+                    technical_indicators: None,
+                    prediction_reason: None,
+                    key_factors: None,
+                },
+            ],
+            last_real_data: Some(LastRealData {
+                date: "2026-01-01".to_string(),
+                price: 100.0,
+                change_percent: 0.0,
+            }),
+        };
+
+        assert!(apply_cross_section_adjustment(&mut response, 0.08, 100.0, "sh600000"));
+
+        assert!((response.predictions[0].predicted_change_percent - 1.08).abs() < 1e-9);
+        assert!((response.predictions[0].predicted_price - 101.08).abs() < 1e-9);
+        assert!((response.predictions[1].predicted_change_percent - 1.08).abs() < 1e-9);
+        assert!((response.predictions[1].predicted_price - 102.171664).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_apply_cross_section_adjustment_keeps_aligned_direction() {
+        let mut response = PredictionResponse {
+            predictions: vec![Prediction {
+                target_date: "2026-01-02".to_string(),
+                predicted_price: 99.8,
+                predicted_change_percent: -0.2,
+                confidence: 0.6,
+                trading_signal: Some("看跌".to_string()),
+                signal_strength: Some(0.6),
+                technical_indicators: None,
+                prediction_reason: None,
+                key_factors: None,
+            }],
+            last_real_data: Some(LastRealData {
+                date: "2026-01-01".to_string(),
+                price: 100.0,
+                change_percent: 0.0,
+            }),
+        };
+
+        assert!(apply_cross_section_adjustment(&mut response, -0.08, 100.0, "sh600000"));
+
+        assert!((response.predictions[0].predicted_change_percent + 0.28).abs() < 1e-9);
+        assert_eq!(response.predictions[0].trading_signal.as_deref(), Some("看跌"));
+    }
+
+    #[test]
+    fn test_apply_cross_section_adjustment_skips_opposite_prediction_direction() {
+        let mut response = PredictionResponse {
+            predictions: vec![Prediction {
+                target_date: "2026-01-02".to_string(),
+                predicted_price: 99.5,
+                predicted_change_percent: -0.5,
+                confidence: 0.6,
+                trading_signal: Some("看跌".to_string()),
+                signal_strength: Some(0.6),
+                technical_indicators: None,
+                prediction_reason: None,
+                key_factors: None,
+            }],
+            last_real_data: Some(LastRealData {
+                date: "2026-01-01".to_string(),
+                price: 100.0,
+                change_percent: 0.0,
+            }),
+        };
+
+        assert!(!apply_cross_section_adjustment(&mut response, 0.5, 100.0, "sh600000"));
+
+        assert!((response.predictions[0].predicted_change_percent + 0.5).abs() < 1e-9);
+        assert_eq!(response.predictions[0].trading_signal.as_deref(), Some("看跌"));
     }
 }

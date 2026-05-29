@@ -1,7 +1,7 @@
 //! 特征工程
 //!
 //! 从历史数据构造机器学习模型的输入特征与标签。特征显式包含**量比**与**换手率**。
-//! 标签为次日收益率（回归目标），其符号即方向。
+//! 标签为指定预测周期收益率（回归目标），其符号即方向。
 
 use crate::db::models::HistoricalData;
 
@@ -128,21 +128,30 @@ fn features_at(h: &[HistoricalData], i: usize) -> [f32; FEATURE_DIM] {
 ///
 /// 标签为次日收益率（%），符号即涨跌方向。
 pub fn build_dataset(historical: &[HistoricalData]) -> (Vec<f32>, Vec<f32>, usize) {
+    build_dataset_for_horizon(historical, 1)
+}
+
+/// 构造训练数据集：标签为未来 `horizon` 个交易日收益率（%）。
+pub fn build_dataset_for_horizon(
+    historical: &[HistoricalData],
+    horizon: usize,
+) -> (Vec<f32>, Vec<f32>, usize) {
     let len = historical.len();
-    if len < LOOKBACK + 2 {
+    let horizon = horizon.max(1);
+    if len < LOOKBACK + horizon + 1 {
         return (Vec::new(), Vec::new(), 0);
     }
 
     let mut features = Vec::new();
     let mut labels = Vec::new();
-    // i 从 LOOKBACK 到 len-2（需要 i+1 作为标签）
-    for i in LOOKBACK..(len - 1) {
+    // i 从 LOOKBACK 到 len-horizon-1（需要 i+horizon 作为标签）
+    for i in LOOKBACK..(len - horizon) {
         let feat = features_at(historical, i);
         let base = historical[i].close;
         if base <= 0.0 {
             continue;
         }
-        let next_ret = ((historical[i + 1].close - base) / base * 100.0) as f32;
+        let next_ret = ((historical[i + horizon].close - base) / base * 100.0) as f32;
         features.extend_from_slice(&feat);
         labels.push(next_ret);
     }
@@ -229,5 +238,17 @@ mod tests {
         let h = make(10);
         let (_, _, n) = build_dataset(&h);
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_build_dataset_for_horizon_uses_requested_target() {
+        let h = make(60);
+        let (_, labels_1, n_1) = build_dataset_for_horizon(&h, 1);
+        let (_, labels_5, n_5) = build_dataset_for_horizon(&h, 5);
+
+        assert_eq!(n_5, n_1 - 4);
+        assert!(labels_5[0] > labels_1[0]);
+        let expected = ((h[25].close - h[20].close) / h[20].close * 100.0) as f32;
+        assert!((labels_5[0] - expected).abs() < 1e-6);
     }
 }
