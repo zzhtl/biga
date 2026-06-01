@@ -732,8 +732,8 @@ fn should_skip_bullish_calibration(
     }
 
     if horizon <= 1 {
-        // 1日超跌/高上涨基率偏多校准在 walk-forward 中缺少稳定 edge，仅保留偏空校准。
-        return true;
+        // 1日纯经验上涨基率偏多缺少稳定 edge；MA5 超跌特征在 walk-forward 中有正贡献。
+        return !has_feature_signal;
     }
 
     // 2-9日只跳过偏多强真实基率校准；5/7日反向规则、弱基率兜底与RSI等明确特征信号仍保留。
@@ -1917,18 +1917,19 @@ mod tests {
     }
 
     #[test]
-    fn test_one_day_calibration_skips_bullish_mean_reversion_signal() {
+    fn test_one_day_calibration_uses_bullish_mean_reversion_signal() {
         let historical = history_with_late_selloff();
         let mut result = bearish_result();
-        let original_change = result.expected_change;
 
-        calibrate_professional_result(&historical, &mut result, 1, Some("600000"));
+        let calibration =
+            calibrate_professional_result(&historical, &mut result, 1, Some("600000")).unwrap();
 
-        assert_eq!(result.expected_change, original_change);
+        assert!(calibration.used_empirical_baseline);
+        assert!(result.expected_change > 0.0);
         assert!(result
             .key_factors
             .iter()
-            .all(|factor| !factor.contains("超买超卖均值回归")));
+            .any(|factor| factor.contains("均值回归特征校准")));
     }
 
     #[test]
@@ -2172,7 +2173,7 @@ mod tests {
 
     #[test]
     fn test_should_skip_bullish_calibration_boundaries() {
-        assert!(should_skip_bullish_calibration(1, true, true, false));
+        assert!(!should_skip_bullish_calibration(1, true, true, false));
         assert!(should_skip_bullish_calibration(1, true, false, false));
         assert!(!should_skip_bullish_calibration(1, false, true, false));
         assert!(!should_skip_bullish_calibration(5, true, true, false));

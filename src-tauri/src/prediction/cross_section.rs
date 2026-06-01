@@ -214,10 +214,7 @@ pub fn factor_ic_order(panel: &[Vec<PanelRow>]) -> Vec<usize> {
     }
     let mut order: Vec<usize> = (0..dim).collect();
     order.sort_by(|&a, &b| {
-        (ic[b] / cnt.max(1) as f64)
-            .abs()
-            .partial_cmp(&(ic[a] / cnt.max(1) as f64).abs())
-            .unwrap()
+        (ic[b] / cnt.max(1) as f64).abs().total_cmp(&(ic[a] / cnt.max(1) as f64).abs())
     });
     order
 }
@@ -278,7 +275,7 @@ pub fn walk_forward(panel: &[Vec<PanelRow>], window: usize, horizon: usize) -> W
         ic_n += 1;
 
         let mut order: Vec<usize> = (0..day.len()).collect();
-        order.sort_by(|&a, &b| comp[b].partial_cmp(&comp[a]).unwrap());
+        order.sort_by(|&a, &b| comp[b].total_cmp(&comp[a]));
         let k = (day.len() as f64 * 0.2).ceil() as usize;
         if k >= 1 {
             let top = order[..k].iter().map(|&j| ys[j]).sum::<f64>() / k as f64;
@@ -335,7 +332,7 @@ pub fn walk_forward_orthogonalized(
         ic_n += 1;
 
         let mut order: Vec<usize> = (0..day.len()).collect();
-        order.sort_by(|&a, &b| comp[b].partial_cmp(&comp[a]).unwrap());
+        order.sort_by(|&a, &b| comp[b].total_cmp(&comp[a]));
         let k = (day.len() as f64 * 0.2).ceil() as usize;
         if k >= 1 {
             let top = order[..k].iter().map(|&j| ys[j]).sum::<f64>() / k as f64;
@@ -381,7 +378,7 @@ pub fn walk_forward_rank_signals(
             .enumerate()
             .map(|(idx, row)| (idx, composite(row, &w)))
             .collect();
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
         let total = scored.len();
         for (rank_idx, (row_idx, score)) in scored.into_iter().enumerate() {
             let row = &day[row_idx];
@@ -478,7 +475,7 @@ pub fn rank_latest(
         .iter()
         .map(|r| (r.symbol.clone(), composite(r, &w)))
         .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     scored
         .into_iter()
