@@ -1002,19 +1002,8 @@ fn calculate_enhanced_daily_prediction(
         1.0
     };
     
-    // 4. 背离信号调整
-    let divergence_factor = if ctx.divergence.has_divergence {
-        if ctx.divergence.is_triple_divergence {
-            // 三重背离是极强信号
-            1.25
-        } else if ctx.divergence.divergence_count >= 2 {
-            1.15
-        } else {
-            1.05
-        }
-    } else {
-        1.0
-    };
+    // 4. 背离信号调整：只在方向一致时放大，冲突时降低幅度，避免把反向风险当成确认信号。
+    let divergence_factor = divergence_factor_for_change(base_change, ctx.divergence);
     
     // 5. 波动率状态调整
     let _vol_regime_factor = ctx.vol_forecast.volatility_regime.to_risk_multiplier();
@@ -1092,6 +1081,36 @@ fn prediction_blend_weights(
         signal_confirmation::ConfirmationLevel::Moderate => (0.80, 0.20),
         signal_confirmation::ConfirmationLevel::Weak => (0.85, 0.15),
         signal_confirmation::ConfirmationLevel::Invalid => (0.90, 0.10),
+    }
+}
+
+fn divergence_factor_for_change(
+    change: f64,
+    divergence: &divergence::DivergenceAnalysis,
+) -> f64 {
+    if !divergence.has_divergence || !change.is_finite() || change.abs() < 1e-12 {
+        return 1.0;
+    }
+
+    let divergence_direction = divergence.composite_score.signum();
+    if divergence_direction == 0.0 {
+        return 1.0;
+    }
+
+    let strong_factor = if divergence.is_triple_divergence {
+        1.25
+    } else if divergence.divergence_count >= 2 {
+        1.15
+    } else {
+        1.05
+    };
+
+    if change.signum() == divergence_direction {
+        strong_factor
+    } else if divergence.is_triple_divergence || divergence.divergence_count >= 2 {
+        0.85
+    } else {
+        0.95
     }
 }
 
@@ -1282,19 +1301,20 @@ pub fn predict_with_model_from_historical(
 
     let feats = latest_features(historical).ok_or("数据不足以构造特征")?;
     let ml_return = predictor.predict(&feats)?; // 模型训练周期对应的预期收益率 %
+    if !ml_return.is_finite() {
+        return Err("模型输出不是有效数字".to_string());
+    }
     let model_horizon = model_training_horizon(&model.model_type, model.prediction_days);
     let daily_ml_return = daily_change_from_horizon_change(ml_return, model_horizon);
+    if !daily_ml_return.is_finite() {
+        return Err("模型日化收益不是有效数字".to_string());
+    }
 
     let last_data = historical.last().unwrap();
     let current_price = last_data.close;
     let confidence = model.accuracy.clamp(0.3, 0.92);
-    let direction = if daily_ml_return > 0.05 {
-        "看涨"
-    } else if daily_ml_return < -0.05 {
-        "看跌"
-    } else {
-        "中性"
-    };
+    let (limit_down, limit_up) =
+        professional_engine::get_stock_price_limits(Some(&request.stock_code));
 
     // 多日预测：horizon-aware 模型在训练周期内保持累计收益口径，超出周期后再衰减。
     let prediction_days = request.prediction_days.max(1);
@@ -1303,7 +1323,8 @@ pub fn predict_with_model_from_historical(
     let mut last_price = current_price;
     for day in 1..=prediction_days {
         let target_date = get_next_trading_day(last_date);
-        let change_percent = ml_daily_change_for_day(daily_ml_return, model_horizon, day);
+        let change_percent = ml_daily_change_for_day(daily_ml_return, model_horizon, day)
+            .clamp(limit_down, limit_up);
         let predicted_price = last_price * (1.0 + change_percent / 100.0);
 
         predictions.push(Prediction {
@@ -1311,7 +1332,7 @@ pub fn predict_with_model_from_historical(
             predicted_price,
             predicted_change_percent: change_percent,
             confidence,
-            trading_signal: Some(direction.to_string()),
+            trading_signal: Some(signal_from_change_percent(change_percent).to_string()),
             signal_strength: Some(confidence),
             technical_indicators: None,
             prediction_reason: Some(format!(
@@ -2210,6 +2231,34 @@ mod tests {
 
         assert_eq!(strong, (0.75, 0.25));
         assert_eq!(invalid, (0.90, 0.10));
+    }
+
+    #[test]
+    fn test_divergence_factor_amplifies_aligned_direction() {
+        let divergence = divergence::DivergenceAnalysis {
+            has_divergence: true,
+            composite_score: 0.8,
+            divergence_count: 2,
+            ..Default::default()
+        };
+
+        let factor = divergence_factor_for_change(0.6, &divergence);
+
+        assert!(factor > 1.0);
+    }
+
+    #[test]
+    fn test_divergence_factor_reduces_conflicting_direction() {
+        let divergence = divergence::DivergenceAnalysis {
+            has_divergence: true,
+            composite_score: 0.8,
+            divergence_count: 2,
+            ..Default::default()
+        };
+
+        let factor = divergence_factor_for_change(-0.6, &divergence);
+
+        assert!(factor < 1.0);
     }
 
     #[test]

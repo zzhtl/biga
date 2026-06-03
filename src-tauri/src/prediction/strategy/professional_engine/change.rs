@@ -133,11 +133,48 @@ fn calculate_reversal_change(ctx: &PredictionContext, direction: &PredictionDire
 
     let change = divergence_component + rsi_component + regime_component;
 
-    // 反转信号通常预期较大变化
+    // 反转信号通常预期较大变化；最终方向由综合信号决定，避免方向与涨跌幅相互矛盾。
+    directional_reversal_change(change, direction)
+}
+
+fn directional_reversal_change(change: f64, direction: &PredictionDirection) -> f64 {
+    let magnitude = change.abs();
     match direction {
         PredictionDirection::StrongBullish | PredictionDirection::StrongBearish => {
-            change.clamp(-4.0, 4.0)
+            let magnitude = magnitude.max(0.5).min(4.0);
+            if matches!(direction, PredictionDirection::StrongBullish) {
+                magnitude
+            } else {
+                -magnitude
+            }
         }
-        _ => change.clamp(-2.5, 2.5),
+        PredictionDirection::Bullish | PredictionDirection::Bearish => {
+            let magnitude = magnitude.max(0.2).min(2.5);
+            if matches!(direction, PredictionDirection::Bullish) {
+                magnitude
+            } else {
+                -magnitude
+            }
+        }
+        PredictionDirection::Neutral => change.clamp(-1.0, 1.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reversal_change_aligns_with_bearish_direction() {
+        let change = directional_reversal_change(1.5, &PredictionDirection::Bearish);
+
+        assert!(change < 0.0);
+    }
+
+    #[test]
+    fn test_reversal_change_aligns_with_bullish_direction() {
+        let change = directional_reversal_change(-1.5, &PredictionDirection::Bullish);
+
+        assert!(change > 0.0);
     }
 }
