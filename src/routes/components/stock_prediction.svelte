@@ -332,6 +332,15 @@
                       kdj_oversold: Boolean(raw.technical_indicators.kdj_oversold),
                   }
                 : undefined,
+            interval: raw?.interval
+                ? {
+                      confidence: normalizeNumber(raw.interval.confidence),
+                      lower_change_percent: normalizeNumber(raw.interval.lower_change_percent),
+                      upper_change_percent: normalizeNumber(raw.interval.upper_change_percent),
+                      lower_price: normalizeNumber(raw.interval.lower_price),
+                      upper_price: normalizeNumber(raw.interval.upper_price),
+                  }
+                : undefined,
         };
     }
 
@@ -2143,6 +2152,7 @@
                                 <tr>
                                     <th>日期</th>
                                     <th>预测价格</th>
+                                    <th title="约80%概率落在此区间，由近20日已实现波动率校准。方向不可测但波动可测——区间才是诚实的不确定性。">预测区间(80%)</th>
                                     <th>涨跌幅</th>
                                     <th>置信度</th>
                                     <th>交易信号</th>
@@ -2154,6 +2164,16 @@
                                     <tr class:positive={prediction.predicted_change_percent > 0} class:negative={prediction.predicted_change_percent < 0}>
                                         <td>{new Date(prediction.target_date).toLocaleDateString()}</td>
                                         <td>{prediction.predicted_price.toFixed(2)}</td>
+                                        <td>
+                                            {#if prediction.interval}
+                                                <span class="interval-band" title="约{(prediction.interval.confidence * 100).toFixed(0)}%概率落在此区间（由已实现波动率校准，非方向预测）">
+                                                    {prediction.interval.lower_price.toFixed(2)} ~ {prediction.interval.upper_price.toFixed(2)}
+                                                    <small>({prediction.interval.lower_change_percent > 0 ? '+' : ''}{prediction.interval.lower_change_percent.toFixed(1)}% ~ {prediction.interval.upper_change_percent > 0 ? '+' : ''}{prediction.interval.upper_change_percent.toFixed(1)}%)</small>
+                                                </span>
+                                            {:else}
+                                                <span class="no-interval">—</span>
+                                            {/if}
+                                        </td>
                                         <td class:price-up={prediction.predicted_change_percent > 0} class:price-down={prediction.predicted_change_percent < 0}>
                                             {prediction.predicted_change_percent > 0 ? '+' : ''}{prediction.predicted_change_percent.toFixed(2)}%
                                         </td>
@@ -2181,7 +2201,7 @@
                                     </tr>
                                     {#if expandedPredIndex === i}
                                         <tr class="pred-detail-row">
-                                            <td colspan="6">
+                                            <td colspan="7">
                                                 <div class="pred-detail">
                                                     <div class="pred-detail-block">
                                                         <span class="pred-detail-label">风险评级</span>
@@ -2664,6 +2684,21 @@
     /* 逐日明细表：行内展开详情 */
     .pred-detail-row td {
         background: rgba(0, 0, 0, 0.15);
+    }
+    .interval-band {
+        display: inline-flex;
+        flex-direction: column;
+        line-height: 1.2;
+        color: #cbd5e1;
+        font-variant-numeric: tabular-nums;
+        cursor: help;
+    }
+    .interval-band small {
+        color: #94a3b8;
+        font-size: 0.75em;
+    }
+    .no-interval {
+        color: #64748b;
     }
     .pred-detail {
         display: flex;

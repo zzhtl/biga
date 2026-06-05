@@ -103,6 +103,16 @@ export interface Prediction {
   technical_indicators?: TechnicalIndicatorValues;
   prediction_reason?: string;
   key_factors?: string[];
+  interval?: PredictionInterval;
+}
+
+/** 校准涨跌区间带：方向不可测但波动可测，区间才是诚实的不确定性表达 */
+export interface PredictionInterval {
+  confidence: number;
+  lower_change_percent: number;
+  upper_change_percent: number;
+  lower_price: number;
+  upper_price: number;
 }
 
 export interface TechnicalIndicatorValues {

@@ -269,6 +269,7 @@ mod tests {
                         technical_indicators: None,
                         prediction_reason: Some("injected".to_string()),
                         key_factors: None,
+                        interval: None,
                     }],
                     last_real_data: None,
                 })

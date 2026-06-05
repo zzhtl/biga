@@ -175,6 +175,12 @@ pub struct StockCapital {
     pub total_shares: f64,
     /// 流通市值（元）
     pub circulating_market_cap: f64,
+    /// 市盈率（来自 ssjy pe），非技术估值因子
+    #[sqlx(default)]
+    pub pe: f64,
+    /// 市净率（来自 ssjy sjl），非技术估值因子
+    #[sqlx(default)]
+    pub pb: f64,
 }
 
 /// 实时行情接口（hs/real/ssjy）响应中与股本/量比/换手率相关的字段
@@ -192,11 +198,41 @@ pub struct RealtimeQuoteItem {
     /// 量比（%）
     #[serde(rename = "lb", default)]
     pub volume_ratio: f64,
+    /// 市盈率
+    #[serde(rename = "pe", default)]
+    pub pe: f64,
+    /// 市净率
+    #[serde(rename = "sjl", default)]
+    pub pb: f64,
 }
 
 // =============================================================================
 // 预测模型相关
 // =============================================================================
+
+// =============================================================================
+// 基本面财务指标（非技术数据，来自 zhitu hs/gs/cwzb）
+// =============================================================================
+
+/// 单个报告期的基本面财务指标。值缺失（接口返回 "--"）为 None。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, FromRow)]
+pub struct StockFundamental {
+    pub symbol: String,
+    /// 报告期(季度末)，如 2026-03-31
+    pub report_date: String,
+    /// 每股收益(YTD累计口径)
+    pub eps: Option<f64>,
+    /// 每股净资产
+    pub bps: Option<f64>,
+    /// 净资产收益率(%)
+    pub roe: Option<f64>,
+    /// 净利润增长率(%)
+    pub profit_growth: Option<f64>,
+    /// 主营收入增长率(%)
+    pub revenue_growth: Option<f64>,
+    /// 资产负债率(%)
+    pub debt_ratio: Option<f64>,
+}
 
 /// 预测模型信息
 #[derive(Debug, Clone, Serialize, Deserialize)]

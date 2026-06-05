@@ -544,12 +544,14 @@ pub async fn upsert_stock_capital(
 ) -> Result<(), AppError> {
     sqlx::query(
         r#"
-        INSERT INTO stock_capital (symbol, circulating_shares, total_shares, circulating_market_cap, updated_at)
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO stock_capital (symbol, circulating_shares, total_shares, circulating_market_cap, pe, pb, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(symbol) DO UPDATE SET
             circulating_shares = EXCLUDED.circulating_shares,
             total_shares = EXCLUDED.total_shares,
             circulating_market_cap = EXCLUDED.circulating_market_cap,
+            pe = EXCLUDED.pe,
+            pb = EXCLUDED.pb,
             updated_at = CURRENT_TIMESTAMP
         "#,
     )
@@ -557,6 +559,8 @@ pub async fn upsert_stock_capital(
     .bind(capital.circulating_shares)
     .bind(capital.total_shares)
     .bind(capital.circulating_market_cap)
+    .bind(capital.pe)
+    .bind(capital.pb)
     .execute(pool)
     .await?;
     Ok(())
@@ -569,7 +573,7 @@ pub async fn get_stock_capital(
 ) -> Result<Option<StockCapital>, AppError> {
     let capital = sqlx::query_as::<_, StockCapital>(
         r#"
-        SELECT symbol, circulating_shares, total_shares, circulating_market_cap
+        SELECT symbol, circulating_shares, total_shares, circulating_market_cap, pe, pb
         FROM stock_capital WHERE symbol = ?
         "#,
     )
@@ -577,6 +581,57 @@ pub async fn get_stock_capital(
     .fetch_optional(pool)
     .await?;
     Ok(capital)
+}
+
+/// 写入一个报告期的基本面财务指标（按 (symbol, report_date) 幂等更新）。
+pub async fn upsert_stock_fundamental(
+    pool: &SqlitePool,
+    f: &StockFundamental,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO stock_fundamentals
+            (symbol, report_date, eps, bps, roe, profit_growth, revenue_growth, debt_ratio, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(symbol, report_date) DO UPDATE SET
+            eps = EXCLUDED.eps,
+            bps = EXCLUDED.bps,
+            roe = EXCLUDED.roe,
+            profit_growth = EXCLUDED.profit_growth,
+            revenue_growth = EXCLUDED.revenue_growth,
+            debt_ratio = EXCLUDED.debt_ratio,
+            updated_at = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(&f.symbol)
+    .bind(&f.report_date)
+    .bind(f.eps)
+    .bind(f.bps)
+    .bind(f.roe)
+    .bind(f.profit_growth)
+    .bind(f.revenue_growth)
+    .bind(f.debt_ratio)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 读取某股票的全部基本面报告期（按报告期升序）。
+pub async fn get_stock_fundamentals(
+    symbol: &str,
+    pool: &SqlitePool,
+) -> Result<Vec<StockFundamental>, AppError> {
+    let rows = sqlx::query_as::<_, StockFundamental>(
+        r#"
+        SELECT symbol, report_date, eps, bps, roe, profit_growth, revenue_growth, debt_ratio
+        FROM stock_fundamentals WHERE symbol = ?
+        ORDER BY report_date ASC
+        "#,
+    )
+    .bind(symbol)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
 
 /// 回填某股票全部历史数据的量比与换手率。

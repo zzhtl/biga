@@ -20,6 +20,7 @@ use crate::prediction::model::HORIZON_AWARE_MODEL_TYPE;
 use crate::prediction::indicators;
 use crate::prediction::analysis::{trend, volume, pattern, support_resistance};
 use crate::prediction::analysis::{market_regime, divergence, signal_confirmation, volatility_forecast};
+use crate::prediction::analysis::prediction_interval;
 use crate::prediction::strategy::{multi_factor, professional_engine, adaptive_weights, price_model};
 use crate::utils::date::get_next_trading_day;
 use crate::db::{
@@ -160,6 +161,7 @@ pub fn predict_from_historical(
             technical_indicators: Some(convert_indicators(&analysis.tech_indicators)),
             prediction_reason: Some(prediction_reason),
             key_factors: Some(key_factors),
+            interval: None,
         });
         
         last_date = target_date;
@@ -180,7 +182,15 @@ pub fn predict_from_historical(
             Some(&request.stock_code),
         );
     }
-    
+
+    // 校准区间带：方向不可测但波动可测，给点预测附上诚实的不确定性区间。
+    prediction_interval::attach_prediction_intervals(
+        &mut predictions,
+        &prices,
+        current_price,
+        prediction_interval::DEFAULT_COVERAGE,
+    );
+
     Ok(PredictionResponse {
         predictions,
         last_real_data: Some(LastRealData {
@@ -1345,11 +1355,21 @@ pub fn predict_with_model_from_historical(
                 format!("{model_horizon}日预期收益 {ml_return:.2}%"),
                 format!("单日等效收益 {daily_ml_return:.2}%"),
             ]),
+            interval: None,
         });
 
         last_date = target_date;
         last_price = predicted_price;
     }
+
+    // 校准区间带：与规则路径一致，用已实现波动率给 ML 点预测附上不确定性区间。
+    let closes: Vec<f64> = historical.iter().map(|h| h.close).collect();
+    prediction_interval::attach_prediction_intervals(
+        &mut predictions,
+        &closes,
+        current_price,
+        prediction_interval::DEFAULT_COVERAGE,
+    );
 
     Ok(PredictionResponse {
         predictions,
@@ -1828,6 +1848,7 @@ mod tests {
                     technical_indicators: None,
                     prediction_reason: Some("test".to_string()),
                     key_factors: Some(Vec::new()),
+                    interval: None,
                 }
             })
             .collect()

@@ -59,6 +59,28 @@ pub struct Prediction {
     pub technical_indicators: Option<TechnicalIndicatorValues>,
     pub prediction_reason: Option<String>,
     pub key_factors: Option<Vec<String>>,
+    /// 校准涨跌区间带（方向不可测但波动可测；点预测仅供参考，区间才是诚实的不确定性）
+    #[serde(default)]
+    pub interval: Option<PredictionInterval>,
+}
+
+/// 校准涨跌区间带。
+///
+/// 由近 20 日已实现波动率 × √预测天数构造，z 倍数经 `examples/interval_calibration.rs`
+/// 在多票 walk-forward 上校准到目标覆盖率（如名义 80% 带经验覆盖 ~80%）。
+/// 这是对"单股方向无 alpha、但波动率可预测"事实的诚实表达。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredictionInterval {
+    /// 名义覆盖率（如 0.80 表示约 80% 概率实际落在带内）
+    pub confidence: f64,
+    /// 区间下沿：相对发起日真实价的累计涨跌幅（%）
+    pub lower_change_percent: f64,
+    /// 区间上沿：相对发起日真实价的累计涨跌幅（%）
+    pub upper_change_percent: f64,
+    /// 区间下沿价格
+    pub lower_price: f64,
+    /// 区间上沿价格
+    pub upper_price: f64,
 }
 
 /// 技术指标值

@@ -267,6 +267,7 @@ fn backtest_entry_from_observation(
                 format!("基准价格: {:.2}", observation.base_price),
                 format!("实际涨跌幅: {:+.2}%", observation.actual_change),
             ]),
+            interval: None,
         }],
         actual_prices: vec![observation.actual_price],
         actual_changes: vec![observation.actual_change],
@@ -797,6 +798,7 @@ mod tests {
                     technical_indicators: None,
                     prediction_reason: None,
                     key_factors: None,
+                    interval: None,
                 },
                 Prediction {
                     target_date: "2026-01-05".to_string(),
@@ -808,6 +810,7 @@ mod tests {
                     technical_indicators: None,
                     prediction_reason: None,
                     key_factors: None,
+                    interval: None,
                 },
             ],
             last_real_data: Some(LastRealData {
@@ -841,6 +844,7 @@ mod tests {
                     technical_indicators: None,
                     prediction_reason: None,
                     key_factors: None,
+                    interval: None,
                 },
                 Prediction {
                     target_date: "2026-01-05".to_string(),
@@ -852,6 +856,7 @@ mod tests {
                     technical_indicators: None,
                     prediction_reason: None,
                     key_factors: None,
+                    interval: None,
                 },
             ],
             last_real_data: Some(LastRealData {
@@ -882,6 +887,7 @@ mod tests {
                 technical_indicators: None,
                 prediction_reason: None,
                 key_factors: None,
+                interval: None,
             }],
             last_real_data: Some(LastRealData {
                 date: "2026-01-01".to_string(),
@@ -909,6 +915,7 @@ mod tests {
                 technical_indicators: None,
                 prediction_reason: None,
                 key_factors: None,
+                interval: None,
             }],
             last_real_data: Some(LastRealData {
                 date: "2026-01-01".to_string(),

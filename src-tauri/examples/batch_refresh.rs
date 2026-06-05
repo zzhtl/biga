@@ -14,6 +14,8 @@ async fn main() {
     // 应用迁移 03（建 stock_capital 表 + 量比列），与 lib.rs 启动迁移一致
     for stmt in [
         "CREATE TABLE IF NOT EXISTS stock_capital (symbol TEXT PRIMARY KEY, circulating_shares REAL NOT NULL DEFAULT 0, total_shares REAL NOT NULL DEFAULT 0, circulating_market_cap REAL NOT NULL DEFAULT 0, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+        "ALTER TABLE stock_capital ADD COLUMN pe REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE stock_capital ADD COLUMN pb REAL NOT NULL DEFAULT 0",
         "ALTER TABLE historical_data ADD COLUMN volume_ratio REAL NOT NULL DEFAULT 0",
         "ALTER TABLE realtime_data ADD COLUMN volume_ratio REAL NOT NULL DEFAULT 0",
     ] {
@@ -43,6 +45,8 @@ async fn main() {
                             circulating_shares: q.circulating_market_cap / close,
                             total_shares: q.total_market_cap / close,
                             circulating_market_cap: q.circulating_market_cap,
+                            pe: q.pe,
+                            pb: q.pb,
                         };
                         match upsert_stock_capital(&pool, &cap).await {
                             Ok(_) => ok_capital += 1,

@@ -10,6 +10,7 @@ pub mod market_regime;
 pub mod divergence;
 pub mod signal_confirmation;
 pub mod volatility_forecast;
+pub mod prediction_interval;
 
 pub use trend::*;
 pub use volume::*;

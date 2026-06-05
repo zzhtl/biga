@@ -80,6 +80,8 @@ pub fn run() {
                     "01_create_tables.sql",
                     "02_stock_prediction_model.sql",
                     "03_volume_metrics.sql",
+                    "04_stock_fundamentals.sql",
+                    "05_capital_valuation.sql",
                 ];
                 for file in &migration_files {
                     let path = Path::new("migrations").join(file);
