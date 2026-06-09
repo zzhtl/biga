@@ -53,6 +53,11 @@ pub struct Stock {
     pub list_date: String,
     pub act_name: String,
     pub act_ent_type: String,
+    /// 人工板块分类（科技/能源/矿业/电力/能源金属/消费/半导体/军工汽车/医药生物），
+    /// 由龙头清单写入，用于股票列表页分组。CSV 导入路径无此列，故 serde 默认空串。
+    #[serde(default)]
+    #[sqlx(default)]
+    pub category: String,
 }
 
 // =============================================================================

@@ -331,6 +331,62 @@ pub async fn cross_sectional_ranking() -> Result<Vec<crate::prediction::cross_se
 }
 
 // =============================================================================
+// 估值上下文命令（PE/PB + 最新基本面，供预测页参考展示）
+// =============================================================================
+
+/// 单只股票的估值/质量/成长画像——**仅作参考展示，非收益预测**。
+/// PE/PB/市值来自 stock_capital（ssjy），基本面来自 stock_fundamentals 最新报告期（cwzb）。
+/// 未刷新或无数据的字段以 `None` 返回，前端显示占位符而非 0。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ValuationContext {
+    pub symbol: String,
+    pub pe: Option<f64>,
+    pub pb: Option<f64>,
+    /// 流通市值（亿元）
+    pub circulating_market_cap_yi: Option<f64>,
+    pub report_date: Option<String>,
+    pub roe: Option<f64>,
+    pub eps: Option<f64>,
+    pub bps: Option<f64>,
+    pub revenue_growth: Option<f64>,
+    pub profit_growth: Option<f64>,
+}
+
+/// 获取单只股票估值上下文（PE/PB + 最新基本面）。数据随"刷新"按钮统一更新。
+#[tauri::command]
+pub async fn get_valuation_context(symbol: String) -> Result<ValuationContext, String> {
+    use crate::db::repository::{get_stock_capital, get_stock_fundamentals};
+
+    let pool = create_temp_pool().await?;
+    let cap = get_stock_capital(&symbol, &pool)
+        .await
+        .map_err(|e| format!("获取股本估值失败: {e}"))?;
+    let funds = get_stock_fundamentals(&symbol, &pool)
+        .await
+        .map_err(|e| format!("获取基本面失败: {e}"))?;
+    // 列表按报告期升序，最后一个为最新一期
+    let latest = funds.last();
+
+    // 0 / 非有限值视为"未刷新/无数据"，返回 None
+    let pos = |v: f64| (v.is_finite() && v != 0.0).then_some(v);
+
+    Ok(ValuationContext {
+        symbol,
+        pe: cap.as_ref().and_then(|c| pos(c.pe)),
+        pb: cap.as_ref().and_then(|c| pos(c.pb)),
+        circulating_market_cap_yi: cap
+            .as_ref()
+            .and_then(|c| pos(c.circulating_market_cap).map(|v| v / 1.0e8)),
+        report_date: latest.map(|f| f.report_date.clone()),
+        roe: latest.and_then(|f| f.roe),
+        eps: latest.and_then(|f| f.eps),
+        bps: latest.and_then(|f| f.bps),
+        revenue_growth: latest.and_then(|f| f.revenue_growth),
+        profit_growth: latest.and_then(|f| f.profit_growth),
+    })
+}
+
+// =============================================================================
 // 优化建议命令
 // =============================================================================
 

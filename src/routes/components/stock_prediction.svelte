@@ -49,6 +49,15 @@
         kdj_oversold: boolean;
     }
     
+    // 校准预测区间（由已实现波动率×√H 校准，约80%覆盖；非方向预测）
+    interface PredictionInterval {
+        lower_price: number;
+        upper_price: number;
+        lower_change_percent: number;
+        upper_change_percent: number;
+        confidence: number;
+    }
+
     interface Prediction {
         target_date: string;
         predicted_price: number;
@@ -59,6 +68,7 @@
         technical_indicators?: TechnicalIndicatorValues;
         prediction_reason?: string;  // 预测理由
         key_factors?: string[];      // 关键因素
+        interval?: PredictionInterval | null;  // 校准预测区间
     }
     
     interface TrainingLog {
@@ -232,6 +242,21 @@
     let lastRealData: LastRealData | null = null; // 新增：最新真实数据
     let professionalAnalysis: ProfessionalPrediction | null = null; // 新增：专业分析结果
     let showProfessionalAnalysis = false; // 是否显示专业分析
+
+    // 估值上下文（PE/PB + 最新基本面）——仅参考展示，非收益预测，数据随"刷新"更新
+    interface ValuationContext {
+        symbol: string;
+        pe: number | null;
+        pb: number | null;
+        circulating_market_cap_yi: number | null;
+        report_date: string | null;
+        roe: number | null;
+        eps: number | null;
+        bps: number | null;
+        revenue_growth: number | null;
+        profit_growth: number | null;
+    }
+    let valuationContext: ValuationContext | null = null;
     
     // 模型训练参数
     let newModelName = "模型-" + new Date().toISOString().slice(0, 10);
@@ -433,7 +458,8 @@
         lastRealData = null;
         predictionChart = null;
         showProfessionalAnalysis = false;
-        
+        loadValuationContext(symbol);
+
         try {
             const request = {
                 stock_code: symbol,
@@ -738,6 +764,7 @@
         predictionChart = null; // 重置图表数据
         professionalAnalysis = null; // 重置专业分析数据，避免上次技术分析结果残留到摘要卡
         showProfessionalAnalysis = false; // 重置专业分析显示
+        loadValuationContext(symbol);
 
         try {
             const request = {
@@ -805,7 +832,8 @@
         predictionChart = null;
         professionalAnalysis = null;
         showProfessionalAnalysis = false;
-        
+        loadValuationContext(symbol);
+
         try {
             const request = {
                 stock_code: symbol,
@@ -813,7 +841,7 @@
                 prediction_days: daysToPredict,
                 use_candle: true
             };
-            
+
             console.log("发送专业预测请求:", request);
             const result = await invoke<ProfessionalPredictionResponse>('predict_with_professional_strategy', { request });
             console.log("收到专业预测结果:", result);
@@ -856,6 +884,16 @@
         }
     }
     
+    // 拉取估值上下文（PE/PB + 最新基本面）。失败不影响预测主流程，仅置空面板。
+    async function loadValuationContext(symbol: string) {
+        try {
+            valuationContext = await invoke<ValuationContext>('get_valuation_context', { symbol });
+        } catch (error) {
+            console.warn("获取估值上下文失败:", error);
+            valuationContext = null;
+        }
+    }
+
     async function handleStockCodeChange() {
         selectedModelName = "";
         modelSelectionManuallySelected = false;
@@ -1822,6 +1860,30 @@
                 <div class="conclusion-note">⚠️ 单股方向预测存在不确定性，结论仅供参考，请结合下方逻辑与分析自行决策。</div>
             </div>
 
+            <!-- 估值参考：PE/PB + 最新基本面（仅描述估值/质量/成长，非收益预测） -->
+            {#if valuationContext}
+                <div class="valuation-card">
+                    <div class="valuation-head">
+                        <span class="valuation-title">📊 估值参考</span>
+                        <span class="valuation-sub">仅描述当前估值/质量/成长，非收益预测{valuationContext.report_date ? ` · 报告期 ${valuationContext.report_date}` : ''}</span>
+                    </div>
+                    {#if valuationContext.pe === null && valuationContext.pb === null && valuationContext.roe === null}
+                        <div class="valuation-empty">暂无估值/基本面数据，请点击上方「刷新」按钮更新该股全部数据。</div>
+                    {:else}
+                        <div class="valuation-grid">
+                            <div class="val-item"><span class="val-label">市盈率 PE</span><span class="val-value">{valuationContext.pe !== null ? valuationContext.pe.toFixed(2) : '—'}</span></div>
+                            <div class="val-item"><span class="val-label">市净率 PB</span><span class="val-value">{valuationContext.pb !== null ? valuationContext.pb.toFixed(2) : '—'}</span></div>
+                            <div class="val-item"><span class="val-label">流通市值</span><span class="val-value">{valuationContext.circulating_market_cap_yi !== null ? valuationContext.circulating_market_cap_yi.toFixed(0) + ' 亿' : '—'}</span></div>
+                            <div class="val-item"><span class="val-label">ROE</span><span class="val-value">{valuationContext.roe !== null ? valuationContext.roe.toFixed(2) + '%' : '—'}</span></div>
+                            <div class="val-item"><span class="val-label">每股收益 EPS</span><span class="val-value">{valuationContext.eps !== null ? valuationContext.eps.toFixed(2) : '—'}</span></div>
+                            <div class="val-item"><span class="val-label">每股净资产 BPS</span><span class="val-value">{valuationContext.bps !== null ? valuationContext.bps.toFixed(2) : '—'}</span></div>
+                            <div class="val-item"><span class="val-label">营收增长</span><span class="val-value {valuationContext.revenue_growth !== null ? (valuationContext.revenue_growth >= 0 ? 'price-up' : 'price-down') : ''}">{valuationContext.revenue_growth !== null ? (valuationContext.revenue_growth >= 0 ? '+' : '') + valuationContext.revenue_growth.toFixed(1) + '%' : '—'}</span></div>
+                            <div class="val-item"><span class="val-label">利润增长</span><span class="val-value {valuationContext.profit_growth !== null ? (valuationContext.profit_growth >= 0 ? 'price-up' : 'price-down') : ''}">{valuationContext.profit_growth !== null ? (valuationContext.profit_growth >= 0 ? '+' : '') + valuationContext.profit_growth.toFixed(1) + '%' : '—'}</span></div>
+                        </div>
+                    {/if}
+                </div>
+            {/if}
+
             <!-- 新增：专业分析结果展示 -->
             {#if showProfessionalAnalysis && professionalAnalysis}
                 <div class="professional-analysis">
@@ -2699,6 +2761,53 @@
     }
     .no-interval {
         color: #64748b;
+    }
+
+    /* 估值参考卡：PE/PB + 最新基本面（仅参考展示） */
+    .valuation-card {
+        margin: 0.75rem 0 1rem;
+        padding: 0.9rem 1rem;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 0.6rem;
+    }
+    .valuation-head {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.6rem;
+    }
+    .valuation-title {
+        font-size: 0.95rem;
+        font-weight: 700;
+    }
+    .valuation-sub {
+        font-size: 0.75rem;
+        color: #94a3b8;
+    }
+    .valuation-empty {
+        font-size: 0.85rem;
+        color: #94a3b8;
+    }
+    .valuation-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+        gap: 0.5rem 1rem;
+    }
+    .val-item {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.3;
+    }
+    .val-label {
+        font-size: 0.72rem;
+        color: #94a3b8;
+    }
+    .val-value {
+        font-size: 0.95rem;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
     }
     .pred-detail {
         display: flex;

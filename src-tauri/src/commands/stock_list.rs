@@ -22,12 +22,15 @@ pub async fn get_stock_list(
                 COALESCE(exchange, '') as exchange,
                 COALESCE(list_date, '') as list_date,
                 COALESCE(act_name, '') as act_name,
-                COALESCE(act_ent_type, '') as act_ent_type
+                COALESCE(act_ent_type, '') as act_ent_type,
+                COALESCE(category, '') as category
             FROM stock
-            WHERE ? = '' OR (symbol LIKE ? OR name LIKE ? OR industry LIKE ?)
+            WHERE ? = '' OR (symbol LIKE ? OR name LIKE ? OR industry LIKE ? OR category LIKE ?)
+            ORDER BY category, symbol
             "#,
     )
     .bind(search)
+    .bind(search_pattern.clone())
     .bind(search_pattern.clone())
     .bind(search_pattern.clone())
     .bind(search_pattern)

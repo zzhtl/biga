@@ -16,7 +16,7 @@ const FINANCIAL_API: &str = "https://api.zhituapi.com/hs/gs/cwzb";
 
 fn api_token() -> String {
     std::env::var("STOCK_API_TOKEN")
-        .unwrap_or_else(|_| "C5BFE522-34E7-4931-8216-CAD281648165".to_string())
+        .unwrap_or_else(|_| "8FBF3E47-9A7E-4405-856B-FDC0C5FD1B26".to_string())
 }
 
 /// 将各种格式的股票代码归一化为 zhitu 实时接口所需的纯 6 位数字代码。

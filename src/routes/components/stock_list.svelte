@@ -3,7 +3,7 @@
     import { onMount } from "svelte";
 
     // 定义类型
-    interface RealtimeData {
+    interface Stock {
         symbol: string;
         name: string;
         area: string;
@@ -13,24 +13,37 @@
         list_date: string;
         act_name: string;
         act_ent_type: string;
+        category: string;
     }
 
     // 状态管理
-    let stocks: RealtimeData[] = [];
+    let stocks: Stock[] = [];
     let loading = true;
     let error: string | null = null;
     let searchQuery = "";
     let searchDebounce: number | null = null;
+    let collapsed: Record<string, boolean> = {};
+
+    // 按板块分组（保持后端 ORDER BY category, symbol 的顺序）
+    $: groups = (() => {
+        const map = new Map<string, Stock[]>();
+        for (const s of stocks) {
+            const key = s.category && s.category.trim() ? s.category : "未分类";
+            if (!map.has(key)) map.set(key, []);
+            map.get(key)!.push(s);
+        }
+        return Array.from(map.entries());
+    })();
 
     // 数据获取函数
     async function fetchData(query?: string) {
         try {
             loading = true;
             error = null;
-            const response = await invoke<RealtimeData[]>("get_stock_list", {
+            const response = await invoke<Stock[]>("get_stock_list", {
                 search: query,
             });
-            stocks = response; // 保持引用（如果允许修改原始数据）
+            stocks = response;
         } catch (err) {
             console.error("获取数据失败:", err);
             error = "无法获取股票数据，请稍后重试";
@@ -39,7 +52,11 @@
         }
     }
 
-    // 初始化加载（传递默认排序参数）
+    function toggle(category: string) {
+        collapsed = { ...collapsed, [category]: !collapsed[category] };
+    }
+
+    // 初始化加载
     onMount(async () => {
         await fetchData("");
     });
@@ -48,7 +65,6 @@
     $: if (searchQuery) {
         if (searchDebounce) clearTimeout(searchDebounce);
         searchDebounce = setTimeout(() => {
-            // 传递当前参数
             fetchData(searchQuery);
         }, 300);
     } else {
@@ -62,45 +78,39 @@
     <div class="search-container">
         <input
             bind:value={searchQuery}
-            placeholder="搜索股票代码或名称或行业"
+            placeholder="搜索股票代码 / 名称 / 行业 / 板块"
             class="search-input"
         />
     </div>
 
     <!-- 数据展示 -->
-    <div class="data-table">
-        <div class="table-header">
-            <div>股票代码</div>
-            <div>股票简称</div>
-            <div>地域</div>
-            <div>所属行业</div>
-            <div>市场类型</div>
-            <div>交易所</div>
-            <div>上市日期</div>
-            <div>实控人名称</div>
-            <div>企业性质</div>
-        </div>
-
-        {#if loading}
-            <div class="loading">加载中...</div>
-        {:else if error}
-            <div class="error">{error}</div>
-        {:else}
-            {#each stocks as stock}
-                <div class="table-row">
-                    <div class="symbol">{stock.symbol}</div>
-                    <div class="name">{stock.name}</div>
-                    <div class="region">{stock.area}</div>
-                    <div class="industry">{stock.industry}</div>
-                    <div class="market">{stock.market}</div>
-                    <div class="ts_code">{stock.ts_code}</div>
-                    <div class="list_date">{stock.list_date}</div>
-                    <div class="act_name">{stock.act_name}</div>
-                    <div class="act_ent_type">{stock.act_ent_type}</div>
-                </div>
-            {/each}
-        {/if}
-    </div>
+    {#if loading}
+        <div class="loading">加载中...</div>
+    {:else if error}
+        <div class="error">{error}</div>
+    {:else if stocks.length === 0}
+        <div class="loading">暂无数据</div>
+    {:else}
+        {#each groups as [category, items] (category)}
+            <div class="sector">
+                <button class="sector-header" on:click={() => toggle(category)}>
+                    <span class="caret">{collapsed[category] ? "▶" : "▼"}</span>
+                    <span class="sector-name">{category}</span>
+                    <span class="sector-count">{items.length} 只</span>
+                </button>
+                {#if !collapsed[category]}
+                    <div class="grid">
+                        {#each items as stock (stock.symbol)}
+                            <div class="card">
+                                <span class="symbol">{stock.symbol}</span>
+                                <span class="name">{stock.name}</span>
+                            </div>
+                        {/each}
+                    </div>
+                {/if}
+            </div>
+        {/each}
+    {/if}
 </div>
 
 <style>
@@ -118,7 +128,7 @@
 
     .search-input {
         padding: 0.8rem 1.5rem;
-        width: 300px;
+        width: 320px;
         border: 2px solid #3b82f6;
         border-radius: 24px;
         background: #2d2d30;
@@ -137,42 +147,75 @@
         color: #666666;
     }
 
-    @media (max-width: 768px) {
-        .search-input {
-            width: 100%;
-            margin: 0 1rem;
-        }
-    }
-
-    /* 数据表格样式 */
-    .data-table {
-        margin-top: 2rem;
-        background: rgba(255, 255, 255, 0.05);
+    /* 板块分组 */
+    .sector {
+        margin-bottom: 1rem;
+        background: rgba(255, 255, 255, 0.04);
         border-radius: 0.5rem;
         overflow: hidden;
     }
 
-    .table-header,
-    .table-row {
-        display: grid;
-        grid-template-columns: repeat(9, 1fr);
-        gap: 1rem;
-        padding: 1rem;
-    }
-
-    .table-header {
-        background: rgba(255, 255, 255, 0.1);
-        font-weight: 600;
-    }
-
-    .table-row {
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    }
-
-    .table-row div {
-        padding: 0.15rem;
+    .sector-header {
+        width: 100%;
         display: flex;
         align-items: center;
+        gap: 0.75rem;
+        padding: 0.9rem 1.2rem;
+        background: rgba(99, 102, 241, 0.18);
+        border: none;
+        color: #f8fafc;
+        font-size: 1.05rem;
+        font-weight: 600;
+        cursor: pointer;
+        text-align: left;
+    }
+
+    .sector-header:hover {
+        background: rgba(99, 102, 241, 0.28);
+    }
+
+    .caret {
+        font-size: 0.8rem;
+        color: #a5b4fc;
+    }
+
+    .sector-name {
+        flex: 0 0 auto;
+    }
+
+    .sector-count {
+        margin-left: auto;
+        font-size: 0.85rem;
+        font-weight: 400;
+        color: #94a3b8;
+    }
+
+    .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+        gap: 0.5rem;
+        padding: 0.9rem 1.2rem 1.2rem;
+    }
+
+    .card {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+        padding: 0.55rem 0.75rem;
+        background: rgba(255, 255, 255, 0.05);
+        border-radius: 0.4rem;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .card .symbol {
+        font-family: monospace;
+        color: #38bdf8;
+        font-size: 0.9rem;
+    }
+
+    .card .name {
+        color: #e2e8f0;
+        font-size: 0.95rem;
     }
 
     /* 加载/错误状态样式 */
@@ -187,7 +230,10 @@
         color: #ef4444;
     }
 
-    /* 移动端适配 */
     @media (max-width: 768px) {
+        .search-input {
+            width: 100%;
+            margin: 0 1rem;
+        }
     }
 </style>
