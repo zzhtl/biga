@@ -172,7 +172,6 @@
         risk_reward_ratio: number;
         reasons: string[];
         confidence: number;
-        accuracy_rate?: number;
     }
     
     // 新增：支撑压力位接口
@@ -730,7 +729,7 @@
                 fill: true,
                 tension: 0.4
             }, {
-                label: '置信度 (%)',
+                label: '信号强度 (%)',
                 data: predictions.map((p: Prediction) => p.confidence * 100),
                 borderColor: 'rgb(34, 197, 94)',
                 backgroundColor: 'rgba(34, 197, 94, 0.1)',
@@ -920,6 +919,11 @@
     $: predAvgConfidence = predictions.length
         ? (predictions.reduce((s, p) => s + p.confidence, 0) / predictions.length) * 100
         : 0;
+    // 校准区间带（约80%覆盖）：末日预测的累计涨跌区间，作为诚实的主不确定性表达（方向不可测但波动可测）
+    $: predHorizonBand =
+        predictions.length && predictions[predictions.length - 1].interval
+            ? predictions[predictions.length - 1].interval
+            : null;
     $: conclusionDirection =
         predHorizonChange > 1.5 ? 'bull' : predHorizonChange < -1.5 ? 'bear' : 'neutral';
     $: conclusionLabel =
@@ -1176,7 +1180,7 @@
                                 <div class="model-details">
                                     <span>类型：{model.model_type}</span>
                                     <span>训练周期：{getModelTrainingDays(model)}日</span>
-                                    <span>测试集方向准确率：{(model.accuracy * 100).toFixed(2)}%</span>
+                                    <span>测试集方向准确率：{(model.accuracy * 100).toFixed(2)}%（朴素基准约50–56%，低于基准即无方向 edge）</span>
                                     {#if model.training_samples != null}
                                         <span>训练样本：{model.training_samples}</span>
                                     {/if}
@@ -1835,9 +1839,15 @@
                         <span class="ci-value">{conclusionAdvice}</span>
                     </div>
                     <div class="conclusion-item">
-                        <span class="ci-label">平均置信度</span>
-                        <span class="ci-value">{predAvgConfidence.toFixed(1)}%</span>
+                        <span class="ci-label">平均信号强度</span>
+                        <span class="ci-value" title="技术信号强度，非方向命中概率">{predAvgConfidence.toFixed(1)}%</span>
                     </div>
+                    {#if predHorizonBand}
+                        <div class="conclusion-item">
+                            <span class="ci-label">约{(predHorizonBand.confidence * 100).toFixed(0)}%概率区间</span>
+                            <span class="ci-value">{predHorizonBand.lower_change_percent > 0 ? '+' : ''}{predHorizonBand.lower_change_percent.toFixed(1)}% ~ {predHorizonBand.upper_change_percent > 0 ? '+' : ''}{predHorizonBand.upper_change_percent.toFixed(1)}%</span>
+                        </div>
+                    {/if}
                     {#if conclusionRisk}
                         <div class="conclusion-item">
                             <span class="ci-label">风险等级</span>
@@ -1857,7 +1867,7 @@
                         </div>
                     {/if}
                 </div>
-                <div class="conclusion-note">⚠️ 单股方向预测存在不确定性，结论仅供参考，请结合下方逻辑与分析自行决策。</div>
+                <div class="conclusion-note">⚠️ 单股方向不可预测：点预测仅为历史无条件漂移参考，"信号强度"非方向命中概率；真实不确定性以上方校准区间带为准。结论仅供参考，请自行决策。</div>
             </div>
 
             <!-- 估值参考：PE/PB + 最新基本面（仅描述估值/质量/成长，非收益预测） -->
@@ -1923,7 +1933,7 @@
                                                 <span class="value ratio">1:{buyPoint.risk_reward_ratio.toFixed(2)}</span>
                                             </div>
                                             <div class="signal-row">
-                                                <span class="label">置信度:</span>
+                                                <span class="label">信号强度:</span>
                                                 <span class="value confidence">{(buyPoint.confidence * 100).toFixed(0)}%</span>
                                             </div>
                                             <div class="signal-reasons">
@@ -1975,7 +1985,7 @@
                                                 </span>
                                             </div>
                                             <div class="signal-row">
-                                                <span class="label">置信度:</span>
+                                                <span class="label">信号强度:</span>
                                                 <span class="value confidence">{(sellPoint.confidence * 100).toFixed(0)}%</span>
                                             </div>
                                             <div class="signal-reasons">
@@ -2044,7 +2054,7 @@
                             </div>
                             <div class="legend-item">
                                 <div class="legend-color" style="background-color: rgb(34, 197, 94);"></div>
-                                <span>置信度</span>
+                                <span>信号强度</span>
                             </div>
                         </div>
                         
@@ -2216,7 +2226,7 @@
                                     <th>预测价格</th>
                                     <th title="约80%概率落在此区间，由近20日已实现波动率校准。方向不可测但波动可测——区间才是诚实的不确定性。">预测区间(80%)</th>
                                     <th>涨跌幅</th>
-                                    <th>置信度</th>
+                                    <th title="技术信号强度，非方向命中概率">信号强度</th>
                                     <th>交易信号</th>
                                     <th>详情</th>
                                 </tr>

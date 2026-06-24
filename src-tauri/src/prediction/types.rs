@@ -53,6 +53,7 @@ pub struct Prediction {
     pub target_date: String,
     pub predicted_price: f64,
     pub predicted_change_percent: f64,
+    /// 信号强度（0.25–0.92），非"方向正确概率"；方向不可预测，真实不确定性见 `interval`。
     pub confidence: f64,
     pub trading_signal: Option<String>,
     pub signal_strength: Option<f64>,
@@ -285,7 +286,6 @@ pub struct BuySellPoint {
     pub risk_reward_ratio: f64,
     pub reasons: Vec<String>,
     pub confidence: f64,
-    pub accuracy_rate: Option<f64>,
 }
 
 /// 专业预测结果

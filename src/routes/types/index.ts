@@ -249,7 +249,6 @@ export interface BuySellPoint {
   risk_reward_ratio: number;
   reasons: string[];
   confidence: number;
-  accuracy_rate?: number;
 }
 
 export interface SupportResistance {

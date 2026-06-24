@@ -167,21 +167,6 @@ pub fn predict_from_historical(
         last_date = target_date;
         last_price = predicted_price;
     }
-    if matches!(professional_result.strategy_used, market_regime::StrategyType::Reversal) {
-        apply_seven_day_reversal_strategy_bullish(
-            &mut predictions,
-            current_price,
-            prediction_days,
-            Some(&request.stock_code),
-        );
-    } else {
-        apply_seven_day_mid_magnitude_reversal(
-            &mut predictions,
-            current_price,
-            prediction_days,
-            Some(&request.stock_code),
-        );
-    }
 
     // 校准区间带：方向不可测但波动可测，给点预测附上诚实的不确定性区间。
     prediction_interval::attach_prediction_intervals(
@@ -208,80 +193,6 @@ fn signal_from_change_percent(change: f64) -> &'static str {
         "看跌"
     } else {
         "中性"
-    }
-}
-
-fn apply_seven_day_mid_magnitude_reversal(
-    predictions: &mut [Prediction],
-    base_price: f64,
-    prediction_days: usize,
-    stock_code: Option<&str>,
-) {
-    if prediction_days != 7 || base_price <= 0.0 || !base_price.is_finite() {
-        return;
-    }
-    let Some(final_prediction) = predictions.last() else {
-        return;
-    };
-    let final_change = (final_prediction.predicted_price - base_price) / base_price * 100.0;
-    if !(0.5..1.5).contains(&final_change.abs()) {
-        return;
-    }
-
-    let (limit_down, limit_up) = professional_engine::get_stock_price_limits(stock_code);
-    let reversed_direction = if final_change > 0.0 { "看跌" } else { "看涨" };
-    let reversal_factor = format!(
-        "真实数据校准: 7日中幅预测方向由{}反向为{}，已按7日中幅方向反向校准",
-        if final_change > 0.0 { "看涨" } else { "看跌" },
-        reversed_direction
-    );
-    let mut last_price = base_price;
-    for prediction in predictions {
-        let reversed_change = (-prediction.predicted_change_percent).clamp(limit_down, limit_up);
-        prediction.predicted_change_percent = reversed_change;
-        prediction.predicted_price = last_price * (1.0 + reversed_change / 100.0);
-        prediction.trading_signal = Some(signal_from_change_percent(reversed_change).to_string());
-        prediction
-            .key_factors
-            .get_or_insert_with(Vec::new)
-            .push(reversal_factor.clone());
-        let reason = prediction.prediction_reason.get_or_insert_with(String::new);
-        if !reason.is_empty() {
-            reason.push_str(" | ");
-        }
-        reason.push_str("校准:7日中幅方向反向");
-        last_price = prediction.predicted_price;
-    }
-}
-
-fn apply_seven_day_reversal_strategy_bullish(
-    predictions: &mut [Prediction],
-    base_price: f64,
-    prediction_days: usize,
-    stock_code: Option<&str>,
-) {
-    if prediction_days != 7 || base_price <= 0.0 || !base_price.is_finite() {
-        return;
-    }
-
-    let (_, limit_up) = professional_engine::get_stock_price_limits(stock_code);
-    let bullish_factor = "真实数据校准: 7日反转策略历史上涨基率偏高，已按7日反转策略偏多校准";
-    let mut last_price = base_price;
-    for prediction in predictions {
-        let bullish_change = prediction.predicted_change_percent.abs().max(0.01).min(limit_up);
-        prediction.predicted_change_percent = bullish_change;
-        prediction.predicted_price = last_price * (1.0 + bullish_change / 100.0);
-        prediction.trading_signal = Some(signal_from_change_percent(bullish_change).to_string());
-        prediction
-            .key_factors
-            .get_or_insert_with(Vec::new)
-            .push(bullish_factor.to_string());
-        let reason = prediction.prediction_reason.get_or_insert_with(String::new);
-        if !reason.is_empty() {
-            reason.push_str(" | ");
-        }
-        reason.push_str("校准:7日反转策略偏多");
-        last_price = prediction.predicted_price;
     }
 }
 
@@ -440,15 +351,6 @@ pub struct EngineCalibration {
     pub used_empirical_baseline: bool,
 }
 
-#[derive(Debug, Clone)]
-struct FeatureCalibrationSignal {
-    predicts_up: bool,
-    name: &'static str,
-    value: f64,
-    threshold: f64,
-    unit: &'static str,
-}
-
 /// 用该股票最近真实历史 walk-forward 表现校准规则引擎输出。
 pub fn calibrate_professional_result(
     historical: &[HistoricalData],
@@ -457,9 +359,6 @@ pub fn calibrate_professional_result(
     stock_code: Option<&str>,
 ) -> Option<EngineCalibration> {
     const MIN_EMPIRICAL_SAMPLES: usize = 20;
-    const SHORT_HORIZON_EMPIRICAL_UP_RATE: f64 = 0.55;
-    const SHORT_HORIZON_EMPIRICAL_DOWN_RATE: f64 = 0.45;
-    const LONG_HORIZON_EMPIRICAL_UP_RATE: f64 = 0.55;
 
     let horizon = horizon.max(1);
     if historical.len() <= horizon + MIN_EMPIRICAL_SAMPLES {
@@ -472,7 +371,6 @@ pub fn calibrate_professional_result(
     let mut empirical_samples = 0usize;
     let mut empirical_up = 0usize;
     let mut empirical_sum = 0.0;
-    let mut empirical_abs_sum = 0.0;
     for i in empirical_start..historical.len().saturating_sub(horizon) {
         let base = closes[i];
         let future = closes[i + horizon];
@@ -486,7 +384,6 @@ pub fn calibrate_professional_result(
         empirical_samples += 1;
         empirical_up += usize::from(actual > 0.0);
         empirical_sum += actual;
-        empirical_abs_sum += actual.abs();
     }
 
     if empirical_samples < MIN_EMPIRICAL_SAMPLES {
@@ -495,109 +392,13 @@ pub fn calibrate_professional_result(
 
     let actual_up_ratio = empirical_up as f64 / empirical_samples as f64;
     let average_actual_change = empirical_sum / empirical_samples as f64;
-    let average_abs_change = empirical_abs_sum / empirical_samples as f64;
     let original_change = result.expected_change;
-    let up_threshold = SHORT_HORIZON_EMPIRICAL_UP_RATE;
-    let down_threshold = SHORT_HORIZON_EMPIRICAL_DOWN_RATE;
-    let long_horizon_threshold = LONG_HORIZON_EMPIRICAL_UP_RATE;
-    let feature_signal = empirical_feature_signal(&closes, horizon);
-    let mut empirical_direction = empirical_direction_from_rate(
-        actual_up_ratio,
-        horizon,
-        up_threshold,
-        down_threshold,
-        long_horizon_threshold,
-    );
-    let uses_short_bullish_reversal = horizon > 1
-        && horizon <= 5
-        && feature_signal.is_none()
-        && empirical_direction == Some(true);
-    if uses_short_bullish_reversal {
-        empirical_direction = Some(false);
-    }
-    let uses_seven_day_bullish_reversal = horizon == 7
-        && feature_signal.is_none()
-        && empirical_direction == Some(true);
-    if uses_seven_day_bullish_reversal {
-        empirical_direction = Some(false);
-    }
-    let weak_one_day_direction = if horizon == 1
-        && feature_signal.is_none()
-        && empirical_direction.is_none()
-    {
-        weak_direction_from_neutral_rate(actual_up_ratio)
-    } else {
-        None
-    };
-    let weak_five_day_direction = if horizon == 5
-        && feature_signal.is_none()
-        && empirical_direction.is_none()
-    {
-        weak_direction_from_neutral_rate(actual_up_ratio)
-    } else {
-        None
-    };
-    let weak_long_direction = if horizon > 5 && empirical_direction.is_none() {
-        weak_direction_from_neutral_rate(actual_up_ratio)
-    } else {
-        None
-    };
-    let Some(predicts_up) = feature_signal
-        .as_ref()
-        .map(|signal| signal.predicts_up)
-        .or(empirical_direction)
-        .or(weak_one_day_direction)
-        .or(weak_five_day_direction)
-        .or(weak_long_direction)
-    else {
-        return Some(EngineCalibration {
-            samples: empirical_samples,
-            chosen_direction_rate: actual_up_ratio.max(1.0 - actual_up_ratio),
-            actual_up_ratio,
-            average_actual_change,
-            inverted: false,
-            used_empirical_baseline: false,
-        });
-    };
-    let uses_weak_one_day_direction = weak_one_day_direction.is_some()
-        && feature_signal.is_none()
-        && empirical_direction.is_none();
-    let uses_weak_five_day_direction = weak_five_day_direction.is_some()
-        && feature_signal.is_none()
-        && empirical_direction.is_none();
-    let uses_weak_long_direction = weak_long_direction.is_some()
-        && feature_signal.is_none()
-        && empirical_direction.is_none();
-    if should_skip_bullish_calibration(
-        horizon,
-        predicts_up,
-        feature_signal.is_some(),
-        uses_weak_long_direction,
-    ) {
-        return Some(EngineCalibration {
-            samples: empirical_samples,
-            chosen_direction_rate: actual_up_ratio,
-            actual_up_ratio,
-            average_actual_change,
-            inverted: false,
-            used_empirical_baseline: false,
-        });
-    }
-    let chosen_probability = if predicts_up {
-        actual_up_ratio
-    } else {
-        1.0 - actual_up_ratio
-    };
-    let majority_sign = if predicts_up { 1.0 } else { -1.0 };
-    let inverted = original_change.signum() != majority_sign;
-    let baseline_magnitude = average_actual_change
-        .abs()
-        .max(average_abs_change * 0.35)
-        .clamp(0.2, 2.5);
-    let mut calibrated_change = majority_sign * baseline_magnitude;
 
+    // 诚实校准：单股次日方向无 alpha（见 .claude/CLAUDE.md），不下方向赌注、不含任何评测拟合阈值。
+    // 点预测锚定到历史无条件漂移（无技能最优估计，方向自然贴近中性），真实不确定性交由
+    // attach_prediction_intervals 的校准区间带表达。
     let (limit_down, limit_up) = professional_engine::get_stock_price_limits(stock_code);
-    calibrated_change = calibrated_change.clamp(limit_down, limit_up);
+    let calibrated_change = average_actual_change.clamp(limit_down, limit_up);
 
     if (calibrated_change - original_change).abs() >= 0.05 {
         let lower_width = (original_change - result.prediction_range.0).abs().max(0.5);
@@ -608,276 +409,20 @@ pub fn calibrate_professional_result(
             (calibrated_change + upper_width).clamp(limit_down, limit_up),
         );
         result.direction = direction_from_change(calibrated_change);
-        result.confidence = if inverted {
-            (result.confidence * 0.85).clamp(0.25, 0.85)
-        } else if chosen_probability >= 0.55 {
-            (result.confidence * 1.05).clamp(0.25, 0.92)
-        } else {
-            (result.confidence * 0.95).clamp(0.25, 0.90)
-        };
-        let calibration_basis = if feature_signal.is_some() {
-            "已按超买超卖均值回归特征校准"
-        } else if uses_weak_one_day_direction {
-            "已按1日弱基率校准"
-        } else if uses_short_bullish_reversal {
-            "已按短周期高基率反向校准"
-        } else if uses_seven_day_bullish_reversal {
-            "已按7日高基率反向校准"
-        } else if uses_weak_five_day_direction {
-            "已按5日弱基率校准"
-        } else if uses_weak_long_direction {
-            "已按长周期弱基率校准"
-        } else {
-            "已按真实基率校准"
-        };
-        let threshold_summary = if feature_signal.is_some() {
-            format!("特征方向{}", if predicts_up { "偏多" } else { "偏空" })
-        } else if uses_weak_one_day_direction {
-            format!(
-                "上涨基率{}1日中性线50%",
-                if predicts_up { "略高于" } else { "略低于" }
-            )
-        } else if uses_short_bullish_reversal {
-            format!("上涨基率高于短周期过热阈值{:.0}%", up_threshold * 100.0)
-        } else if uses_seven_day_bullish_reversal {
-            format!(
-                "上涨基率高于7日过热阈值{:.0}%",
-                long_horizon_threshold * 100.0
-            )
-        } else if uses_weak_five_day_direction {
-            format!(
-                "上涨基率{}5日中性线50%",
-                if predicts_up { "略高于" } else { "略低于" }
-            )
-        } else if uses_weak_long_direction {
-            format!(
-                "上涨基率{}长周期中性线50%",
-                if predicts_up { "略高于" } else { "略低于" }
-            )
-        } else if predicts_up {
-            format!(
-                "上涨基率达到{}阈值{:.0}%",
-                if horizon <= 5 { "短周期基率" } else { "长周期基率" },
-                if horizon <= 5 {
-                    up_threshold * 100.0
-                } else {
-                    long_horizon_threshold * 100.0
-                }
-            )
-        } else if horizon <= 5 {
-            if actual_up_ratio <= down_threshold {
-                format!(
-                    "上涨基率低于短周期基率阈值{:.0}%",
-                    down_threshold * 100.0
-                )
-            } else {
-                format!(
-                    "上涨基率未达短周期基率阈值{:.0}%",
-                    up_threshold * 100.0
-                )
-            }
-        } else {
-            format!(
-                "上涨基率低于长周期基率阈值{:.0}%",
-                long_horizon_threshold * 100.0
-            )
-        };
         result.key_factors.push(format!(
-            "真实数据校准: 近{}次历史结果显示上涨基率{:.0}%，{}，{}",
-            empirical_samples,
-            actual_up_ratio * 100.0,
-            threshold_summary,
-            calibration_basis,
+            "诚实校准: 近{}次历史无条件漂移{:+.2}%（方向不可预测，点预测取无技能锚，请以区间带为准）",
+            empirical_samples, average_actual_change,
         ));
-        if let Some(signal) = &feature_signal {
-            result.key_factors.push(format!(
-                "均值回归特征校准: {}{:.1}{}，阈值{:.1}{}，按3000日真实回测特征{}",
-                signal.name,
-                signal.value,
-                signal.unit,
-                signal.threshold,
-                signal.unit,
-                if signal.predicts_up { "偏多" } else { "偏空" }
-            ));
-        }
-        if original_change.signum() != calibrated_change.signum() && calibrated_change.abs() >= 0.2 {
-            result.suggested_action = format!(
-                "近期真实数据校准后{}，原始技术信号仅作参考，建议控制仓位",
-                if calibrated_change > 0.0 { "偏多" } else { "偏空" }
-            );
-        }
     }
 
     Some(EngineCalibration {
         samples: empirical_samples,
-        chosen_direction_rate: chosen_probability,
+        chosen_direction_rate: actual_up_ratio.max(1.0 - actual_up_ratio),
         actual_up_ratio,
         average_actual_change,
-        inverted,
+        inverted: false,
         used_empirical_baseline: true,
     })
-}
-
-fn weak_direction_from_neutral_rate(actual_up_ratio: f64) -> Option<bool> {
-    const NEUTRAL_UP_RATE: f64 = 0.5;
-    const EPS: f64 = 1e-12;
-
-    if actual_up_ratio > NEUTRAL_UP_RATE + EPS {
-        Some(true)
-    } else if actual_up_ratio < NEUTRAL_UP_RATE - EPS {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn should_skip_bullish_calibration(
-    horizon: usize,
-    predicts_up: bool,
-    has_feature_signal: bool,
-    uses_weak_long_direction: bool,
-) -> bool {
-    if !predicts_up {
-        return false;
-    }
-
-    if horizon <= 1 {
-        // 1日纯经验上涨基率偏多缺少稳定 edge；MA5 超跌特征在 walk-forward 中有正贡献。
-        return !has_feature_signal;
-    }
-
-    // 2-9日只跳过偏多强真实基率校准；5/7日反向规则、弱基率兜底与RSI等明确特征信号仍保留。
-    horizon < 10 && !has_feature_signal && !uses_weak_long_direction
-}
-
-fn empirical_feature_signal(closes: &[f64], horizon: usize) -> Option<FeatureCalibrationSignal> {
-    if horizon <= 1 {
-        const MA5_OVERSOLD_GAP: f64 = -1.13;
-        const MA5_OVERBOUGHT_GAP: f64 = 1.13;
-
-        let ma5_gap = moving_average_gap(closes, 5)?;
-        if ma5_gap <= MA5_OVERSOLD_GAP {
-            return Some(FeatureCalibrationSignal {
-                predicts_up: true,
-                name: "5日均线偏离",
-                value: ma5_gap,
-                threshold: MA5_OVERSOLD_GAP,
-                unit: "%",
-            });
-        }
-        if ma5_gap >= MA5_OVERBOUGHT_GAP {
-            return Some(FeatureCalibrationSignal {
-                predicts_up: false,
-                name: "5日均线偏离",
-                value: ma5_gap,
-                threshold: MA5_OVERBOUGHT_GAP,
-                unit: "%",
-            });
-        }
-        return None;
-    }
-
-    if horizon <= 5 {
-        const RSI_OVERSOLD: f64 = 33.9;
-        const RSI_OVERBOUGHT: f64 = 66.1;
-
-        let rsi14 = simple_rsi(closes, 14)?;
-        if rsi14 <= RSI_OVERSOLD {
-            return Some(FeatureCalibrationSignal {
-                predicts_up: true,
-                name: "RSI14",
-                value: rsi14,
-                threshold: RSI_OVERSOLD,
-                unit: "",
-            });
-        }
-        if rsi14 >= RSI_OVERBOUGHT {
-            return Some(FeatureCalibrationSignal {
-                predicts_up: false,
-                name: "RSI14",
-                value: rsi14,
-                threshold: RSI_OVERBOUGHT,
-                unit: "",
-            });
-        }
-        return None;
-    }
-
-    None
-}
-
-fn empirical_direction_from_rate(
-    actual_up_ratio: f64,
-    horizon: usize,
-    up_threshold: f64,
-    down_threshold: f64,
-    long_horizon_up_threshold: f64,
-) -> Option<bool> {
-    const EPS: f64 = 1e-12;
-
-    if horizon <= 5 {
-        if actual_up_ratio + EPS >= up_threshold {
-            Some(true)
-        } else if actual_up_ratio <= down_threshold + EPS {
-            Some(false)
-        } else {
-            None
-        }
-    } else if actual_up_ratio + EPS >= long_horizon_up_threshold {
-        Some(true)
-    } else if actual_up_ratio <= 1.0 - long_horizon_up_threshold + EPS {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn moving_average_gap(closes: &[f64], window: usize) -> Option<f64> {
-    if closes.len() < window || window == 0 {
-        return None;
-    }
-
-    let start = closes.len() - window;
-    let average = closes[start..].iter().sum::<f64>() / window as f64;
-    let latest = *closes.last()?;
-    if average <= 0.0 || !average.is_finite() || !latest.is_finite() {
-        return None;
-    }
-
-    Some((latest - average) / average * 100.0)
-}
-
-fn simple_rsi(closes: &[f64], period: usize) -> Option<f64> {
-    if closes.len() <= period || period == 0 {
-        return None;
-    }
-
-    let start = closes.len() - period;
-    let mut gains = 0.0;
-    let mut losses = 0.0;
-    for i in start..closes.len() {
-        let previous = closes[i - 1];
-        let current = closes[i];
-        if previous <= 0.0 || !previous.is_finite() || !current.is_finite() {
-            return None;
-        }
-        let change = current - previous;
-        if change > 0.0 {
-            gains += change;
-        } else {
-            losses -= change;
-        }
-    }
-
-    if gains + losses == 0.0 {
-        return Some(50.0);
-    }
-    if losses == 0.0 {
-        return Some(100.0);
-    }
-
-    let rs = gains / losses;
-    Some(100.0 - 100.0 / (1.0 + rs))
 }
 
 fn direction_from_change(change: f64) -> professional_engine::PredictionDirection {
@@ -1322,7 +867,8 @@ pub fn predict_with_model_from_historical(
 
     let last_data = historical.last().unwrap();
     let current_price = last_data.close;
-    let confidence = model.accuracy.clamp(0.3, 0.92);
+    // 诚实置信度：直接用模型测试集方向准确率，不设 0.3 地板（低于基准的无效模型不该被抬成"≥30% 可信"）。
+    let confidence = model.accuracy.clamp(0.0, 0.92);
     let (limit_down, limit_up) =
         professional_engine::get_stock_price_limits(Some(&request.stock_code));
 
@@ -1540,64 +1086,6 @@ mod tests {
     };
     use chrono::{Duration, NaiveDate};
 
-    fn history_with_late_selloff() -> Vec<HistoricalData> {
-        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        let mut close = 100.0;
-        (0..80)
-            .map(|i| {
-                if i >= 77 {
-                    close *= 0.98;
-                } else {
-                    close *= 0.999;
-                }
-                HistoricalData {
-                    symbol: "test".to_string(),
-                    date: start + Duration::days(i as i64),
-                    open: close,
-                    close,
-                    high: close + 0.5,
-                    low: close - 0.5,
-                    volume: 1000,
-                    amount: close * 1000.0,
-                    amplitude: 1.0,
-                    turnover_rate: 1.0,
-                    volume_ratio: 1.0,
-                    change_percent: -0.1,
-                    change: -0.1,
-                }
-            })
-            .collect()
-    }
-
-    fn history_with_late_rally() -> Vec<HistoricalData> {
-        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        let mut close = 100.0;
-        (0..80)
-            .map(|i| {
-                if i >= 77 {
-                    close *= 1.02;
-                } else {
-                    close *= 1.001;
-                }
-                HistoricalData {
-                    symbol: "test".to_string(),
-                    date: start + Duration::days(i as i64),
-                    open: close,
-                    close,
-                    high: close + 0.5,
-                    low: close - 0.5,
-                    volume: 1000,
-                    amount: close * 1000.0,
-                    amplitude: 1.0,
-                    turnover_rate: 1.0,
-                    volume_ratio: 1.0,
-                    change_percent: 0.1,
-                    change: 0.1,
-                }
-            })
-            .collect()
-    }
-
     fn history_with_mild_uptrend() -> Vec<HistoricalData> {
         let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let mut close = 100.0;
@@ -1623,167 +1111,12 @@ mod tests {
             .collect()
     }
 
-    fn history_with_bullish_five_day_rate_neutral_rsi() -> Vec<HistoricalData> {
-        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        let mut close = 100.0;
-        (0..100)
-            .map(|i| {
-                if i > 0 {
-                    if i >= 86 {
-                        close *= if i % 2 == 0 { 1.002 } else { 0.998 };
-                    } else {
-                        close *= 1.001;
-                    }
-                }
-                HistoricalData {
-                    symbol: "test".to_string(),
-                    date: start + Duration::days(i as i64),
-                    open: close,
-                    close,
-                    high: close + 0.5,
-                    low: close - 0.5,
-                    volume: 1000,
-                    amount: close * 1000.0,
-                    amplitude: 1.0,
-                    turnover_rate: 1.0,
-                    volume_ratio: 1.0,
-                    change_percent: 0.1,
-                    change: 0.1,
-                }
-            })
-            .collect()
-    }
-
-    fn history_with_weak_bearish_five_day_rate() -> Vec<HistoricalData> {
-        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        (0..100)
-            .map(|i| {
-                let close = 100.0 + (i as f64 * 0.5).sin() * 0.5;
-                HistoricalData {
-                    symbol: "test".to_string(),
-                    date: start + Duration::days(i as i64),
-                    open: close,
-                    close,
-                    high: close + 0.5,
-                    low: close - 0.5,
-                    volume: 1000,
-                    amount: close * 1000.0,
-                    amplitude: 1.0,
-                    turnover_rate: 1.0,
-                    volume_ratio: 1.0,
-                    change_percent: -0.1,
-                    change: -0.1,
-                }
-            })
-            .collect()
-    }
-
     fn history_with_mild_downtrend() -> Vec<HistoricalData> {
         let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let mut close = 100.0;
         (0..80)
             .map(|i| {
                 close *= 0.999;
-                HistoricalData {
-                    symbol: "test".to_string(),
-                    date: start + Duration::days(i as i64),
-                    open: close,
-                    close,
-                    high: close + 0.5,
-                    low: close - 0.5,
-                    volume: 1000,
-                    amount: close * 1000.0,
-                    amplitude: 1.0,
-                    turnover_rate: 1.0,
-                    volume_ratio: 1.0,
-                    change_percent: -0.1,
-                    change: -0.1,
-                }
-            })
-            .collect()
-    }
-
-    fn history_with_weak_long_bullish_rate() -> Vec<HistoricalData> {
-        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        (0..80)
-            .map(|i| {
-                let close = 100.0 + 0.05 * i as f64 + (i as f64 * 0.4).sin();
-                HistoricalData {
-                    symbol: "test".to_string(),
-                    date: start + Duration::days(i as i64),
-                    open: close,
-                    close,
-                    high: close + 0.5,
-                    low: close - 0.5,
-                    volume: 1000,
-                    amount: close * 1000.0,
-                    amplitude: 1.0,
-                    turnover_rate: 1.0,
-                    volume_ratio: 1.0,
-                    change_percent: 0.1,
-                    change: 0.1,
-                }
-            })
-            .collect()
-    }
-
-    fn history_with_neutral_long_rate() -> Vec<HistoricalData> {
-        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        (0..70)
-            .map(|i| {
-                let close = 100.0 + (i % 20) as f64;
-                HistoricalData {
-                    symbol: "test".to_string(),
-                    date: start + Duration::days(i as i64),
-                    open: close,
-                    close,
-                    high: close + 0.5,
-                    low: close - 0.5,
-                    volume: 1000,
-                    amount: close * 1000.0,
-                    amplitude: 1.0,
-                    turnover_rate: 1.0,
-                    volume_ratio: 1.0,
-                    change_percent: 0.1,
-                    change: 0.1,
-                }
-            })
-            .collect()
-    }
-
-    fn history_with_mixed_one_day_rate() -> Vec<HistoricalData> {
-        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        let mut close = 100.0;
-        (0..121)
-            .map(|i| {
-                if i > 0 {
-                    let phase = (i - 1) % 11;
-                    close *= if phase % 2 == 0 { 1.001 } else { 0.999 };
-                }
-                HistoricalData {
-                    symbol: "test".to_string(),
-                    date: start + Duration::days(i as i64),
-                    open: close,
-                    close,
-                    high: close + 0.5,
-                    low: close - 0.5,
-                    volume: 1000,
-                    amount: close * 1000.0,
-                    amplitude: 1.0,
-                    turnover_rate: 1.0,
-                    volume_ratio: 1.0,
-                    change_percent: 0.1,
-                    change: 0.1,
-                }
-            })
-            .collect()
-    }
-
-    fn history_with_weak_bearish_one_day_rate() -> Vec<HistoricalData> {
-        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        (0..121)
-            .map(|i| {
-                let close = 100.0 + (i as f64 * 0.2).sin() * 0.1;
                 HistoricalData {
                     symbol: "test".to_string(),
                     date: start + Duration::days(i as i64),
@@ -1832,398 +1165,61 @@ mod tests {
         }
     }
 
-    fn synthetic_predictions(base_price: f64, daily_change: f64, days: usize) -> Vec<Prediction> {
-        let mut last_price = base_price;
-        (1..=days)
-            .map(|day| {
-                let predicted_price = last_price * (1.0 + daily_change / 100.0);
-                last_price = predicted_price;
-                Prediction {
-                    target_date: format!("2026-01-{day:02}"),
-                    predicted_price,
-                    predicted_change_percent: daily_change,
-                    confidence: 0.3,
-                    trading_signal: Some(signal_from_change_percent(daily_change).to_string()),
-                    signal_strength: Some(0.3),
-                    technical_indicators: None,
-                    prediction_reason: Some("test".to_string()),
-                    key_factors: Some(Vec::new()),
-                    interval: None,
-                }
-            })
-            .collect()
-    }
-
     #[test]
-    fn test_seven_day_mid_magnitude_reversal_flips_prediction_series() {
-        let base_price = 100.0;
-        let mut predictions = synthetic_predictions(base_price, 0.1, 7);
-
-        apply_seven_day_mid_magnitude_reversal(&mut predictions, base_price, 7, Some("600000"));
-
-        assert!(predictions.last().unwrap().predicted_price < base_price);
-        assert!(predictions
-            .iter()
-            .all(|prediction| prediction.predicted_change_percent < 0.0));
-        assert!(predictions
-            .iter()
-            .all(|prediction| prediction.trading_signal.as_deref() == Some("看跌")));
-        assert!(predictions
-            .last()
-            .unwrap()
-            .key_factors
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|factor| factor.contains("7日中幅方向反向校准")));
-        assert!(predictions
-            .last()
-            .unwrap()
-            .prediction_reason
-            .as_ref()
-            .unwrap()
-            .contains("7日中幅方向反向"));
-    }
-
-    #[test]
-    fn test_seven_day_mid_magnitude_reversal_ignores_other_horizons() {
-        let base_price = 100.0;
-        let mut predictions = synthetic_predictions(base_price, 0.1, 7);
-        let original_final_price = predictions.last().unwrap().predicted_price;
-
-        apply_seven_day_mid_magnitude_reversal(&mut predictions, base_price, 5, Some("600000"));
-
-        assert_eq!(predictions.last().unwrap().predicted_price, original_final_price);
-        assert!(predictions
-            .iter()
-            .all(|prediction| prediction.predicted_change_percent > 0.0));
-    }
-
-    #[test]
-    fn test_seven_day_mid_magnitude_reversal_ignores_small_magnitude() {
-        let base_price = 100.0;
-        let mut predictions = synthetic_predictions(base_price, 0.03, 7);
-        let original_final_price = predictions.last().unwrap().predicted_price;
-
-        apply_seven_day_mid_magnitude_reversal(&mut predictions, base_price, 7, Some("600000"));
-
-        assert_eq!(predictions.last().unwrap().predicted_price, original_final_price);
-        assert!(predictions
-            .iter()
-            .all(|prediction| prediction.predicted_change_percent > 0.0));
-    }
-
-    #[test]
-    fn test_seven_day_reversal_strategy_bullish_flips_prediction_series() {
-        let base_price = 100.0;
-        let mut predictions = synthetic_predictions(base_price, -0.1, 7);
-
-        apply_seven_day_reversal_strategy_bullish(&mut predictions, base_price, 7, Some("600000"));
-
-        assert!(predictions.last().unwrap().predicted_price > base_price);
-        assert!(predictions
-            .iter()
-            .all(|prediction| prediction.predicted_change_percent > 0.0));
-        assert!(predictions
-            .iter()
-            .all(|prediction| prediction.trading_signal.as_deref() == Some("看涨")));
-        assert!(predictions
-            .last()
-            .unwrap()
-            .key_factors
-            .as_ref()
-            .unwrap()
-            .iter()
-            .any(|factor| factor.contains("7日反转策略偏多校准")));
-        assert!(predictions
-            .last()
-            .unwrap()
-            .prediction_reason
-            .as_ref()
-            .unwrap()
-            .contains("7日反转策略偏多"));
-    }
-
-    #[test]
-    fn test_seven_day_reversal_strategy_bullish_ignores_other_horizons() {
-        let base_price = 100.0;
-        let mut predictions = synthetic_predictions(base_price, -0.1, 7);
-        let original_final_price = predictions.last().unwrap().predicted_price;
-
-        apply_seven_day_reversal_strategy_bullish(&mut predictions, base_price, 5, Some("600000"));
-
-        assert_eq!(predictions.last().unwrap().predicted_price, original_final_price);
-        assert!(predictions
-            .iter()
-            .all(|prediction| prediction.predicted_change_percent < 0.0));
-    }
-
-    #[test]
-    fn test_one_day_calibration_uses_bullish_mean_reversion_signal() {
-        let historical = history_with_late_selloff();
-        let mut result = bearish_result();
-
-        let calibration =
-            calibrate_professional_result(&historical, &mut result, 1, Some("600000")).unwrap();
-
-        assert!(calibration.used_empirical_baseline);
-        assert!(result.expected_change > 0.0);
-        assert!(result
-            .key_factors
-            .iter()
-            .any(|factor| factor.contains("均值回归特征校准")));
-    }
-
-    #[test]
-    fn test_one_day_calibration_keeps_bearish_mean_reversion_signal() {
-        let historical = history_with_late_rally();
-        let mut result = bearish_result();
-        result.direction = PredictionDirection::Bullish;
-        result.expected_change = 0.8;
-        result.prediction_range = (0.2, 1.5);
-
-        calibrate_professional_result(&historical, &mut result, 1, Some("600000"));
-
-        assert!(result.expected_change < 0.0);
-        assert!(result
-            .key_factors
-            .iter()
-            .any(|factor| factor.contains("均值回归特征校准")));
-    }
-
-    #[test]
-    fn test_calibration_uses_rsi_reversion_for_five_day() {
-        let historical = history_with_late_selloff();
-        let mut result = bearish_result();
-
-        calibrate_professional_result(&historical, &mut result, 5, Some("600000"));
-
-        assert!(result.expected_change > 0.0);
-        assert!(result
-            .key_factors
-            .iter()
-            .any(|factor| factor.contains("RSI14")));
-    }
-
-    #[test]
-    fn test_one_day_calibration_skips_bullish_empirical_rate() {
+    fn test_calibration_does_not_flip_uptrend_drift() {
+        // 诚实校准：上行漂移历史不再被强制翻转为看跌（旧 7日/短周期反向规则已移除）。
         let historical = history_with_mild_uptrend();
         let mut result = bearish_result();
-        let original_change = result.expected_change;
-
-        calibrate_professional_result(&historical, &mut result, 1, Some("600000"));
-
-        assert_eq!(result.expected_change, original_change);
-        assert!(result
-            .key_factors
-            .iter()
-            .all(|factor| !factor.contains("已按真实基率校准")));
-    }
-
-    #[test]
-    fn test_one_day_calibration_uses_weak_bearish_rate() {
-        let historical = history_with_weak_bearish_one_day_rate();
-        let mut result = bearish_result();
-        result.direction = PredictionDirection::Bullish;
-        result.expected_change = 0.8;
-        result.prediction_range = (0.2, 1.5);
-
-        let calibration =
-            calibrate_professional_result(&historical, &mut result, 1, Some("600000")).unwrap();
-
-        assert!(calibration.used_empirical_baseline);
-        assert!(calibration.actual_up_ratio > 0.45);
-        assert!(calibration.actual_up_ratio < 0.5);
-        assert!(result.expected_change < 0.0);
-        assert!(result
-            .key_factors
-            .iter()
-            .any(|factor| factor.contains("1日弱基率")));
-    }
-
-    #[test]
-    fn test_five_day_calibration_uses_bullish_empirical_reversal() {
-        let historical = history_with_bullish_five_day_rate_neutral_rsi();
-        let mut result = bearish_result();
-
-        let calibration =
-            calibrate_professional_result(&historical, &mut result, 5, Some("600000")).unwrap();
-
-        assert!(calibration.used_empirical_baseline);
-        assert!(result.expected_change < 0.0);
-        assert!(result
-            .key_factors
-            .iter()
-            .any(|factor| factor.contains("短周期高基率反向校准")));
-    }
-
-    #[test]
-    fn test_five_day_calibration_uses_weak_bearish_rate() {
-        let historical = history_with_weak_bearish_five_day_rate();
-        let mut result = bearish_result();
-        result.direction = PredictionDirection::Bullish;
-        result.expected_change = 0.8;
-        result.prediction_range = (0.2, 1.5);
-
-        let calibration =
-            calibrate_professional_result(&historical, &mut result, 5, Some("600000")).unwrap();
-
-        assert!(calibration.used_empirical_baseline);
-        assert!(calibration.actual_up_ratio > 0.45);
-        assert!(calibration.actual_up_ratio < 0.5);
-        assert!(result.expected_change < 0.0);
-        assert!(result
-            .key_factors
-            .iter()
-            .any(|factor| factor.contains("5日弱基率")));
-    }
-
-    #[test]
-    fn test_weak_direction_from_neutral_rate_ignores_exact_neutral() {
-        assert_eq!(weak_direction_from_neutral_rate(0.5), None);
-        assert_eq!(weak_direction_from_neutral_rate(0.5001), Some(true));
-        assert_eq!(weak_direction_from_neutral_rate(0.4999), Some(false));
-    }
-
-    #[test]
-    fn test_seven_day_calibration_uses_bullish_empirical_reversal() {
-        let historical = history_with_mild_uptrend();
-        let mut result = bearish_result();
-        result.direction = PredictionDirection::Bullish;
-        result.expected_change = 0.8;
-        result.prediction_range = (0.2, 1.5);
 
         let calibration =
             calibrate_professional_result(&historical, &mut result, 7, Some("600000")).unwrap();
 
         assert!(calibration.used_empirical_baseline);
-        assert!(result.expected_change < 0.0);
-        assert!(result
-            .key_factors
-            .iter()
-            .any(|factor| factor.contains("7日高基率反向校准")));
+        assert!(!calibration.inverted);
+        assert!(calibration.average_actual_change > 0.0);
+        // 点预测跟随正漂移，不被翻转为负。
+        assert!(result.expected_change > 0.0);
     }
 
     #[test]
-    fn test_ten_day_calibration_uses_bullish_empirical_rate() {
+    fn test_calibration_anchors_point_prediction_to_unconditional_drift() {
+        // 点预测锚定到历史无条件漂移（无技能最优），等于 average_actual_change（涨跌停内）。
         let historical = history_with_mild_uptrend();
         let mut result = bearish_result();
 
         let calibration =
-            calibrate_professional_result(&historical, &mut result, 10, Some("600000")).unwrap();
+            calibrate_professional_result(&historical, &mut result, 5, Some("600000")).unwrap();
 
-        assert!(calibration.used_empirical_baseline);
-        assert!(result.expected_change > 0.0);
-        assert!(result
-            .key_factors
-            .iter()
-            .any(|factor| factor.contains("已按真实基率校准")));
+        assert!((result.expected_change - calibration.average_actual_change).abs() < 1e-9);
     }
 
     #[test]
-    fn test_long_horizon_calibration_uses_weak_bullish_rate() {
-        let historical = history_with_weak_long_bullish_rate();
-        let mut result = bearish_result();
-
-        let calibration =
-            calibrate_professional_result(&historical, &mut result, 10, Some("600000")).unwrap();
-
-        assert!(calibration.used_empirical_baseline);
-        assert!(calibration.actual_up_ratio > 0.5);
-        assert!(calibration.actual_up_ratio < 0.55);
-        assert!(result.expected_change > 0.0);
-        assert!(result
-            .key_factors
-            .iter()
-            .any(|factor| factor.contains("长周期弱基率")));
-    }
-
-    #[test]
-    fn test_long_horizon_calibration_ignores_neutral_weak_rate() {
-        let historical = history_with_neutral_long_rate();
-        let mut result = bearish_result();
-        let original_change = result.expected_change;
-
-        let calibration =
-            calibrate_professional_result(&historical, &mut result, 10, Some("600000")).unwrap();
-
-        assert!(!calibration.used_empirical_baseline);
-        assert!((calibration.actual_up_ratio - 0.5).abs() < 1e-12);
-        assert_eq!(result.expected_change, original_change);
-        assert!(result.key_factors.is_empty());
-    }
-
-    #[test]
-    fn test_long_horizon_calibration_keeps_bearish_empirical_rate() {
+    fn test_calibration_follows_downtrend_drift_sign() {
+        // 下行漂移 → 点预测为负，跟随真实漂移而非硬编码基率阈值。
         let historical = history_with_mild_downtrend();
         let mut result = bearish_result();
         result.direction = PredictionDirection::Bullish;
         result.expected_change = 0.8;
         result.prediction_range = (0.2, 1.5);
 
-        let calibration =
-            calibrate_professional_result(&historical, &mut result, 10, Some("600000")).unwrap();
+        calibrate_professional_result(&historical, &mut result, 5, Some("600000"));
 
-        assert!(calibration.used_empirical_baseline);
         assert!(result.expected_change < 0.0);
-        assert!(result
-            .key_factors
-            .iter()
-            .any(|factor| factor.contains("长周期基率")));
     }
 
     #[test]
-    fn test_calibration_ignores_weak_short_horizon_empirical_rate() {
-        let historical = history_with_mixed_one_day_rate();
+    fn test_calibration_factor_is_honest_without_overfit_language() {
+        // 校准说明只含诚实"无技能锚"措辞，不再有"反向 / RSI / 基率"等过拟合文案。
+        let historical = history_with_mild_uptrend();
         let mut result = bearish_result();
-        let original_change = result.expected_change;
 
-        let calibration =
-            calibrate_professional_result(&historical, &mut result, 1, Some("600000")).unwrap();
+        calibrate_professional_result(&historical, &mut result, 7, Some("600000"));
 
-        assert!(!calibration.used_empirical_baseline);
-        assert_eq!(result.expected_change, original_change);
+        assert!(result.key_factors.iter().any(|f| f.contains("无技能锚")));
         assert!(result
             .key_factors
             .iter()
-            .all(|factor| !factor.contains("已按真实基率校准")));
-    }
-
-    #[test]
-    fn test_empirical_direction_from_rate_requires_clear_edge() {
-        assert_eq!(
-            empirical_direction_from_rate(0.52, 1, 0.55, 0.45, 0.55),
-            None
-        );
-        assert_eq!(
-            empirical_direction_from_rate(0.55, 1, 0.55, 0.45, 0.55),
-            Some(true)
-        );
-        assert_eq!(
-            empirical_direction_from_rate(0.45, 1, 0.55, 0.45, 0.55),
-            Some(false)
-        );
-        assert_eq!(
-            empirical_direction_from_rate(0.54, 10, 0.55, 0.45, 0.55),
-            None
-        );
-        assert_eq!(
-            empirical_direction_from_rate(0.45, 10, 0.55, 0.45, 0.55),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn test_should_skip_bullish_calibration_boundaries() {
-        assert!(!should_skip_bullish_calibration(1, true, true, false));
-        assert!(should_skip_bullish_calibration(1, true, false, false));
-        assert!(!should_skip_bullish_calibration(1, false, true, false));
-        assert!(!should_skip_bullish_calibration(5, true, true, false));
-        assert!(should_skip_bullish_calibration(5, true, false, false));
-        assert!(should_skip_bullish_calibration(7, true, false, false));
-        assert!(!should_skip_bullish_calibration(10, true, false, false));
-        assert!(!should_skip_bullish_calibration(10, true, false, true));
-        assert!(!should_skip_bullish_calibration(10, false, false, false));
+            .all(|f| !f.contains("反向") && !f.contains("RSI") && !f.contains("基率")));
     }
 
     #[test]

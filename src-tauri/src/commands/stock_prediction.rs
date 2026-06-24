@@ -535,15 +535,10 @@ async fn predict_with_professional_strategy_inner(
     if let Some(adjustment) =
         latest_cross_section_adjustment(&request.stock_code, prediction_days, &pool).await?
     {
-        if apply_cross_section_adjustment(
-            &mut predictions,
-            adjustment.daily_bias,
-            current_price,
-            &request.stock_code,
-        ) {
-            append_prediction_factor(&mut predictions, &adjustment.summary);
-            professional_result.key_factors.push(adjustment.summary);
-        }
+        // 截面排名已降级为"相对强弱描述指标"（见 .claude/CLAUDE.md 结论2，非收益保证），
+        // 仅作描述性提示附到 key_factors，不再注入点预测涨跌幅。
+        append_prediction_factor(&mut predictions, &adjustment.summary);
+        professional_result.key_factors.push(adjustment.summary);
     }
     let risk = &professional_result.risk_assessment;
     
@@ -578,7 +573,6 @@ async fn predict_with_professional_strategy_inner(
                 format!("策略建议: {}", professional_result.suggested_action),
             ],
             confidence: professional_result.confidence,
-            accuracy_rate: None,
         });
     }
     
@@ -609,7 +603,6 @@ async fn predict_with_professional_strategy_inner(
                 format!("策略建议: {}", professional_result.suggested_action),
             ],
             confidence: professional_result.confidence,
-            accuracy_rate: None,
         });
     }
 
@@ -651,7 +644,6 @@ pub async fn predict_with_technical_only(request: TechnicalOnlyRequest) -> Resul
 
 struct CrossSectionAdjustment {
     summary: String,
-    daily_bias: f64,
 }
 
 async fn latest_cross_section_adjustment(
@@ -707,51 +699,10 @@ async fn latest_cross_section_adjustment(
     let relative_strength = (1.0 - percentile) * 100.0;
     Ok(Some(CrossSectionAdjustment {
         summary: format!(
-            "截面强弱参考: 全市场第{}/{}名，相对强度{:.0}%，方向偏置参考{:+.2}%",
-            ranked.rank, total, relative_strength, daily_bias
+            "截面强弱参考: 全市场第{}/{}名，相对强度{:.0}%（仅相对强弱描述，非收益预测）",
+            ranked.rank, total, relative_strength
         ),
-        daily_bias,
     }))
-}
-
-fn apply_cross_section_adjustment(
-    predictions: &mut PredictionResponse,
-    daily_bias: f64,
-    current_price: f64,
-    stock_code: &str,
-) -> bool {
-    if daily_bias == 0.0 || !current_price.is_finite() || current_price <= 0.0 {
-        return false;
-    }
-    if !cross_section_bias_aligns_with_prediction(predictions, daily_bias) {
-        return false;
-    }
-
-    let (limit_down, limit_up) =
-        crate::prediction::strategy::professional_engine::get_stock_price_limits(Some(stock_code));
-    let mut last_price = current_price;
-    for prediction in predictions.predictions.iter_mut() {
-        let adjusted_change = (prediction.predicted_change_percent + daily_bias)
-            .clamp(limit_down, limit_up);
-        prediction.predicted_change_percent = adjusted_change;
-        prediction.predicted_price = last_price * (1.0 + adjusted_change / 100.0);
-        prediction.trading_signal = Some(signal_from_change(adjusted_change).to_string());
-        last_price = prediction.predicted_price;
-    }
-    true
-}
-
-fn cross_section_bias_aligns_with_prediction(
-    predictions: &PredictionResponse,
-    daily_bias: f64,
-) -> bool {
-    predictions
-        .predictions
-        .first()
-        .is_some_and(|prediction| {
-            let change = prediction.predicted_change_percent;
-            change != 0.0 && change.signum() == daily_bias.signum()
-        })
 }
 
 fn append_prediction_factor(predictions: &mut PredictionResponse, summary: &str) {
@@ -886,103 +837,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_apply_cross_section_adjustment_updates_chained_prices() {
-        let mut response = PredictionResponse {
-            predictions: vec![
-                Prediction {
-                    target_date: "2026-01-02".to_string(),
-                    predicted_price: 101.0,
-                    predicted_change_percent: 1.0,
-                    confidence: 0.6,
-                    trading_signal: Some("看涨".to_string()),
-                    signal_strength: Some(0.6),
-                    technical_indicators: None,
-                    prediction_reason: None,
-                    key_factors: None,
-                    interval: None,
-                },
-                Prediction {
-                    target_date: "2026-01-05".to_string(),
-                    predicted_price: 102.01,
-                    predicted_change_percent: 1.0,
-                    confidence: 0.6,
-                    trading_signal: Some("看涨".to_string()),
-                    signal_strength: Some(0.6),
-                    technical_indicators: None,
-                    prediction_reason: None,
-                    key_factors: None,
-                    interval: None,
-                },
-            ],
-            last_real_data: Some(LastRealData {
-                date: "2026-01-01".to_string(),
-                price: 100.0,
-                change_percent: 0.0,
-            }),
-        };
-
-        assert!(apply_cross_section_adjustment(&mut response, 0.08, 100.0, "sh600000"));
-
-        assert!((response.predictions[0].predicted_change_percent - 1.08).abs() < 1e-9);
-        assert!((response.predictions[0].predicted_price - 101.08).abs() < 1e-9);
-        assert!((response.predictions[1].predicted_change_percent - 1.08).abs() < 1e-9);
-        assert!((response.predictions[1].predicted_price - 102.171664).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_apply_cross_section_adjustment_keeps_aligned_direction() {
-        let mut response = PredictionResponse {
-            predictions: vec![Prediction {
-                target_date: "2026-01-02".to_string(),
-                predicted_price: 99.8,
-                predicted_change_percent: -0.2,
-                confidence: 0.6,
-                trading_signal: Some("看跌".to_string()),
-                signal_strength: Some(0.6),
-                technical_indicators: None,
-                prediction_reason: None,
-                key_factors: None,
-                interval: None,
-            }],
-            last_real_data: Some(LastRealData {
-                date: "2026-01-01".to_string(),
-                price: 100.0,
-                change_percent: 0.0,
-            }),
-        };
-
-        assert!(apply_cross_section_adjustment(&mut response, -0.08, 100.0, "sh600000"));
-
-        assert!((response.predictions[0].predicted_change_percent + 0.28).abs() < 1e-9);
-        assert_eq!(response.predictions[0].trading_signal.as_deref(), Some("看跌"));
-    }
-
-    #[test]
-    fn test_apply_cross_section_adjustment_skips_opposite_prediction_direction() {
-        let mut response = PredictionResponse {
-            predictions: vec![Prediction {
-                target_date: "2026-01-02".to_string(),
-                predicted_price: 99.5,
-                predicted_change_percent: -0.5,
-                confidence: 0.6,
-                trading_signal: Some("看跌".to_string()),
-                signal_strength: Some(0.6),
-                technical_indicators: None,
-                prediction_reason: None,
-                key_factors: None,
-                interval: None,
-            }],
-            last_real_data: Some(LastRealData {
-                date: "2026-01-01".to_string(),
-                price: 100.0,
-                change_percent: 0.0,
-            }),
-        };
-
-        assert!(!apply_cross_section_adjustment(&mut response, 0.5, 100.0, "sh600000"));
-
-        assert!((response.predictions[0].predicted_change_percent + 0.5).abs() < 1e-9);
-        assert_eq!(response.predictions[0].trading_signal.as_deref(), Some("看跌"));
-    }
 }
