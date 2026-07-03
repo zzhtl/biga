@@ -16,6 +16,15 @@
         category: string;
     }
 
+    // 跨页导航：点击股票卡片跳转历史数据页
+    type NavTarget = {
+        view: "favorites" | "stock" | "list" | "realtime" | "historical" | "settings";
+        symbol?: string;
+        name?: string;
+        action?: "history" | "predict";
+    };
+    export let onNavigate: (target: NavTarget) => void = () => {};
+
     // 状态管理
     let stocks: Stock[] = [];
     let loading = true;
@@ -23,6 +32,46 @@
     let searchQuery = "";
     let searchDebounce: number | null = null;
     let collapsed: Record<string, boolean> = {};
+
+    // 收藏星标（与收藏池联动）
+    let watchSet: Set<string> = new Set();
+
+    // 与后端 canonical_symbol 同口径：提取到恰好 6 位数字则用之，否则原样 trim
+    function sixDigit(value: string): string {
+        const digits = value.replace(/\D/g, "");
+        return digits.length === 6 ? digits : value.trim();
+    }
+
+    async function loadWatchSet() {
+        try {
+            const symbols = await invoke<string[]>("get_watchlist_symbols");
+            watchSet = new Set(symbols);
+        } catch (e) {
+            console.warn("获取收藏列表失败:", e);
+        }
+    }
+
+    async function toggleWatch(stock: Stock) {
+        const key = sixDigit(stock.symbol);
+        try {
+            await invoke(
+                watchSet.has(key) ? "remove_from_watchlist" : "add_to_watchlist",
+                { symbol: stock.symbol },
+            );
+            await loadWatchSet();
+        } catch (e) {
+            error = `收藏操作失败: ${e}`;
+        }
+    }
+
+    function goHistory(stock: Stock) {
+        onNavigate({
+            view: "historical",
+            symbol: stock.symbol,
+            name: stock.name,
+            action: "history",
+        });
+    }
 
     // 按板块分组（保持后端 ORDER BY category, symbol 的顺序）
     $: groups = (() => {
@@ -59,6 +108,7 @@
     // 初始化加载
     onMount(async () => {
         await fetchData("");
+        loadWatchSet();
     });
 
     // 监听搜索输入变化
@@ -101,9 +151,28 @@
                 {#if !collapsed[category]}
                     <div class="grid">
                         {#each items as stock (stock.symbol)}
-                            <div class="card">
+                            <div
+                                class="card"
+                                role="button"
+                                tabindex="0"
+                                title="点击查看历史K线"
+                                on:click={() => goHistory(stock)}
+                                on:keydown={(e) => {
+                                    if (e.key === "Enter") goHistory(stock);
+                                }}
+                            >
                                 <span class="symbol">{stock.symbol}</span>
                                 <span class="name">{stock.name}</span>
+                                <button
+                                    class="star"
+                                    class:on={watchSet.has(sixDigit(stock.symbol))}
+                                    title={watchSet.has(sixDigit(stock.symbol))
+                                        ? "移出收藏池"
+                                        : "加入收藏池"}
+                                    on:click|stopPropagation={() => toggleWatch(stock)}
+                                >
+                                    {watchSet.has(sixDigit(stock.symbol)) ? "★" : "☆"}
+                                </button>
                             </div>
                         {/each}
                     </div>
@@ -205,6 +274,31 @@
         background: rgba(255, 255, 255, 0.05);
         border-radius: 0.4rem;
         border: 1px solid rgba(255, 255, 255, 0.06);
+        cursor: pointer;
+        transition: background 0.15s ease;
+    }
+
+    .card:hover {
+        background: rgba(99, 102, 241, 0.15);
+    }
+
+    .card .star {
+        margin-left: auto;
+        padding: 0 0.2rem;
+        background: none;
+        border: none;
+        color: #64748b;
+        font-size: 1rem;
+        line-height: 1;
+        cursor: pointer;
+    }
+
+    .card .star:hover {
+        color: #cbd5e1;
+    }
+
+    .card .star.on {
+        color: #fbbf24;
     }
 
     .card .symbol {

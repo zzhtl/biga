@@ -2,7 +2,12 @@
     import { onMount } from 'svelte';
     import { invoke } from '@tauri-apps/api/core';
     import { confirm } from '@tauri-apps/plugin-dialog';
-    
+
+    // 跨页导航（收藏页等跳转进入）：navSymbol 带入股票代码，navAction="predict" 时自动运行一键综合预测
+    export let navSymbol: string | null = null;
+    export let navAction: "predict" | null = null;
+    export let onNavConsumed: () => void = () => {};
+
     let stockCode = "";
     let selectedModelName = "";
     let daysToPredict = 5;
@@ -256,7 +261,47 @@
         profit_growth: number | null;
     }
     let valuationContext: ValuationContext | null = null;
-    
+
+    // 一键综合预测报告（comprehensive_predict 返回；prediction 字段复用现有渲染管线，
+    // 决策摘要/基准率字段全部为后端透传的引擎既有输出与描述性统计，无新增方向规则）
+    interface ComprehensiveReport {
+        symbol: string;
+        name: string;
+        generated_at: string;
+        latest_date: string;
+        staleness_days: number;
+        current_price: number;
+        prediction_days: number;
+        direction: string;
+        signal_strength: number;
+        expected_change_percent: number;
+        interval: PredictionInterval | null;
+        current_advice: string;
+        risk_level: string;
+        adaptive_score: number;
+        buy_point_count: number;
+        sell_point_count: number;
+        nearest_support: number | null;
+        nearest_resistance: number | null;
+        key_factors: string[];
+        momentum_5d: number | null;
+        momentum_20d: number | null;
+        momentum_60d: number | null;
+        week52_position: number | null;
+        up_ratio_20d: number | null;
+        up_ratio_60d: number | null;
+        up_ratio_250d: number | null;
+        avg_daily_change_250d: number | null;
+        prediction: ProfessionalPredictionResponse;
+        valuation: ValuationContext;
+        disclaimer: string;
+    }
+    let comprehensiveReport: ComprehensiveReport | null = null;
+    let isComprehensivePredicting = false;
+
+    // 收藏星标（收藏池，见 stock_favorites 页）
+    let isWatched = false;
+
     // 模型训练参数
     let newModelName = "模型-" + new Date().toISOString().slice(0, 10);
     let modelType = "candle_mlp_horizon"; // 默认使用按预测天数训练的 Candle MLP 模型
@@ -442,14 +487,46 @@
         };
     }
     
-    // 纯技术分析预测函数
-    async function predictWithTechnicalOnly() {
+    // 把专业预测响应灌入现有渲染管线（纯技术分析与一键综合预测共用的提取逻辑）；
+    // 返回归一化后的专业分析结果，便于调用方在 TS 窄化下直接使用
+    function applyProfessionalResponse(result: ProfessionalPredictionResponse): ProfessionalPrediction | null {
+        // 提取预测数据
+        if (result.predictions) {
+            if (Array.isArray(result.predictions)) {
+                predictions = result.predictions.map(normalizePrediction);
+            } else if ('predictions' in result.predictions && Array.isArray(result.predictions.predictions)) {
+                predictions = result.predictions.predictions.map(normalizePrediction);
+                // 提取最新真实数据
+                if (result.predictions.last_real_data) {
+                    lastRealData = normalizeLastRealData(result.predictions.last_real_data);
+                }
+            }
+        }
+
+        // 提取专业分析结果
+        if (result.professional_analysis) {
+            professionalAnalysis = normalizeProfessionalPrediction(result.professional_analysis);
+            showProfessionalAnalysis = true;
+        }
+
+        // 生成图表数据
+        if (predictions && predictions.length > 0) {
+            generatePredictionChart(predictions);
+        }
+
+        return professionalAnalysis;
+    }
+
+    // 一键综合预测：一次调用聚合专业策略预测 + 估值 + 动量/52周位置 + 历史基准率。
+    // 纯本地计算不消耗 API 额度；无弹窗，适合跨页自动触发。
+    async function runComprehensivePredict() {
         const symbol = normalizedStockCode();
         if (!symbol) {
             errorMessage = "请先选择股票";
             return;
         }
-        
+
+        isComprehensivePredicting = true;
         isTechnicalPredicting = true;
         errorMessage = "";
         predictions = [];
@@ -457,6 +534,41 @@
         lastRealData = null;
         predictionChart = null;
         showProfessionalAnalysis = false;
+        comprehensiveReport = null;
+
+        try {
+            const report = await invoke<ComprehensiveReport>('comprehensive_predict', {
+                symbol,
+                days: technicalPredictionDays,
+            });
+            comprehensiveReport = report;
+            valuationContext = report.valuation;
+            applyProfessionalResponse(report.prediction);
+        } catch (error) {
+            errorMessage = `综合预测失败: ${error}`;
+            console.error('综合预测错误:', error);
+        } finally {
+            isComprehensivePredicting = false;
+            isTechnicalPredicting = false;
+        }
+    }
+
+    // 纯技术分析预测函数
+    async function predictWithTechnicalOnly() {
+        const symbol = normalizedStockCode();
+        if (!symbol) {
+            errorMessage = "请先选择股票";
+            return;
+        }
+
+        isTechnicalPredicting = true;
+        errorMessage = "";
+        predictions = [];
+        professionalAnalysis = null;
+        lastRealData = null;
+        predictionChart = null;
+        showProfessionalAnalysis = false;
+        comprehensiveReport = null;
         loadValuationContext(symbol);
 
         try {
@@ -465,41 +577,18 @@
                 history_days: technicalHistoryDays,
                 prediction_days: technicalPredictionDays
             };
-            
+
             console.log('纯技术分析预测请求:', request);
-            
+
             const result = await invoke<ProfessionalPredictionResponse>('predict_with_technical_only', { request });
             console.log('纯技术分析预测响应:', result);
-            
-            // 提取预测数据
-            if (result.predictions) {
-                if (Array.isArray(result.predictions)) {
-                    predictions = result.predictions.map(normalizePrediction);
-                } else if ('predictions' in result.predictions && Array.isArray(result.predictions.predictions)) {
-                    predictions = result.predictions.predictions.map(normalizePrediction);
-                    // 提取最新真实数据
-                    if (result.predictions.last_real_data) {
-                        lastRealData = normalizeLastRealData(result.predictions.last_real_data);
-                    }
-                }
-            }
-            
-            // 提取专业分析结果
-            if (result.professional_analysis) {
-                professionalAnalysis = normalizeProfessionalPrediction(result.professional_analysis);
-                showProfessionalAnalysis = true;
-            }
-            
-            // 生成图表数据
-            if (predictions && predictions.length > 0) {
-                generatePredictionChart(predictions);
-                console.log("纯技术分析预测图表数据已生成");
-            }
-            
-            if (predictions.length > 0 && professionalAnalysis) {
+
+            const appliedAnalysis = applyProfessionalResponse(result);
+
+            if (predictions.length > 0 && appliedAnalysis) {
                 const totalScoreRaw =
-                    professionalAnalysis.multi_factor_score?.adaptive_score ??
-                    professionalAnalysis.multi_factor_score?.total_score;
+                    appliedAnalysis.multi_factor_score?.adaptive_score ??
+                    appliedAnalysis.multi_factor_score?.total_score;
                 const totalScore =
                     typeof totalScoreRaw === "number" ? totalScoreRaw : Number(totalScoreRaw);
                 const totalScoreText = Number.isFinite(totalScore) ? `${totalScore.toFixed(1)}/100` : "—/100";
@@ -523,9 +612,21 @@
 
     onMount(async () => {
         try {
-            // 如果用户选择了股票代码，尝试加载模型列表
-            if (stockCode) {
+            if (navSymbol) {
+                // 跨页导航进入：带入股票代码；navAction="predict" 时自动运行一键综合预测
+                stockCode = navSymbol;
+                await handleStockCodeChange();
+                if (navAction === "predict") {
+                    tabManuallySelected = true;
+                    showTechnicalOnly = true;
+                    showBacktestReport = false;
+                    await runComprehensivePredict();
+                }
+                onNavConsumed();
+            } else if (stockCode) {
+                // 如果用户选择了股票代码，尝试加载模型列表
                 await loadModelList();
+                loadWatchStatus();
             }
         } catch (error) {
             errorMessage = `加载失败: ${error}`;
@@ -763,6 +864,7 @@
         predictionChart = null; // 重置图表数据
         professionalAnalysis = null; // 重置专业分析数据，避免上次技术分析结果残留到摘要卡
         showProfessionalAnalysis = false; // 重置专业分析显示
+        comprehensiveReport = null; // 重置综合报告，避免补充卡与新预测口径不一致
         loadValuationContext(symbol);
 
         try {
@@ -831,6 +933,7 @@
         predictionChart = null;
         professionalAnalysis = null;
         showProfessionalAnalysis = false;
+        comprehensiveReport = null;
         loadValuationContext(symbol);
 
         try {
@@ -897,6 +1000,34 @@
         selectedModelName = "";
         modelSelectionManuallySelected = false;
         await loadModelList();
+        loadWatchStatus();
+    }
+
+    // ===== 收藏星标（与收藏池联动）=====
+    // 与后端 canonical_symbol 同口径：提取到恰好 6 位数字则用之，否则原样 trim
+    function sixDigitCode(value: string): string {
+        const digits = value.replace(/\D/g, "");
+        return digits.length === 6 ? digits : value.trim();
+    }
+
+    async function loadWatchStatus() {
+        try {
+            const symbols = await invoke<string[]>("get_watchlist_symbols");
+            isWatched = symbols.includes(sixDigitCode(stockCode));
+        } catch (error) {
+            console.warn("获取收藏状态失败:", error);
+        }
+    }
+
+    async function toggleWatch() {
+        const symbol = normalizedStockCode();
+        if (!symbol) return;
+        try {
+            await invoke(isWatched ? "remove_from_watchlist" : "add_to_watchlist", { symbol });
+            isWatched = !isWatched;
+        } catch (error) {
+            errorMessage = `收藏操作失败: ${error}`;
+        }
     }
 
     function selectModel(modelId: string) {
@@ -1101,6 +1232,14 @@
             on:change={handleStockCodeChange}
             class="search-input"
         />
+        <button
+            class="watch-star"
+            class:watched={isWatched}
+            on:click={toggleWatch}
+            title={isWatched ? "移出收藏池" : "加入收藏池"}
+        >
+            {isWatched ? "★" : "☆"}
+        </button>
     </div>
     
     {#if errorMessage}
@@ -1108,7 +1247,11 @@
             {errorMessage}
         </div>
     {/if}
-    
+
+    {#if isComprehensivePredicting}
+        <div class="comprehensive-loading">🎯 正在生成综合预测报告…</div>
+    {/if}
+
     <div class="tabs">
         <button class:active={showTechnicalOnly} on:click={() => {tabManuallySelected = true; showTechnicalOnly = true; showBacktestReport = false; useExistingModel = false;}}>
             📊 纯技术分析
@@ -1869,6 +2012,43 @@
                 </div>
                 <div class="conclusion-note">⚠️ 单股方向不可预测：点预测仅为历史无条件漂移参考，"信号强度"非方向命中概率；真实不确定性以上方校准区间带为准。结论仅供参考，请自行决策。</div>
             </div>
+
+            <!-- 综合决策补充：动量/52周位置/历史基准率（一键综合预测时展示；均为描述性统计） -->
+            {#if comprehensiveReport}
+                <div class="comprehensive-card">
+                    <div class="comprehensive-head">
+                        <span class="comprehensive-title">🎯 综合决策补充</span>
+                        <span class="comprehensive-sub">数据截至 {comprehensiveReport.latest_date}{comprehensiveReport.staleness_days > 4 ? '（数据较旧，建议刷新）' : ''} · 生成于 {comprehensiveReport.generated_at}</span>
+                    </div>
+                    <div class="comprehensive-grid">
+                        <div class="comp-item">
+                            <span class="comp-label">动量 5日</span>
+                            <span class="comp-value {comprehensiveReport.momentum_5d !== null ? (comprehensiveReport.momentum_5d >= 0 ? 'price-up' : 'price-down') : ''}">{comprehensiveReport.momentum_5d !== null ? (comprehensiveReport.momentum_5d >= 0 ? '+' : '') + comprehensiveReport.momentum_5d.toFixed(2) + '%' : '—'}</span>
+                        </div>
+                        <div class="comp-item">
+                            <span class="comp-label">动量 20日</span>
+                            <span class="comp-value {comprehensiveReport.momentum_20d !== null ? (comprehensiveReport.momentum_20d >= 0 ? 'price-up' : 'price-down') : ''}">{comprehensiveReport.momentum_20d !== null ? (comprehensiveReport.momentum_20d >= 0 ? '+' : '') + comprehensiveReport.momentum_20d.toFixed(2) + '%' : '—'}</span>
+                        </div>
+                        <div class="comp-item">
+                            <span class="comp-label">动量 60日</span>
+                            <span class="comp-value {comprehensiveReport.momentum_60d !== null ? (comprehensiveReport.momentum_60d >= 0 ? 'price-up' : 'price-down') : ''}">{comprehensiveReport.momentum_60d !== null ? (comprehensiveReport.momentum_60d >= 0 ? '+' : '') + comprehensiveReport.momentum_60d.toFixed(2) + '%' : '—'}</span>
+                        </div>
+                        <div class="comp-item">
+                            <span class="comp-label" title="现价在近一年最高/最低区间的位置：0=年内低点，100=年内高点">52周位置</span>
+                            <span class="comp-value">{comprehensiveReport.week52_position !== null ? comprehensiveReport.week52_position.toFixed(0) : '—'}</span>
+                        </div>
+                        <div class="comp-item">
+                            <span class="comp-label" title="近20/60/250个交易日中日线收涨的占比——无技能基准，供对照引擎信号">上涨占比 20/60/250日</span>
+                            <span class="comp-value">{comprehensiveReport.up_ratio_20d !== null ? (comprehensiveReport.up_ratio_20d * 100).toFixed(0) + '%' : '—'} / {comprehensiveReport.up_ratio_60d !== null ? (comprehensiveReport.up_ratio_60d * 100).toFixed(0) + '%' : '—'} / {comprehensiveReport.up_ratio_250d !== null ? (comprehensiveReport.up_ratio_250d * 100).toFixed(0) + '%' : '—'}</span>
+                        </div>
+                        <div class="comp-item">
+                            <span class="comp-label">日均涨跌（近250日）</span>
+                            <span class="comp-value">{comprehensiveReport.avg_daily_change_250d !== null ? (comprehensiveReport.avg_daily_change_250d >= 0 ? '+' : '') + comprehensiveReport.avg_daily_change_250d.toFixed(3) + '%' : '—'}</span>
+                        </div>
+                    </div>
+                    <div class="comprehensive-note">历史基准率为无技能对照（不看任何信息也能达到的水平），供对照上方引擎信号；动量与52周位置为描述性指标，非收益预测。</div>
+                </div>
+            {/if}
 
             <!-- 估值参考：PE/PB + 最新基本面（仅描述估值/质量/成长，非收益预测） -->
             {#if valuationContext}
@@ -2818,6 +2998,87 @@
         font-size: 0.95rem;
         font-weight: 600;
         font-variant-numeric: tabular-nums;
+    }
+
+    /* 收藏星标（与收藏池联动） */
+    .watch-star {
+        flex: 0 0 auto;
+        padding: 0 1rem;
+        font-size: 1.3rem;
+        line-height: 1;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 0.5rem;
+        color: #94a3b8;
+        cursor: pointer;
+        transition: color 0.2s ease, background 0.2s ease;
+    }
+    .watch-star:hover {
+        background: rgba(255, 255, 255, 0.12);
+    }
+    .watch-star.watched {
+        color: #fbbf24;
+        border-color: rgba(251, 191, 36, 0.4);
+    }
+
+    /* 综合决策补充卡（一键综合预测）：样式对齐估值参考卡 */
+    .comprehensive-card {
+        margin: 0.75rem 0 1rem;
+        padding: 0.9rem 1rem;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 0.6rem;
+    }
+    .comprehensive-head {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+        margin-bottom: 0.6rem;
+    }
+    .comprehensive-title {
+        font-size: 0.95rem;
+        font-weight: 700;
+    }
+    .comprehensive-sub {
+        font-size: 0.75rem;
+        color: #94a3b8;
+    }
+    .comprehensive-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 0.5rem 1rem;
+    }
+    .comp-item {
+        display: flex;
+        flex-direction: column;
+        line-height: 1.3;
+    }
+    .comp-label {
+        font-size: 0.72rem;
+        color: #94a3b8;
+    }
+    .comp-value {
+        font-size: 0.95rem;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+    }
+    .comp-value.price-up { color: #10b981; }
+    .comp-value.price-down { color: #ef4444; }
+    .comprehensive-note {
+        margin-top: 0.7rem;
+        font-size: 0.75rem;
+        line-height: 1.6;
+        color: #94a3b8;
+    }
+    .comprehensive-loading {
+        margin: 0.5rem 0 1rem;
+        padding: 0.7rem 1rem;
+        background: rgba(99, 102, 241, 0.12);
+        border: 1px solid rgba(99, 102, 241, 0.35);
+        border-radius: 0.5rem;
+        color: #a5b4fc;
+        font-size: 0.9rem;
     }
     .pred-detail {
         display: flex;

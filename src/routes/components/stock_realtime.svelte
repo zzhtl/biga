@@ -17,6 +17,15 @@
         change_percent: number;
     }
 
+    // 跨页导航：点击行跳转历史数据页
+    type NavTarget = {
+        view: "favorites" | "stock" | "list" | "realtime" | "historical" | "settings";
+        symbol?: string;
+        name?: string;
+        action?: "history" | "predict";
+    };
+    export let onNavigate: (target: NavTarget) => void = () => {};
+
     // 状态管理
     let stocks: RealtimeData[] = [];
     let loading = true;
@@ -26,6 +35,46 @@
     // 排序状态
     let sortColumn = "change_percent"; // 默认按股票代码排序
     let sortDirection = "desc"; // 默认升序
+
+    // 收藏星标（与收藏池联动）
+    let watchSet: Set<string> = new Set();
+
+    // 与后端 canonical_symbol 同口径：提取到恰好 6 位数字则用之，否则原样 trim
+    function sixDigit(value: string): string {
+        const digits = value.replace(/\D/g, "");
+        return digits.length === 6 ? digits : value.trim();
+    }
+
+    async function loadWatchSet() {
+        try {
+            const symbols = await invoke<string[]>("get_watchlist_symbols");
+            watchSet = new Set(symbols);
+        } catch (e) {
+            console.warn("获取收藏列表失败:", e);
+        }
+    }
+
+    async function toggleWatch(stock: RealtimeData) {
+        const key = sixDigit(stock.symbol);
+        try {
+            await invoke(
+                watchSet.has(key) ? "remove_from_watchlist" : "add_to_watchlist",
+                { symbol: stock.symbol },
+            );
+            await loadWatchSet();
+        } catch (e) {
+            error = `收藏操作失败: ${e}`;
+        }
+    }
+
+    function goHistory(stock: RealtimeData) {
+        onNavigate({
+            view: "historical",
+            symbol: stock.symbol,
+            name: stock.name,
+            action: "history",
+        });
+    }
 
     // 日期格式化
     const formatDate = (date: Date) => {
@@ -57,6 +106,7 @@
     // 初始化加载（传递默认排序参数）
     onMount(async () => {
         await fetchData("", sortColumn, sortDirection);
+        loadWatchSet();
     });
 
     // 监听搜索输入变化
@@ -98,6 +148,7 @@
     <!-- 数据展示 -->
     <div class="data-table">
         <div class="table-header">
+            <div title="收藏"></div>
             <div onclick={() => sortData("symbol")} class="sort-column">
                 股票代码
                 {#if sortColumn === "symbol"}
@@ -145,7 +196,31 @@
             <div class="error">{error}</div>
         {:else}
             {#each stocks as stock}
-                <div class="table-row">
+                <div
+                    class="table-row row-click"
+                    role="button"
+                    tabindex="0"
+                    title="点击查看历史K线"
+                    onclick={() => goHistory(stock)}
+                    onkeydown={(e) => {
+                        if (e.key === "Enter") goHistory(stock);
+                    }}
+                >
+                    <div>
+                        <button
+                            class="star"
+                            class:on={watchSet.has(sixDigit(stock.symbol))}
+                            title={watchSet.has(sixDigit(stock.symbol))
+                                ? "移出收藏池"
+                                : "加入收藏池"}
+                            onclick={(e) => {
+                                e.stopPropagation();
+                                toggleWatch(stock);
+                            }}
+                        >
+                            {watchSet.has(sixDigit(stock.symbol)) ? "★" : "☆"}
+                        </button>
+                    </div>
                     <div class="symbol">{stock.symbol}</div>
                     <div class="name">{stock.name}</div>
                     <div class="date">{formatDate(stock.date)}</div>
@@ -225,9 +300,35 @@
     .table-header,
     .table-row {
         display: grid;
-        grid-template-columns: repeat(9, 1fr);
+        grid-template-columns: 2.2rem repeat(9, 1fr);
         gap: 1rem;
         padding: 1rem;
+    }
+
+    .row-click {
+        cursor: pointer;
+    }
+
+    .row-click:hover {
+        background: rgba(99, 102, 241, 0.1);
+    }
+
+    .star {
+        padding: 0 0.2rem;
+        background: none;
+        border: none;
+        color: #64748b;
+        font-size: 1rem;
+        line-height: 1;
+        cursor: pointer;
+    }
+
+    .star:hover {
+        color: #cbd5e1;
+    }
+
+    .star.on {
+        color: #fbbf24;
     }
 
     .table-header {

@@ -4,15 +4,42 @@
     import RealTimeData from "./components/stock_realtime.svelte";
     import HistoricalData from "./components/stock_historical.svelte";
     import StockList from "./components/stock_list.svelte";
+    import StockFavorites from "./components/stock_favorites.svelte";
 
-    let activeView: "stock" | "list" | "realtime" | "historical" | "settings" =
-        "stock";
+    type View =
+        | "favorites"
+        | "stock"
+        | "list"
+        | "realtime"
+        | "historical"
+        | "settings";
+    // 跨页跳转载荷：由来源页发起，目标页挂载时消费（消费后回调清空，防止切页复放）
+    type NavTarget = {
+        view: View;
+        symbol?: string;
+        name?: string;
+        action?: "history" | "predict";
+    };
+
+    let activeView = $state<View>("favorites");
+    let navTarget = $state<NavTarget | null>(null);
+
+    function navigate(target: NavTarget) {
+        navTarget = target;
+        activeView = target.view;
+    }
 </script>
 
 <div class="main-container">
     <nav class="sidebar">
         <div class="logo">StockAI</div>
         <ul>
+            <li
+                class:active={activeView === "favorites"}
+                onclick={() => (activeView = "favorites")}
+            >
+                <span>⭐ 我的收藏</span>
+            </li>
             <li
                 class:active={activeView === "stock"}
                 onclick={() => (activeView = "stock")}
@@ -47,14 +74,30 @@
     </nav>
 
     <main class="content">
-        {#if activeView === "stock"}
-            <StockPrediction />
+        {#if activeView === "favorites"}
+            <StockFavorites onNavigate={navigate} />
+        {:else if activeView === "stock"}
+            <StockPrediction
+                navSymbol={navTarget?.view === "stock"
+                    ? (navTarget.symbol ?? null)
+                    : null}
+                navAction={navTarget?.view === "stock" &&
+                navTarget.action === "predict"
+                    ? "predict"
+                    : null}
+                onNavConsumed={() => (navTarget = null)}
+            />
         {:else if activeView === "list"}
-            <StockList />
+            <StockList onNavigate={navigate} />
         {:else if activeView === "realtime"}
-            <RealTimeData />
+            <RealTimeData onNavigate={navigate} />
         {:else if activeView === "historical"}
-            <HistoricalData />
+            <HistoricalData
+                navTarget={navTarget?.view === "historical" && navTarget.symbol
+                    ? { symbol: navTarget.symbol, name: navTarget.name }
+                    : null}
+                onNavConsumed={() => (navTarget = null)}
+            />
         {:else if activeView === "settings"}
             <Settings />
         {/if}

@@ -69,7 +69,13 @@ pub fn run() {
             commands::stock_prediction::predict_with_professional_strategy,
             commands::stock_prediction::predict_with_technical_only,
             commands::stock_prediction::cross_sectional_ranking,
-            commands::stock_prediction::get_valuation_context
+            commands::stock_prediction::get_valuation_context,
+            // 收藏池命令
+            commands::watchlist::get_watchlist_overview,
+            commands::watchlist::add_to_watchlist,
+            commands::watchlist::remove_from_watchlist,
+            commands::watchlist::get_watchlist_symbols,
+            commands::watchlist::comprehensive_predict
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {
@@ -84,6 +90,7 @@ pub fn run() {
                     "04_stock_fundamentals.sql",
                     "05_capital_valuation.sql",
                     "06_stock_category.sql",
+                    "07_watchlist.sql",
                 ];
                 for file in &migration_files {
                     let path = Path::new("migrations").join(file);

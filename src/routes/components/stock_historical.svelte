@@ -6,6 +6,13 @@
 
     type EChartsOption = echarts.EChartsOption;
 
+    // 跨页导航：其他页（收藏/列表/行情）点击股票跳转到本页时带入的目标
+    type Props = {
+        navTarget?: { symbol: string; name?: string } | null;
+        onNavConsumed?: () => void;
+    };
+    let { navTarget = null, onNavConsumed = () => {} }: Props = $props();
+
     // 新增图表实例声明
     let chart: echarts.ECharts | null = null;
     let chartContainer: HTMLDivElement;
@@ -380,6 +387,20 @@
         // 选中股票查询历史数据
         fetchHistory();
     }
+
+    // 消费跨页导航目标（组件切入时挂载触发）：复用 handleSelect 的赋值逻辑，
+    // 不依赖 stockSymbols 已加载；消费完回调清空，防止手动切回本页时旧目标复放
+    $effect(() => {
+        if (navTarget?.symbol) {
+            selectedSymbol = navTarget.symbol;
+            searchQuery = navTarget.name
+                ? `${navTarget.symbol} - ${navTarget.name}`
+                : navTarget.symbol;
+            isDropdownOpen = false;
+            fetchHistory();
+            onNavConsumed();
+        }
+    });
 
     // 修改后的 refreshStockSymbols 函数
     async function refreshStockSymbols() {

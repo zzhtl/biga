@@ -479,7 +479,7 @@ pub async fn predict_with_professional_strategy(request: PredictionRequest) -> R
     predict_with_professional_strategy_inner(request, None).await
 }
 
-async fn predict_with_professional_strategy_inner(
+pub(crate) async fn predict_with_professional_strategy_inner(
     request: PredictionRequest,
     history_days: Option<usize>,
 ) -> Result<ProfessionalPredictionResponse, String> {
