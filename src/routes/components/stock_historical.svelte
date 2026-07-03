@@ -605,7 +605,7 @@
         {:else if historyData.length === 0}
             <div class="no-data">📭 暂无数据</div>
         {:else}
-            {#each historyData as data (data.date)}
+            {#each [...historyData].reverse() as data (data.date)}
                 <div class="table-row">
                     <div>{formatDate(data.date)}</div>
                     <div>{formatPrice(data.open)}</div>
