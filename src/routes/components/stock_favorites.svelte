@@ -124,6 +124,9 @@
     let reports = $state<Record<string, ComprehensiveReport>>({});
     let reportErrors = $state<Record<string, string>>({});
     let showComparison = $state(false);
+    // 一键优选：从综合报告中选出相对强弱靠前的几只（描述性参考，非上涨概率）
+    let showPicks = $state(false);
+    const TOP_PICK_COUNT = 3;
 
     // 对比表排序（客户端排序；仅为相对强弱浏览便利，不合成任何新综合分）
     type SortKey =
@@ -138,6 +141,15 @@
     let sortDir = $state<"asc" | "desc">("desc");
 
     const busy = $derived(refreshing !== null || predicting !== null);
+
+    // 与后端 canonical_symbol 同口径：提取到恰好 6 位数字则用之，否则原样 trim
+    function sixDigit(value: string): string {
+        const digits = value.replace(/\D/g, "");
+        return digits.length === 6 ? digits : value.trim();
+    }
+
+    // 已在收藏池中的代码集合（下拉搜索里标识"已收藏"）
+    const pooledSymbols = $derived(new Set(items.map((i) => i.symbol)));
 
     // ---------- 数据加载 ----------
     async function loadOverview(silent = false) {
@@ -227,6 +239,7 @@
     // ---------- 刷新（走 zhitu API，受每日额度限制） ----------
     async function refreshOne(symbol: string) {
         rowRefreshing = { ...rowRefreshing, [symbol]: true };
+        errorMessage = "";
         try {
             await invoke("refresh_historical_data", { symbol });
             await loadOverview(true);
@@ -268,8 +281,17 @@
                 break;
             }
         }
+        // 进度条消失后失败信息不能静默丢失：汇总到错误横幅
+        const failures = refreshing?.failures ?? [];
         refreshing = null;
         await loadOverview(true);
+        if (failures.length && !errorMessage) {
+            const names = failures
+                .slice(0, 5)
+                .map((f) => f.split(":")[0])
+                .join("、");
+            errorMessage = `批量刷新完成，${failures.length} 只失败（${names}${failures.length > 5 ? " 等" : ""}），其余成功。失败可能因当日额度耗尽或代码无效，可稍后单票重试。`;
+        }
     }
 
     // ---------- 一键综合预测（纯本地计算，不消耗 API 额度） ----------
@@ -288,10 +310,11 @@
         }
     }
 
-    async function predictAll() {
+    async function predictAll(onlySymbols?: string[]) {
         if (!items.length || busy) return;
         errorMessage = "";
-        const symbols = items.map((i) => i.symbol);
+        const symbols = onlySymbols ?? items.map((i) => i.symbol);
+        if (!symbols.length) return;
         predicting = { done: 0, total: symbols.length, current: "" };
         for (const symbol of symbols) {
             predicting = { ...predicting!, current: symbol };
@@ -299,6 +322,19 @@
             predicting = { ...predicting!, done: predicting!.done + 1 };
         }
         predicting = null;
+        showComparison = true;
+    }
+
+    // 一键优选：报告不全时先补齐缺失的分析，再展示优选卡
+    async function pickTop() {
+        if (!items.length || busy) return;
+        const missing = items
+            .filter((i) => !reports[i.symbol])
+            .map((i) => i.symbol);
+        if (missing.length) {
+            await predictAll(missing);
+        }
+        showPicks = true;
         showComparison = true;
     }
 
@@ -347,6 +383,30 @@
     const firstDisclaimer = $derived(
         Object.values(reports)[0]?.disclaimer ?? "",
     );
+
+    // 优选排序：仅对引擎既有输出做透明聚合排序（多因子分 → 信号强度 → 20日动量），
+    // 不引入任何新方向规则/阈值。优先在"引擎看涨"的票中选；全池无看涨时退化为
+    // 全池相对强弱排序并在界面明示。这是描述性相对强弱，不是上涨概率（实证结论1/8）。
+    const topPicks = $derived.by(() => {
+        const rs = items
+            .map((it) => reports[it.symbol])
+            .filter((r): r is ComprehensiveReport => !!r);
+        if (!rs.length) return { picks: [] as ComprehensiveReport[], bullishOnly: false };
+        const isBullish = (r: ComprehensiveReport) =>
+            /买|多|涨/.test(r.direction) && !/卖|空|跌/.test(r.direction);
+        const bullish = rs.filter(isBullish);
+        const pool = bullish.length ? bullish : rs;
+        const picks = [...pool]
+            .sort(
+                (a, b) =>
+                    b.adaptive_score - a.adaptive_score ||
+                    b.signal_strength - a.signal_strength ||
+                    (b.momentum_20d ?? Number.NEGATIVE_INFINITY) -
+                        (a.momentum_20d ?? Number.NEGATIVE_INFINITY),
+            )
+            .slice(0, TOP_PICK_COUNT);
+        return { picks, bullishOnly: bullish.length > 0 };
+    });
 
     // ---------- 格式化 ----------
     function fmt(
@@ -428,7 +488,11 @@
                         >
                             <span class="symbol">{stock.symbol}</span>
                             <span class="name">{stock.name}</span>
-                            <span class="industry">{stock.industry}</span>
+                            {#if pooledSymbols.has(sixDigit(stock.symbol))}
+                                <span class="added">★ 已收藏</span>
+                            {:else}
+                                <span class="industry">{stock.industry}</span>
+                            {/if}
                         </div>
                     {:else}
                         <div class="dropdown-empty">未找到匹配的股票</div>
@@ -448,11 +512,19 @@
             </button>
             <button
                 class="btn primary"
-                onclick={predictAll}
+                onclick={() => predictAll()}
                 disabled={!items.length || busy}
                 title="对收藏池全部股票做综合分析并生成对比表（纯本地计算）"
             >
                 🎯 一键预测全部
+            </button>
+            <button
+                class="btn gold"
+                onclick={pickTop}
+                disabled={!items.length || busy}
+                title="按引擎多因子分/信号强度/动量选出相对强弱靠前的几只（描述性参考，非上涨概率）"
+            >
+                🏆 一键优选
             </button>
         </div>
     </div>
@@ -660,6 +732,72 @@
             </table>
         </div>
 
+        <!-- 一键优选：相对强弱靠前的几只（描述性参考，非上涨概率） -->
+        {#if showPicks && topPicks.picks.length}
+            <div class="picks-card">
+                <div class="picks-head">
+                    <h2>🏆 优选参考（前 {topPicks.picks.length} 只）</h2>
+                    <span class="picks-sub">
+                        {topPicks.bullishOnly
+                            ? "从引擎判断看涨的股票中"
+                            : "⚠️ 当前引擎对全池均无看涨信号，以下仅为全池中"}按
+                        多因子分 → 信号强度 → 20日动量 排序选出
+                    </span>
+                </div>
+                <div class="picks-grid">
+                    {#each topPicks.picks as r, i (r.symbol)}
+                        <div class="pick-item">
+                            <div class="pick-head">
+                                <span class="pick-rank">#{i + 1}</span>
+                                <span class="symbol">{r.symbol}</span>
+                                <span class="pick-name">{r.name || "—"}</span>
+                                <span class="pick-direction {directionClass(r.direction)}"
+                                    >{r.direction}</span
+                                >
+                            </div>
+                            <div class="pick-stats">
+                                <span>多因子 <b>{fmt(r.adaptive_score, 0)}</b></span>
+                                <span title="信号强度非方向命中概率"
+                                    >信号强度 <b>{fmt(r.signal_strength, 2)}</b></span
+                                >
+                                <span class={updown(r.momentum_20d)}
+                                    >20日动量 {fmtSigned(r.momentum_20d)}</span
+                                >
+                                <span
+                                    >预期{r.prediction_days}日 {fmtSigned(
+                                        r.expected_change_percent,
+                                    )}{#if r.interval}
+                                        <em class="pick-interval"
+                                            >（80%区间 {fmtSigned(
+                                                r.interval.lower_change_percent,
+                                            )} ~ {fmtSigned(
+                                                r.interval.upper_change_percent,
+                                            )}）</em
+                                        >{/if}</span
+                                >
+                                <span>风险 {r.risk_level || "—"}</span>
+                            </div>
+                            <div class="pick-advice">{r.current_advice}</div>
+                            <div class="pick-ops">
+                                <button class="mini" onclick={() => goPredict(r.symbol)}
+                                    >🎯 完整报告</button
+                                >
+                                <button
+                                    class="mini"
+                                    onclick={() => goHistory(r.symbol, r.name)}
+                                    >📅 历史K线</button
+                                >
+                            </div>
+                        </div>
+                    {/each}
+                </div>
+                <p class="picks-note">
+                    ⚠️ 本项目实证：技术信号对单股方向无预测力（引擎方向准确率不高于朴素基准），此优选只是把引擎信号与近期动量的<b>相对强弱</b>排序，<b>不是"最可能上涨"的概率保证</b>；请结合
+                    80% 区间带、估值与自身判断使用。
+                </p>
+            </div>
+        {/if}
+
         <!-- 一键预测对比表 -->
         {#if showComparison && comparisonRows.length}
             <div class="compare-card">
@@ -860,6 +998,7 @@
                                             <button
                                                 class="mini"
                                                 title="重试"
+                                                disabled={busy}
                                                 onclick={() =>
                                                     predictOne(
                                                         row.item.symbol,
@@ -904,12 +1043,16 @@
 
     .custom-select {
         position: relative;
-        flex: 0 0 auto;
-        min-width: 260px;
-        max-width: 360px;
+        /* 明确 flex 基准宽度：容器宽度不依赖子元素百分比解析，
+           避免 WebKitGTK（Tauri Linux 渲染引擎）下输入框溢出遮挡右侧按钮 */
+        flex: 0 0 320px;
+        min-width: 0;
     }
 
     .search-input {
+        /* 项目未引入全局 border-box 重置（global.css 是死文件），必须显式声明，
+           否则 width:100% + 内边距会溢出容器 ~42px，遮挡右侧按钮 */
+        box-sizing: border-box;
         width: 100%;
         padding: 0.7rem 1.2rem;
         border: 2px solid #3b82f6;
@@ -969,6 +1112,12 @@
         color: #94a3b8;
     }
 
+    .dropdown-item .added {
+        margin-left: auto;
+        font-size: 0.8rem;
+        color: #fbbf24;
+    }
+
     .dropdown-empty {
         padding: 0.8rem;
         color: #94a3b8;
@@ -978,6 +1127,7 @@
     .action-buttons {
         display: flex;
         gap: 0.6rem;
+        flex-shrink: 0;
     }
 
     .btn {
@@ -1002,6 +1152,16 @@
 
     .btn.primary:hover:not(:disabled) {
         background: #818cf8;
+    }
+
+    .btn.gold {
+        background: rgba(251, 191, 36, 0.15);
+        border-color: rgba(251, 191, 36, 0.45);
+        color: #fbbf24;
+    }
+
+    .btn.gold:hover:not(:disabled) {
+        background: rgba(251, 191, 36, 0.28);
     }
 
     .btn:disabled {
@@ -1211,6 +1371,103 @@
         border-color: rgba(239, 68, 68, 0.5);
     }
 
+    /* 优选卡 */
+    .picks-card {
+        margin-top: 1.5rem;
+        padding: 1rem 1.2rem 1.2rem;
+        background: rgba(251, 191, 36, 0.05);
+        border: 1px solid rgba(251, 191, 36, 0.25);
+        border-radius: 0.75rem;
+    }
+
+    .picks-head {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 0.8rem;
+        margin-bottom: 0.9rem;
+    }
+
+    .picks-head h2 {
+        font-size: 1.1rem;
+        color: #fbbf24;
+    }
+
+    .picks-sub {
+        font-size: 0.8rem;
+        color: #94a3b8;
+    }
+
+    .picks-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 0.8rem;
+    }
+
+    .pick-item {
+        padding: 0.8rem 0.9rem;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 0.6rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.55rem;
+    }
+
+    .pick-head {
+        display: flex;
+        align-items: baseline;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+    }
+
+    .pick-rank {
+        font-weight: 700;
+        color: #fbbf24;
+    }
+
+    .pick-name {
+        font-weight: 600;
+        color: #f8fafc;
+    }
+
+    .pick-direction {
+        margin-left: auto;
+        font-size: 0.85rem;
+        font-weight: 600;
+    }
+
+    .pick-stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem 1rem;
+        font-size: 0.82rem;
+        color: #cbd5e1;
+        font-variant-numeric: tabular-nums;
+    }
+
+    .pick-interval {
+        font-style: normal;
+        color: #94a3b8;
+    }
+
+    .pick-advice {
+        font-size: 0.85rem;
+        color: #e2e8f0;
+    }
+
+    .pick-ops {
+        display: flex;
+        gap: 0.4rem;
+    }
+
+    .picks-note {
+        margin-top: 0.9rem;
+        font-size: 0.78rem;
+        line-height: 1.6;
+        color: #b8a05e;
+    }
+
     /* 对比卡 */
     .compare-card {
         margin-top: 1.5rem;
@@ -1282,8 +1539,7 @@
 
     @media (max-width: 768px) {
         .custom-select {
-            min-width: 100%;
-            max-width: 100%;
+            flex: 1 1 100%;
         }
 
         .toolbar {
