@@ -1,7 +1,11 @@
 <script lang="ts">
     import { onMount } from 'svelte';
-    import { invoke } from '@tauri-apps/api/core';
     import { confirm } from '@tauri-apps/plugin-dialog';
+    import { BrainCircuit, FlaskConical, History, LoaderCircle, Play, ShieldCheck, Star } from 'lucide-svelte';
+    import PredictionRangeChart from './prediction_range_chart.svelte';
+    import RiskAlertPanel from './risk_alert_panel.svelte';
+    import { errorMessage as readableError, invokeCommand } from '../services';
+    import type { PredictionDiagnostics, RiskCategory, RiskLevel, RiskSummary } from '../types';
 
     // 跨页导航（收藏页等跳转进入）：navSymbol 带入股票代码，navAction="predict" 时自动运行一键综合预测
     export let navSymbol: string | null = null;
@@ -61,6 +65,8 @@
         lower_change_percent: number;
         upper_change_percent: number;
         confidence: number;
+        method: string;
+        lookback_days: number;
     }
 
     interface Prediction {
@@ -74,6 +80,7 @@
         prediction_reason?: string;  // 预测理由
         key_factors?: string[];      // 关键因素
         interval?: PredictionInterval | null;  // 校准预测区间
+        stress_interval?: PredictionInterval | null; // 95%压力区间
     }
     
     interface TrainingLog {
@@ -91,19 +98,6 @@
         training_samples?: number | null;
         test_samples?: number | null;
         created_at: string;
-    }
-    
-    interface ChartData {
-        labels: string[];
-        datasets: Array<{
-            label: string;
-            data: number[];
-            borderColor: string;
-            backgroundColor: string;
-            fill?: boolean;
-            tension?: number;
-            yAxisID?: string;
-        }>;
     }
     
     // 回测相关接口
@@ -148,6 +142,17 @@
         price_error_distribution: number[];
         direction_correct_rate: number;
         volatility_vs_accuracy: Array<[number, number]>;
+        rmse: number;
+        baseline_direction_accuracy: number;
+        direction_edge: number;
+        predicted_up_ratio: number;
+        actual_up_ratio: number;
+        interval_80_samples: number;
+        interval_80_coverage: number;
+        stress_95_samples: number;
+        stress_95_coverage: number;
+        average_interval_80_width: number;
+        average_stress_95_width: number;
     }
     
     // 新增：最新真实数据接口
@@ -165,6 +170,7 @@
             price: number;
             change_percent: number;
         };
+        diagnostics?: PredictionDiagnostics | null;
     }
     
     // 新增：买卖点信号接口
@@ -245,6 +251,7 @@
     let modelAccuracy: number | null = null;
     let lastRealData: LastRealData | null = null; // 新增：最新真实数据
     let professionalAnalysis: ProfessionalPrediction | null = null; // 新增：专业分析结果
+    let predictionDiagnostics: PredictionDiagnostics | null = null;
     let showProfessionalAnalysis = false; // 是否显示专业分析
 
     // 估值上下文（PE/PB + 最新基本面）——仅参考展示，非收益预测，数据随"刷新"更新
@@ -278,6 +285,7 @@
         interval: PredictionInterval | null;
         current_advice: string;
         risk_level: string;
+        risk_summary: RiskSummary;
         adaptive_score: number;
         buy_point_count: number;
         sell_point_count: number;
@@ -319,7 +327,6 @@
     let showTrainingLogs = false;
     let modelComparison: ModelComparisonItem[] = [];
     let showModelComparison = false;
-    let predictionChart: ChartData | null = null;
     
     // 回测相关变量
     let backtestReport: BacktestReport | null = null;
@@ -372,6 +379,19 @@
     }
 
     function normalizePrediction(raw: any): Prediction {
+        const normalizeInterval = (interval: any): PredictionInterval | undefined =>
+            interval
+                ? {
+                      confidence: normalizeNumber(interval.confidence),
+                      lower_change_percent: normalizeNumber(interval.lower_change_percent),
+                      upper_change_percent: normalizeNumber(interval.upper_change_percent),
+                      lower_price: normalizeNumber(interval.lower_price),
+                      upper_price: normalizeNumber(interval.upper_price),
+                      method: String(interval.method ?? "realized_volatility_calibrated"),
+                      lookback_days: normalizeNumber(interval.lookback_days, 20),
+                  }
+                : undefined;
+
         return {
             ...raw,
             target_date: String(raw?.target_date ?? ""),
@@ -401,15 +421,65 @@
                       kdj_oversold: Boolean(raw.technical_indicators.kdj_oversold),
                   }
                 : undefined,
-            interval: raw?.interval
-                ? {
-                      confidence: normalizeNumber(raw.interval.confidence),
-                      lower_change_percent: normalizeNumber(raw.interval.lower_change_percent),
-                      upper_change_percent: normalizeNumber(raw.interval.upper_change_percent),
-                      lower_price: normalizeNumber(raw.interval.lower_price),
-                      upper_price: normalizeNumber(raw.interval.upper_price),
-                  }
-                : undefined,
+            interval: normalizeInterval(raw?.interval),
+            stress_interval: normalizeInterval(raw?.stress_interval),
+        };
+    }
+
+    function normalizeRiskSummary(raw: any): RiskSummary {
+        const level: RiskLevel = ["low", "medium", "high"].includes(raw?.level)
+            ? raw.level
+            : "low";
+        const validCategories: RiskCategory[] = [
+            "data",
+            "uncertainty",
+            "volatility",
+            "trend",
+            "signal",
+            "liquidity",
+            "model",
+        ];
+        const metrics = raw?.metrics ?? {};
+
+        return {
+            level,
+            level_label: String(raw?.level_label ?? (level === "high" ? "高风险" : level === "medium" ? "中风险" : "低风险")),
+            warnings: Array.isArray(raw?.warnings)
+                ? raw.warnings.map((warning: any) => ({
+                      code: String(warning?.code ?? "UNKNOWN"),
+                      category: validCategories.includes(warning?.category)
+                          ? warning.category
+                          : "signal",
+                      severity: ["low", "medium", "high"].includes(warning?.severity)
+                          ? warning.severity
+                          : "medium",
+                      title: String(warning?.title ?? "风险提示"),
+                      detail: String(warning?.detail ?? ""),
+                      evidence: Array.isArray(warning?.evidence) ? warning.evidence.map(String) : [],
+                  }))
+                : [],
+            metrics: {
+                history_samples: normalizeNumber(metrics.history_samples),
+                data_staleness_days: metrics.data_staleness_days == null ? null : normalizeNumber(metrics.data_staleness_days),
+                daily_volatility_percent: normalizeNumber(metrics.daily_volatility_percent),
+                volatility_percentile: normalizeNumber(metrics.volatility_percentile),
+                interval_80_width_percent: metrics.interval_80_width_percent == null ? null : normalizeNumber(metrics.interval_80_width_percent),
+                interval_80_lower_percent: metrics.interval_80_lower_percent == null ? null : normalizeNumber(metrics.interval_80_lower_percent),
+                stress_95_lower_percent: metrics.stress_95_lower_percent == null ? null : normalizeNumber(metrics.stress_95_lower_percent),
+                support_distance_percent: metrics.support_distance_percent == null ? null : normalizeNumber(metrics.support_distance_percent),
+                resistance_distance_percent: metrics.resistance_distance_percent == null ? null : normalizeNumber(metrics.resistance_distance_percent),
+                atr_percent: metrics.atr_percent == null ? null : normalizeNumber(metrics.atr_percent),
+            },
+        };
+    }
+
+    function normalizeDiagnostics(raw: any): PredictionDiagnostics | null {
+        if (!raw?.risk_summary) return null;
+        return {
+            point_estimate_kind: String(raw.point_estimate_kind ?? ""),
+            point_estimate_note: String(raw.point_estimate_note ?? ""),
+            uncertainty_method: String(raw.uncertainty_method ?? ""),
+            risk_summary: normalizeRiskSummary(raw.risk_summary),
         };
     }
 
@@ -500,6 +570,7 @@
                 if (result.predictions.last_real_data) {
                     lastRealData = normalizeLastRealData(result.predictions.last_real_data);
                 }
+                predictionDiagnostics = normalizeDiagnostics(result.predictions.diagnostics);
             }
         }
 
@@ -507,11 +578,6 @@
         if (result.professional_analysis) {
             professionalAnalysis = normalizeProfessionalPrediction(result.professional_analysis);
             showProfessionalAnalysis = true;
-        }
-
-        // 生成图表数据
-        if (predictions && predictions.length > 0) {
-            generatePredictionChart(predictions);
         }
 
         return professionalAnalysis;
@@ -531,13 +597,13 @@
         errorMessage = "";
         predictions = [];
         professionalAnalysis = null;
+        predictionDiagnostics = null;
         lastRealData = null;
-        predictionChart = null;
         showProfessionalAnalysis = false;
         comprehensiveReport = null;
 
         try {
-            const report = await invoke<ComprehensiveReport>('comprehensive_predict', {
+            const report = await invokeCommand<ComprehensiveReport>('comprehensive_predict', {
                 symbol,
                 days: technicalPredictionDays,
             });
@@ -545,7 +611,7 @@
             valuationContext = report.valuation;
             applyProfessionalResponse(report.prediction);
         } catch (error) {
-            errorMessage = `综合预测失败: ${error}`;
+            errorMessage = `综合预测失败：${readableError(error, "请稍后重试")}`;
             console.error('综合预测错误:', error);
         } finally {
             isComprehensivePredicting = false;
@@ -565,8 +631,8 @@
         errorMessage = "";
         predictions = [];
         professionalAnalysis = null;
+        predictionDiagnostics = null;
         lastRealData = null;
-        predictionChart = null;
         showProfessionalAnalysis = false;
         comprehensiveReport = null;
         loadValuationContext(symbol);
@@ -578,10 +644,7 @@
                 prediction_days: technicalPredictionDays
             };
 
-            console.log('纯技术分析预测请求:', request);
-
-            const result = await invoke<ProfessionalPredictionResponse>('predict_with_technical_only', { request });
-            console.log('纯技术分析预测响应:', result);
+            const result = await invokeCommand<ProfessionalPredictionResponse>('predict_with_technical_only', { request });
 
             const appliedAnalysis = applyProfessionalResponse(result);
 
@@ -598,13 +661,13 @@
                 );
             }
         } catch (error) {
-            errorMessage = `纯技术分析预测失败: ${error}`;
+            errorMessage = `纯技术分析预测失败：${readableError(error, "请稍后重试")}`;
             console.error('纯技术分析预测错误:', error);
             await alert(errorMessage);
             predictions = [];
             professionalAnalysis = null;
+            predictionDiagnostics = null;
             lastRealData = null;
-            predictionChart = null;
         } finally {
             isTechnicalPredicting = false;
         }
@@ -629,7 +692,7 @@
                 loadWatchStatus();
             }
         } catch (error) {
-            errorMessage = `加载失败: ${error}`;
+            errorMessage = `加载失败：${readableError(error, "请稍后重试")}`;
         }
     });
 
@@ -644,7 +707,7 @@
         }
         
         try {
-            const models: ModelInfo[] = await invoke('list_stock_prediction_models', { symbol });
+            const models = await invokeCommand<ModelInfo[]>('list_stock_prediction_models', { symbol });
             if (requestSeq !== modelListRequestSeq || symbol !== normalizedStockCode()) {
                 return;
             }
@@ -662,11 +725,11 @@
                     selectedModelName = chooseDefaultModel(modelList).id;
                     modelSelectionManuallySelected = false;
                 }
-                // 优先展示「使用现有模型」tab（除非用户已手动切过 tab）
+                // 默认保持综合风险分析；模型仅作为用户主动进入的实验工具。
                 if (!tabManuallySelected) {
-                    showTechnicalOnly = false;
+                    showTechnicalOnly = true;
                     showBacktestReport = false;
-                    useExistingModel = true;
+                    useExistingModel = false;
                 }
             } else if (!tabManuallySelected) {
                 // 无可用模型时回退到「纯技术分析」（无需训练、始终可用）
@@ -682,7 +745,7 @@
             if (requestSeq !== modelListRequestSeq) {
                 return;
             }
-            errorMessage = `加载模型列表失败: ${error}`;
+            errorMessage = `加载模型列表失败：${readableError(error, "请稍后重试")}`;
             modelList = [];
             selectedModelName = "";
             modelSelectionManuallySelected = false;
@@ -749,7 +812,7 @@
                 train_test_split: trainTestSplit
             };
 
-            const result = await invoke<{metadata: ModelInfo, accuracy: number, test_samples: number, mae: number, rmse: number}>('train_candle_model', { request: trainRequest });
+            const result = await invokeCommand<{metadata: ModelInfo, accuracy: number, test_samples: number, mae: number, rmse: number}>('train_candle_model', { request: trainRequest });
             
             clearInterval(progressInterval);
             trainingProgress = 100;
@@ -774,7 +837,7 @@
             
         } catch (error) {
             clearInterval(progressInterval);
-            errorMessage = `训练失败: ${error}`;
+            errorMessage = `训练失败：${readableError(error, "请检查训练参数")}`;
         } finally {
             isTraining = false;
         }
@@ -786,7 +849,7 @@
         if (!symbol) return;
         
         try {
-            const models = await invoke('list_stock_prediction_models', { symbol }) as ModelInfo[];
+            const models = await invokeCommand<ModelInfo[]>('list_stock_prediction_models', { symbol });
             modelComparison = models.map((model: ModelInfo) => ({
                 name: model.name,
                 type: model.model_type,
@@ -808,45 +871,6 @@
         }
     }
 
-    // 生成预测图表数据
-    function generatePredictionChart(predictions: Prediction[]) {
-        if (!predictions || predictions.length === 0) {
-            console.log("没有预测数据，无法生成图表");
-            return;
-        }
-        
-        console.log("生成预测图表，数据量:", predictions.length);
-        
-        const chartData: ChartData = {
-            labels: predictions.map((p: Prediction) => {
-                const date = new Date(p.target_date);
-                return `${date.getMonth() + 1}/${date.getDate()}`;
-            }),
-            datasets: [{
-                label: '预测价格',
-                data: predictions.map((p: Prediction) => p.predicted_price),
-                borderColor: 'rgb(79, 70, 229)',
-                backgroundColor: 'rgba(79, 70, 229, 0.1)',
-                fill: true,
-                tension: 0.4
-            }, {
-                label: '信号强度 (%)',
-                data: predictions.map((p: Prediction) => p.confidence * 100),
-                borderColor: 'rgb(34, 197, 94)',
-                backgroundColor: 'rgba(34, 197, 94, 0.1)',
-                yAxisID: 'y1',
-                fill: false
-            }]
-        };
-        
-        predictionChart = chartData;
-        console.log("预测图表数据已生成:", predictionChart);
-    }
-
-    function chartX(index: number, length: number): number {
-        return length <= 1 ? 405 : 60 + (index / (length - 1)) * 690;
-    }
-
     async function predictStock() {
         const symbol = normalizedStockCode();
         if (!symbol) {
@@ -861,8 +885,8 @@
         
         isPredicting = true;
         errorMessage = "";
-        predictionChart = null; // 重置图表数据
         professionalAnalysis = null; // 重置专业分析数据，避免上次技术分析结果残留到摘要卡
+        predictionDiagnostics = null;
         showProfessionalAnalysis = false; // 重置专业分析显示
         comprehensiveReport = null; // 重置综合报告，避免补充卡与新预测口径不一致
         loadValuationContext(symbol);
@@ -875,9 +899,7 @@
                 use_candle: true
             };
 
-            console.log("发送预测请求:", request);
-            const result = await invoke<Prediction[] | PredictionResult>('predict_with_candle', { request });
-            console.log("收到预测结果:", result);
+            const result = await invokeCommand<Prediction[] | PredictionResult>('predict_with_candle', { request });
             
             // 处理返回结果，提取预测数据和最新真实数据
             if (result) {
@@ -890,26 +912,23 @@
                     if (result.last_real_data) {
                         lastRealData = normalizeLastRealData(result.last_real_data);
                     }
+                    predictionDiagnostics = normalizeDiagnostics(result.diagnostics);
                 }
             } else {
                 predictions = [];
                 lastRealData = null;
             }
             
-            // 生成图表数据
-            if (predictions && predictions.length > 0) {
-                generatePredictionChart(predictions);
-                console.log("图表数据生成完成:", predictionChart);
-            } else {
+            if (!predictions || predictions.length === 0) {
                 console.warn("预测结果为空，无法生成图表");
             }
             
         } catch (error) {
             console.error("预测失败:", error);
-            errorMessage = `预测失败: ${error}`;
+            errorMessage = `预测失败：${readableError(error, "请稍后重试")}`;
             predictions = [];
             lastRealData = null;
-            predictionChart = null;
+            predictionDiagnostics = null;
         } finally {
             isPredicting = false;
         }
@@ -930,8 +949,8 @@
         
         isPredicting = true;
         errorMessage = "";
-        predictionChart = null;
         professionalAnalysis = null;
+        predictionDiagnostics = null;
         showProfessionalAnalysis = false;
         comprehensiveReport = null;
         loadValuationContext(symbol);
@@ -944,9 +963,7 @@
                 use_candle: true
             };
 
-            console.log("发送专业预测请求:", request);
-            const result = await invoke<ProfessionalPredictionResponse>('predict_with_professional_strategy', { request });
-            console.log("收到专业预测结果:", result);
+            const result = await invokeCommand<ProfessionalPredictionResponse>('predict_with_professional_strategy', { request });
             
             if (result) {
                 // 提取预测数据
@@ -958,6 +975,7 @@
                         if (result.predictions.last_real_data) {
                             lastRealData = normalizeLastRealData(result.predictions.last_real_data);
                         }
+                        predictionDiagnostics = normalizeDiagnostics(result.predictions.diagnostics);
                     }
                 }
                 
@@ -965,22 +983,17 @@
                 if (result.professional_analysis) {
                     professionalAnalysis = normalizeProfessionalPrediction(result.professional_analysis);
                     showProfessionalAnalysis = true;
-                    console.log("专业分析结果:", professionalAnalysis);
                 }
                 
-                // 生成图表数据
-                if (predictions && predictions.length > 0) {
-                    generatePredictionChart(predictions);
-                }
             }
             
         } catch (error) {
             console.error("专业预测失败:", error);
-            errorMessage = `专业预测失败: ${error}`;
+            errorMessage = `专业预测失败：${readableError(error, "请稍后重试")}`;
             predictions = [];
             lastRealData = null;
             professionalAnalysis = null;
-            predictionChart = null;
+            predictionDiagnostics = null;
         } finally {
             isPredicting = false;
         }
@@ -989,7 +1002,7 @@
     // 拉取估值上下文（PE/PB + 最新基本面）。失败不影响预测主流程，仅置空面板。
     async function loadValuationContext(symbol: string) {
         try {
-            valuationContext = await invoke<ValuationContext>('get_valuation_context', { symbol });
+            valuationContext = await invokeCommand<ValuationContext>('get_valuation_context', { symbol });
         } catch (error) {
             console.warn("获取估值上下文失败:", error);
             valuationContext = null;
@@ -1012,7 +1025,7 @@
 
     async function loadWatchStatus() {
         try {
-            const symbols = await invoke<string[]>("get_watchlist_symbols");
+            const symbols = await invokeCommand<string[]>("get_watchlist_symbols");
             isWatched = symbols.includes(sixDigitCode(stockCode));
         } catch (error) {
             console.warn("获取收藏状态失败:", error);
@@ -1023,10 +1036,10 @@
         const symbol = normalizedStockCode();
         if (!symbol) return;
         try {
-            await invoke(isWatched ? "remove_from_watchlist" : "add_to_watchlist", { symbol });
+            await invokeCommand(isWatched ? "remove_from_watchlist" : "add_to_watchlist", { symbol });
             isWatched = !isWatched;
         } catch (error) {
-            errorMessage = `收藏操作失败: ${error}`;
+            errorMessage = `收藏操作失败：${readableError(error, "请稍后重试")}`;
         }
     }
 
@@ -1055,18 +1068,25 @@
         predictions.length && predictions[predictions.length - 1].interval
             ? predictions[predictions.length - 1].interval
             : null;
-    $: conclusionDirection =
-        predHorizonChange > 1.5 ? 'bull' : predHorizonChange < -1.5 ? 'bear' : 'neutral';
+    $: predStressBand =
+        predictions.length && predictions[predictions.length - 1].stress_interval
+            ? predictions[predictions.length - 1].stress_interval
+            : null;
+    $: technicalSignal = predictions.length
+        ? predictions[predictions.length - 1].trading_signal ?? '中性'
+        : '中性';
+    $: conclusionDirection = /涨|多|买/.test(technicalSignal)
+        ? 'bull'
+        : /跌|空|卖/.test(technicalSignal)
+          ? 'bear'
+          : 'neutral';
     $: conclusionLabel =
-        conclusionDirection === 'bull' ? '偏多 ▲' : conclusionDirection === 'bear' ? '偏空 ▼' : '震荡 ◆';
+        conclusionDirection === 'bull' ? '技术偏多' : conclusionDirection === 'bear' ? '技术偏空' : '技术中性';
     $: conclusionAdvice =
         professionalAnalysis?.current_advice ||
-        (conclusionDirection === 'bull'
-            ? '可逢低关注，分批参与'
-            : conclusionDirection === 'bear'
-              ? '注意回避风险，反弹减仓'
-              : '观望为主，等待方向明确');
-    $: conclusionRisk = professionalAnalysis?.risk_level || '';
+        '该结果为模型实验输出，请结合朴素基准、走步回测和校准区间判断';
+    $: conclusionRisk =
+        predictionDiagnostics?.risk_summary.level_label || professionalAnalysis?.risk_level || '';
     $: buyPointsCount = professionalAnalysis?.buy_points?.length ?? 0;
     $: sellPointsCount = professionalAnalysis?.sell_points?.length ?? 0;
     // 摘要卡：当前价 → 目标价（预测区间末日价）
@@ -1093,11 +1113,11 @@
             return;
         }
         try {
-            await invoke('delete_stock_prediction_model', { modelId });
+            await invokeCommand('delete_stock_prediction_model', { modelId });
             await loadModelList();
             alert('模型删除成功');
         } catch (error) {
-            errorMessage = `删除失败: ${error}`;
+            errorMessage = `删除失败：${readableError(error, "请稍后重试")}`;
         }
     }
     
@@ -1128,7 +1148,7 @@
         errorMessage = "";
         
         try {
-            await invoke('retrain_candle_model', { 
+            await invokeCommand('retrain_candle_model', {
                 modelId,
                 epochs: epochs,
                 batchSize: batchSize,
@@ -1137,7 +1157,7 @@
             await alert(`模型 ${modelName} 重新训练成功！`);
             await loadModelList();
         } catch (error) {
-            errorMessage = `重新训练失败: ${error}`;
+            errorMessage = `重新训练失败：${readableError(error, "请稍后重试")}`;
             await alert(errorMessage);
         } finally {
             isTraining = false;
@@ -1147,7 +1167,7 @@
     // 获取模型评估信息
     async function evaluateModel(modelId: string) {
         try {
-            const result = await invoke<{accuracy: number, test_samples: number, mae: number, rmse: number, evaluation_scope?: string, evaluation_note?: string}>('evaluate_candle_model', { modelId });
+            const result = await invokeCommand<{accuracy: number, test_samples: number, mae: number, rmse: number, evaluation_scope?: string, evaluation_note?: string}>('evaluate_candle_model', { modelId });
             const model = modelList.find(m => m.id === modelId);
             const trainingDays = model ? getModelTrainingDays(model) : null;
             const horizonLine = trainingDays ? `\n训练周期: ${trainingDays}日` : "";
@@ -1156,7 +1176,7 @@
             
             alert(`${scope}:${horizonLine}\n测试样本: ${result.test_samples}\n方向准确率: ${(result.accuracy * 100).toFixed(2)}%\nMAE: ${result.mae.toFixed(3)}\nRMSE: ${result.rmse.toFixed(3)}${noteLine}`);
         } catch (error) {
-            errorMessage = `评估失败: ${error}`;
+            errorMessage = `评估失败：${readableError(error, "请稍后重试")}`;
         }
     }
     
@@ -1196,14 +1216,12 @@
                 backtest_interval: backtestInterval
             };
             
-            const result = await invoke<BacktestReport>('run_model_backtest', { request: backtestRequest });
+            const result = await invokeCommand<BacktestReport>('run_model_backtest', { request: backtestRequest });
             backtestReport = result;
             showBacktestReport = true;
             
-            console.log("回测结果:", result);
-            
         } catch (error) {
-            errorMessage = `回测失败: ${error}`;
+            errorMessage = `回测失败：${readableError(error, "请检查回测条件")}`;
             console.error("回测失败:", error);
         } finally {
             isBacktesting = false;
@@ -1222,93 +1240,98 @@
 </script>
 
 <div class="container">
-    <h1>智能股票预测</h1>
+    <header class="page-header">
+        <div>
+            <h1>预测与风险工作台</h1>
+            <p>以风险区间和回测证据为主，模型输出仅作为辅助观察。</p>
+        </div>
+    </header>
 
     <div class="input-group">
         <input
             type="text"
-            placeholder="输入股票代码（例如：sh000001）"
+            placeholder="输入股票代码，例如 sh000001"
             bind:value={stockCode}
             on:change={handleStockCodeChange}
             class="search-input"
+            aria-label="股票代码"
         />
         <button
             class="watch-star"
             class:watched={isWatched}
             on:click={toggleWatch}
             title={isWatched ? "移出收藏池" : "加入收藏池"}
+            aria-label={isWatched ? "移出收藏池" : "加入收藏池"}
         >
-            {isWatched ? "★" : "☆"}
+            <Star size={19} fill={isWatched ? "currentColor" : "none"} aria-hidden="true" />
         </button>
     </div>
     
     {#if errorMessage}
-        <div class="error-message">
+        <div class="error-message" role="alert">
             {errorMessage}
         </div>
     {/if}
 
     {#if isComprehensivePredicting}
-        <div class="comprehensive-loading">🎯 正在生成综合预测报告…</div>
+        <div class="comprehensive-loading"><LoaderCircle size={17} class="spin" aria-hidden="true" />正在生成综合风险报告…</div>
     {/if}
 
     <div class="tabs">
         <button class:active={showTechnicalOnly} on:click={() => {tabManuallySelected = true; showTechnicalOnly = true; showBacktestReport = false; useExistingModel = false;}}>
-            📊 纯技术分析
+            <ShieldCheck size={17} aria-hidden="true" />综合风险分析
         </button>
-        <button class:active={useExistingModel && !showBacktestReport && !showTechnicalOnly} on:click={() => {tabManuallySelected = true; useExistingModel = true; showBacktestReport = false; showTechnicalOnly = false;}}>
-            使用现有模型
-        </button>
-        <button class:active={!useExistingModel && !showBacktestReport && !showTechnicalOnly} on:click={() => {tabManuallySelected = true; useExistingModel = false; showBacktestReport = false; showTechnicalOnly = false;}}>
-            训练新模型
+        <button class:active={!showBacktestReport && !showTechnicalOnly} on:click={() => {tabManuallySelected = true; useExistingModel = true; showBacktestReport = false; showTechnicalOnly = false;}}>
+            <FlaskConical size={17} aria-hidden="true" />模型实验
         </button>
         <button class:active={showBacktestReport} on:click={() => {tabManuallySelected = true; showBacktestReport = true; showTechnicalOnly = false; setDefaultBacktestDates();}}>
-            回测报告
+            <History size={17} aria-hidden="true" />回测验证
         </button>
     </div>
+
+    {#if !showTechnicalOnly && !showBacktestReport}
+        <div class="model-lab-switch" aria-label="模型实验模式">
+            <button class:active={useExistingModel} on:click={() => useExistingModel = true}>
+                <BrainCircuit size={16} aria-hidden="true" />模型预测
+            </button>
+            <button class:active={!useExistingModel} on:click={() => useExistingModel = false}>
+                <FlaskConical size={16} aria-hidden="true" />训练模型
+            </button>
+        </div>
+    {/if}
     
     {#if showTechnicalOnly}
-        <div class="model-section">
-            <h2>📊 纯技术分析预测（无需模型训练）</h2>
-            <p class="section-desc">
-                基于历史数据的纯技术指标分析，无需训练模型即可预测。
-                包含：多因子评分、支撑压力位、多周期共振、量价背离、K线形态等专业分析。
-            </p>
-            
-            <div class="prediction-settings">
-                <div class="form-group">
-                    <label>历史数据天数：</label>
-                    <input type="number" bind:value={technicalHistoryDays} min="120" max="3000" step="100" />
-                    <small>建议500-3000天，真实数据越多校准越稳定</small>
+        <section class="analysis-toolbar">
+            <div class="analysis-heading">
+                <div>
+                    <h2>综合风险分析</h2>
+                    <span>区间与风险为主，技术信号仅描述当前状态</span>
                 </div>
-                
-                <div class="form-group">
-                    <label>预测天数：</label>
-                    <input type="number" bind:value={technicalPredictionDays} min="1" max="30" />
-                    <small>建议预测未来1-5天，长周期仅作参考</small>
+                <div class="horizon-control">
+                    <label for="analysis-days">预测周期</label>
+                    <div class="horizon-presets">
+                        {#each [1, 5, 10, 20] as days}
+                            <button class:active={technicalPredictionDays === days} on:click={() => technicalPredictionDays = days}>{days}日</button>
+                        {/each}
+                    </div>
+                    <input id="analysis-days" type="number" bind:value={technicalPredictionDays} min="1" max="30" aria-label="自定义预测天数" />
                 </div>
-                
+            </div>
+            <div class="analysis-action">
                 <button
-                    on:click={predictWithTechnicalOnly}
-                    class:loading={isTechnicalPredicting}
-                    disabled={isTechnicalPredicting || !stockCode}
+                    on:click={runComprehensivePredict}
+                    class:loading={isComprehensivePredicting}
+                    disabled={isComprehensivePredicting || !stockCode}
                     class="predict-btn"
                 >
-                    {isTechnicalPredicting ? '分析中...' : '🔮 开始预测'}
+                    {#if isComprehensivePredicting}
+                        <LoaderCircle size={18} class="spin" aria-hidden="true" />分析中
+                    {:else}
+                        <Play size={18} aria-hidden="true" />生成综合报告
+                    {/if}
                 </button>
             </div>
-            
-            <div class="info-box">
-                <h4>💡 纯技术分析优势</h4>
-                <ul>
-                    <li>✅ <strong>无需模型训练</strong> - 直接基于历史数据分析</li>
-                    <li>✅ <strong>实时响应</strong> - 几秒钟即可得到结果</li>
-                    <li>✅ <strong>金融级指标</strong> - RSI、MACD、KDJ、ATR、ADX等</li>
-                    <li>✅ <strong>多维度分析</strong> - 趋势、量能、形态、情绪综合评估</li>
-                    <li>✅ <strong>智能买卖点</strong> - 自动识别支撑压力位和交易机会</li>
-                </ul>
-            </div>
-        </div>
+        </section>
     {:else if useExistingModel && !showBacktestReport}
         <div class="model-section">
             <h2>选择预测模型</h2>
@@ -1318,7 +1341,7 @@
                 <div class="model-list">
                     {#each modelList as model}
                         <div class="model-item" class:selected={selectedModelName === model.id}>
-                            <div class="model-info" on:click={() => selectModel(model.id)}>
+                            <div class="model-info" role="button" tabindex="0" on:click={() => selectModel(model.id)} on:keydown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectModel(model.id); } }}>
                                 <h3>{model.name}</h3>
                                 <div class="model-details">
                                     <span>类型：{model.model_type}</span>
@@ -1371,12 +1394,12 @@
                     on:click={predictWithProfessionalStrategy}
                     class:loading={isPredicting}
                     disabled={isPredicting || modelList.length === 0}
-                    style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);"
+                    class="professional-predict-btn"
                 >
                     {#if isPredicting}
                         <span class="spinner"></span>
                     {:else}
-                        💎 金融级预测
+                        <BrainCircuit size={17} aria-hidden="true" />模型 + 风险分析
                     {/if}
                 </button>
             </div>
@@ -1387,28 +1410,28 @@
             
             <div class="training-form">
                 <div class="form-group">
-                    <label>模型名称:</label>
-                    <input type="text" bind:value={newModelName} />
+                    <label for="model-name">模型名称:</label>
+                    <input id="model-name" type="text" bind:value={newModelName} />
                 </div>
                 
                 <div class="form-group">
-                    <label>模型类型:</label>
-                    <select bind:value={modelType}>
+                    <label for="model-type">模型类型:</label>
+                    <select id="model-type" bind:value={modelType}>
                         <option value="candle_mlp_horizon">Candle多层感知机（按预测天数训练）</option>
                     </select>
                 </div>
                 
                 <div class="form-group">
-                    <label>历史窗口天数 (实际查询范围+30天节假日缓冲):</label>
-                    <input type="number" bind:value={lookbackDays} min="120" max="3000" step="100" />
+                    <label for="lookback-days">历史窗口天数 (实际查询范围+30天节假日缓冲):</label>
+                    <input id="lookback-days" type="number" bind:value={lookbackDays} min="120" max="3000" step="100" />
                     <small style="color: rgba(255,255,255,0.6); font-size: 0.8rem;">
                         推荐: 1500天 (约6年交易数据)，实际查询 {lookbackDays + 30} 天
                     </small>
                 </div>
                 
                 <div class="form-group">
-                    <label>训练/测试集分割比例:</label>
-                    <input type="number" bind:value={trainTestSplit} min="0.5" max="0.9" step="0.1" />
+                    <label for="train-split">训练/测试集分割比例:</label>
+                    <input id="train-split" type="number" bind:value={trainTestSplit} min="0.5" max="0.9" step="0.1" />
                 </div>
                 
                 <button type="button" class="advanced-btn" on:click={toggleAdvancedOptions}>
@@ -1418,29 +1441,29 @@
                 {#if advancedOptions}
                     <div class="advanced-options">
                         <div class="form-group">
-                            <label>训练轮数(Epochs):</label>
-                            <input type="number" bind:value={epochs} min="10" max="1000" />
+                            <label for="training-epochs">训练轮数(Epochs):</label>
+                            <input id="training-epochs" type="number" bind:value={epochs} min="10" max="1000" />
                         </div>
                         
                         <div class="form-group">
-                            <label>批处理大小(Batch Size):</label>
-                            <input type="number" bind:value={batchSize} min="8" max="128" />
+                            <label for="batch-size">批处理大小(Batch Size):</label>
+                            <input id="batch-size" type="number" bind:value={batchSize} min="8" max="128" />
                         </div>
                         
                         <div class="form-group">
-                            <label>学习率(Learning Rate):</label>
-                            <input type="number" bind:value={learningRate} min="0.0001" max="0.1" step="0.0001" />
+                            <label for="learning-rate">学习率(Learning Rate):</label>
+                            <input id="learning-rate" type="number" bind:value={learningRate} min="0.0001" max="0.1" step="0.0001" />
                         </div>
                         
                         <div class="form-group">
-                            <label>Dropout率:</label>
-                            <input type="number" bind:value={dropout} min="0" max="0.5" step="0.1" />
+                            <label for="dropout-rate">Dropout率:</label>
+                            <input id="dropout-rate" type="number" bind:value={dropout} min="0" max="0.5" step="0.1" />
                         </div>
                     </div>
                 {/if}
                 
                 <div class="form-group features-list">
-                    <label>特征选择:</label>
+                    <span class="form-label">特征选择:</span>
                     <div class="features-checkboxes">
                         <label>
                             <input type="checkbox" value="close" checked={features.includes('close')} on:change={(e) => {
@@ -1772,8 +1795,8 @@
 
                 {#if backtestMode === "model"}
                     <div class="form-group">
-                        <label>选择模型:</label>
-                        <select bind:value={selectedModelName} disabled={modelList.length === 0} on:change={() => modelSelectionManuallySelected = true}>
+                        <label for="backtest-model">选择模型:</label>
+                        <select id="backtest-model" bind:value={selectedModelName} disabled={modelList.length === 0} on:change={() => modelSelectionManuallySelected = true}>
                             <option value="">请选择模型</option>
                             {#each modelList as model}
                                 <option value={model.id}>{formatModelOption(model)}</option>
@@ -1783,23 +1806,23 @@
                 {/if}
                 
                 <div class="form-group">
-                    <label>回测开始日期:</label>
-                    <input type="date" bind:value={backtestStartDate} />
+                    <label for="backtest-start">回测开始日期:</label>
+                    <input id="backtest-start" type="date" bind:value={backtestStartDate} />
                 </div>
                 
                 <div class="form-group">
-                    <label>回测结束日期:</label>
-                    <input type="date" bind:value={backtestEndDate} />
+                    <label for="backtest-end">回测结束日期:</label>
+                    <input id="backtest-end" type="date" bind:value={backtestEndDate} />
                 </div>
                 
                 <div class="form-group">
-                    <label>预测天数:</label>
-                    <input type="number" bind:value={daysToPredict} min="1" max="10" on:change={handlePredictionDaysChange} />
+                    <label for="backtest-days">预测天数:</label>
+                    <input id="backtest-days" type="number" bind:value={daysToPredict} min="1" max="10" on:change={handlePredictionDaysChange} />
                 </div>
                 
                 <div class="form-group">
-                    <label>回测间隔(天):</label>
-                    <input type="number" bind:value={backtestInterval} min="1" max="30" />
+                    <label for="backtest-interval">回测间隔(天):</label>
+                    <input id="backtest-interval" type="number" bind:value={backtestInterval} min="1" max="30" />
                     <small>每隔几天进行一次预测</small>
                 </div>
                 
@@ -1824,45 +1847,53 @@
                     <!-- 总体统计 -->
                     <div class="backtest-summary">
                         <div class="summary-card">
-                            <h4>总体准确率</h4>
+                            <h4>真实走步指标</h4>
                             <div class="summary-stats">
                                 <div class="stat-item">
                                     <span class="stat-label">回测对象:</span>
                                     <span class="stat-value model-name-value">{backtestReport.model_name}</span>
                                 </div>
                                 <div class="stat-item">
-                                    <span class="stat-label">价格准确率:</span>
-                                    <span class="stat-value">{(backtestReport.overall_price_accuracy * 100).toFixed(2)}%</span>
-                                </div>
-                                <div class="stat-item">
                                     <span class="stat-label">方向准确率:</span>
                                     <span class="stat-value">{(backtestReport.overall_direction_accuracy * 100).toFixed(2)}%</span>
                                 </div>
                                 <div class="stat-item">
-                                    <span class="stat-label">平均误差:</span>
+                                    <span class="stat-label">朴素基准:</span>
+                                    <span class="stat-value">{(backtestReport.baseline_direction_accuracy * 100).toFixed(2)}%</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">方向 edge:</span>
+                                    <span class="stat-value {backtestReport.direction_edge > 0 ? 'positive' : 'negative'}">{backtestReport.direction_edge > 0 ? '+' : ''}{(backtestReport.direction_edge * 100).toFixed(2)}%</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">MAE:</span>
                                     <span class="stat-value">{backtestReport.average_prediction_error.toFixed(2)}%</span>
                                 </div>
                                 <div class="stat-item">
-                                    <span class="stat-label">总预测次数:</span>
+                                    <span class="stat-label">RMSE:</span>
+                                    <span class="stat-value">{backtestReport.rmse.toFixed(2)}%</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">80%区间覆盖:</span>
+                                    <span class="stat-value">{(backtestReport.interval_80_coverage * 100).toFixed(1)}% / {backtestReport.interval_80_samples}样本</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">95%区间覆盖:</span>
+                                    <span class="stat-value">{(backtestReport.stress_95_coverage * 100).toFixed(1)}% / {backtestReport.stress_95_samples}样本</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">总样本:</span>
                                     <span class="stat-value">{backtestReport.total_predictions}</span>
                                 </div>
                             </div>
                         </div>
                     </div>
-                    
-                                        <!-- 准确率趋势图 -->
-                    <div class="accuracy-trend">
-                        <h4>准确率趋势</h4>
-                        <div class="trend-chart">
-                            <div class="trend-bars">
-                                {#each backtestReport.accuracy_trend as accuracy, i}
-                                    <div class="trend-bar" style="height: {accuracy * 100}px;" title="第{i + 1}次回测: {(accuracy * 100).toFixed(1)}%">
-                                        <div class="trend-bar-fill" style="background-color: rgb(34, 197, 94);"></div>
-                                    </div>
-                                {/each}
-                            </div>
+
+                    {#if backtestReport.direction_edge <= 0}
+                        <div class="backtest-warning">
+                            当前方向准确率未超过总猜多数方向的朴素基准，暂无方向预测价值证据。
                         </div>
-                    </div>
+                    {/if}
                     
                     <!-- 详细回测记录 -->
                     <div class="backtest-details">
@@ -1872,9 +1903,8 @@
                                 <thead>
                                     <tr>
                                         <th>预测日期</th>
-                                        <th>价格准确率</th>
-                                        <th>方向准确率</th>
-                                        <th>平均误差</th>
+                                        <th>方向结果</th>
+                                        <th>绝对误差</th>
                                         <th>预测次数</th>
                                         <th>详情</th>
                                     </tr>
@@ -1884,16 +1914,7 @@
                                         <tr>
                                             <td>{new Date(entry.prediction_date).toLocaleDateString()}</td>
                                             <td class="accuracy-cell">
-                                                <div class="accuracy-bar">
-                                                    <div class="accuracy-fill" style="width: {entry.price_accuracy * 100}%"></div>
-                                                    <span>{(entry.price_accuracy * 100).toFixed(1)}%</span>
-                                                </div>
-                                            </td>
-                                            <td class="accuracy-cell">
-                                                <div class="accuracy-bar">
-                                                    <div class="accuracy-fill direction-fill" style="width: {entry.direction_accuracy * 100}%"></div>
-                                                    <span>{(entry.direction_accuracy * 100).toFixed(1)}%</span>
-                                                </div>
+                                                <span class={entry.direction_accuracy > 0 ? 'chip-correct' : 'chip-wrong'}>{entry.direction_accuracy > 0 ? '命中' : '未命中'}</span>
                                             </td>
                                             <td>{entry.avg_prediction_error.toFixed(2)}%</td>
                                             <td>{entry.predictions.length}</td>
@@ -1905,7 +1926,7 @@
                                         </tr>
                                         {#if expandedEntryIndex === i}
                                             <tr class="details-row">
-                                                <td colspan="6">
+                                                <td colspan="5">
                                                     <div class="entry-details">
                                                         <h5>详细对比（{new Date(entry.prediction_date).toLocaleDateString()} 发起）</h5>
                                                         <div class="entry-table-wrapper">
@@ -1955,16 +1976,16 @@
     
     {#if predictions && predictions.length > 0}
         <div class="prediction-results">
-            <h2>预测结果</h2>
+            <h2>分析结果</h2>
 
             <!-- 决策摘要卡：一眼抓住方向 / 目标价 / 关键价位 / 建议 / 风险 / 置信度 -->
             <div class="conclusion-card {conclusionDirection}">
                 <div class="conclusion-head">
                     <span class="conclusion-badge">{conclusionLabel}</span>
                     <div class="conclusion-headline">
-                        未来 {predictions.length} 天：
+                        未来 {predictions.length} 个交易日历史漂移中枢：
                         <span class="conclusion-change {predHorizonChange >= 0 ? 'price-up' : 'price-down'}">
-                            预计累计 {predHorizonChange >= 0 ? '+' : ''}{predHorizonChange.toFixed(2)}%
+                            {predHorizonChange >= 0 ? '+' : ''}{predHorizonChange.toFixed(2)}%
                         </span>
                     </div>
                 </div>
@@ -1973,12 +1994,12 @@
                         <span class="cp-date">{new Date(lastRealData.date).toLocaleDateString()}</span>
                         <span class="cp-current">当前 {lastRealData.price.toFixed(2)}</span>
                         <span class="cp-arrow">→</span>
-                        <span class="cp-target {targetPrice >= lastRealData.price ? 'price-up' : 'price-down'}">目标 {targetPrice.toFixed(2)}</span>
+                        <span class="cp-target {targetPrice >= lastRealData.price ? 'price-up' : 'price-down'}">漂移中枢 {targetPrice.toFixed(2)}</span>
                     </div>
                 {/if}
                 <div class="conclusion-grid">
                     <div class="conclusion-item">
-                        <span class="ci-label">操作建议</span>
+                        <span class="ci-label">技术状态解读</span>
                         <span class="ci-value">{conclusionAdvice}</span>
                     </div>
                     <div class="conclusion-item">
@@ -1987,8 +2008,14 @@
                     </div>
                     {#if predHorizonBand}
                         <div class="conclusion-item">
-                            <span class="ci-label">约{(predHorizonBand.confidence * 100).toFixed(0)}%概率区间</span>
+                            <span class="ci-label">{(predHorizonBand.confidence * 100).toFixed(0)}%校准区间</span>
                             <span class="ci-value">{predHorizonBand.lower_change_percent > 0 ? '+' : ''}{predHorizonBand.lower_change_percent.toFixed(1)}% ~ {predHorizonBand.upper_change_percent > 0 ? '+' : ''}{predHorizonBand.upper_change_percent.toFixed(1)}%</span>
+                        </div>
+                    {/if}
+                    {#if predStressBand}
+                        <div class="conclusion-item stress-item">
+                            <span class="ci-label">95%压力区间</span>
+                            <span class="ci-value">{predStressBand.lower_change_percent > 0 ? '+' : ''}{predStressBand.lower_change_percent.toFixed(1)}% ~ {predStressBand.upper_change_percent > 0 ? '+' : ''}{predStressBand.upper_change_percent.toFixed(1)}%</span>
                         </div>
                     {/if}
                     {#if conclusionRisk}
@@ -2005,13 +2032,22 @@
                     {/if}
                     {#if showProfessionalAnalysis && professionalAnalysis}
                         <div class="conclusion-item">
-                            <span class="ci-label">买卖点</span>
-                            <span class="ci-value">{buyPointsCount} 个买入 / {sellPointsCount} 个卖出</span>
+                            <span class="ci-label">技术观察信号</span>
+                            <span class="ci-value">偏多 {buyPointsCount} / 偏空 {sellPointsCount}</span>
                         </div>
                     {/if}
                 </div>
-                <div class="conclusion-note">⚠️ 单股方向不可预测：点预测仅为历史无条件漂移参考，"信号强度"非方向命中概率；真实不确定性以上方校准区间带为准。结论仅供参考，请自行决策。</div>
+                <div class="conclusion-note">单股方向没有稳定预测力；点估计仅为历史无条件漂移中枢，信号强度不是命中概率，不确定性以80%校准区间和95%压力区间为准。</div>
             </div>
+
+            <RiskAlertPanel summary={predictionDiagnostics?.risk_summary ?? comprehensiveReport?.risk_summary ?? null} />
+
+            {#if predictionDiagnostics?.point_estimate_note}
+                <div class="method-note">
+                    <strong>预测口径</strong>
+                    <span>{predictionDiagnostics.point_estimate_note}</span>
+                </div>
+            {/if}
 
             <!-- 综合决策补充：动量/52周位置/历史基准率（一键综合预测时展示；均为描述性统计） -->
             {#if comprehensiveReport}
@@ -2077,12 +2113,12 @@
             <!-- 新增：专业分析结果展示 -->
             {#if showProfessionalAnalysis && professionalAnalysis}
                 <div class="professional-analysis">
-                    <h3>🎯 金融级策略分析</h3>
+                    <h3>技术状态与观察位</h3>
 
                     <!-- 买入点信号 -->
                     {#if professionalAnalysis.buy_points && professionalAnalysis.buy_points.length > 0}
                         <div class="buy-sell-section buy-section">
-                            <h4>💚 买入点信号 ({professionalAnalysis.buy_points.length}个)</h4>
+                            <h4>偏多观察位 ({professionalAnalysis.buy_points.length}个)</h4>
                             <div class="signals-grid">
                                 {#each professionalAnalysis.buy_points as buyPoint, index}
                                     <div class="signal-card buy-card">
@@ -2092,25 +2128,12 @@
                                         </div>
                                         <div class="signal-body">
                                             <div class="signal-row">
-                                                <span class="label">💵 建议买入价:</span>
+                                                <span class="label">技术观察位:</span>
                                                 <span class="value price-value">{buyPoint.price_level.toFixed(2)}元</span>
                                             </div>
                                             <div class="signal-row">
-                                                <span class="label">🛡️ 止损位(跌破离场):</span>
+                                                <span class="label">下行失效参考:</span>
                                                 <span class="value stop-loss">{buyPoint.stop_loss.toFixed(2)}元 (↓{Math.abs((buyPoint.stop_loss - buyPoint.price_level) / buyPoint.price_level * 100).toFixed(2)}%)</span>
-                                            </div>
-                                            <div class="signal-row">
-                                                <span class="label">🎯 目标位(上涨止盈):</span>
-                                                <span class="value take-profit">
-                                                    {#each buyPoint.take_profit as tp, i}
-                                                        {tp.toFixed(2)}元(↑{((tp - buyPoint.price_level) / buyPoint.price_level * 100).toFixed(2)}%)
-                                                        {#if i < buyPoint.take_profit.length - 1}, {/if}
-                                                    {/each}
-                                                </span>
-                                            </div>
-                                            <div class="signal-row">
-                                                <span class="label">风险收益比:</span>
-                                                <span class="value ratio">1:{buyPoint.risk_reward_ratio.toFixed(2)}</span>
                                             </div>
                                             <div class="signal-row">
                                                 <span class="label">信号强度:</span>
@@ -2131,14 +2154,14 @@
                         </div>
                     {:else}
                         <div class="no-signal-card">
-                            <p>🟡 当前无明确买入信号，建议观望等待更好机会</p>
+                            <p>当前未识别到偏多技术观察位</p>
                         </div>
                     {/if}
                     
                     <!-- 卖出点信号 -->
                     {#if professionalAnalysis.sell_points && professionalAnalysis.sell_points.length > 0}
                         <div class="buy-sell-section sell-section">
-                            <h4>🔴 卖出点信号 ({professionalAnalysis.sell_points.length}个)</h4>
+                            <h4>偏空观察位 ({professionalAnalysis.sell_points.length}个)</h4>
                             <div class="signals-grid">
                                 {#each professionalAnalysis.sell_points as sellPoint, index}
                                     <div class="signal-card sell-card">
@@ -2148,21 +2171,12 @@
                                         </div>
                                         <div class="signal-body">
                                             <div class="signal-row">
-                                                <span class="label">💰 建议卖出价:</span>
+                                                <span class="label">技术观察位:</span>
                                                 <span class="value price-value">{sellPoint.price_level.toFixed(2)}元</span>
                                             </div>
                                             <div class="signal-row">
-                                                <span class="label">🛡️ 风险位(上破失效):</span>
+                                                <span class="label">上行失效参考:</span>
                                                 <span class="value stop-loss">{sellPoint.stop_loss.toFixed(2)}元 (↑{Math.abs((sellPoint.stop_loss - sellPoint.price_level) / sellPoint.price_level * 100).toFixed(2)}%)</span>
-                                            </div>
-                                            <div class="signal-row">
-                                                <span class="label">🎯 下行目标位:</span>
-                                                <span class="value take-profit">
-                                                    {#each sellPoint.take_profit as tp, i}
-                                                        {tp.toFixed(2)}元(↓{Math.abs((tp - sellPoint.price_level) / sellPoint.price_level * 100).toFixed(2)}%)
-                                                        {#if i < sellPoint.take_profit.length - 1}, {/if}
-                                                    {/each}
-                                                </span>
                                             </div>
                                             <div class="signal-row">
                                                 <span class="label">信号强度:</span>
@@ -2183,7 +2197,7 @@
                         </div>
                     {:else}
                         <div class="no-signal-card">
-                            <p>🟡 当前无明确卖出信号</p>
+                            <p>当前未识别到偏空技术观察位</p>
                         </div>
                     {/if}
                     
@@ -2221,89 +2235,10 @@
                 </div>
             {/if}
 
-            <!-- 预测图表 -->
-            {#if predictionChart}
-                <div class="prediction-chart">
-                    <h3>预测趋势图</h3>
-                    <div class="chart-container">
-                        <!-- 图表图例 -->
-                        <div class="chart-legend">
-                            <div class="legend-item">
-                                <div class="legend-color" style="background-color: rgb(79, 70, 229);"></div>
-                                <span>预测价格</span>
-                            </div>
-                            <div class="legend-item">
-                                <div class="legend-color" style="background-color: rgb(34, 197, 94);"></div>
-                                <span>信号强度</span>
-                            </div>
-                        </div>
-                        
-                        <!-- SVG图表 -->
-                        <div class="svg-chart-container">
-                            <svg width="100%" height="300" viewBox="0 0 800 300" style="border: 1px solid rgba(255,255,255,0.2); border-radius: 0.5rem; background: rgba(0,0,0,0.1);">
-                                {#if predictionChart && predictionChart.datasets[0].data.length > 0}
-                                    {@const priceData = predictionChart.datasets[0].data}
-                                    {@const confidenceData = predictionChart.datasets[1].data}
-                                    {@const minPrice = Math.min(...priceData)}
-                                    {@const maxPrice = Math.max(...priceData)}
-                                    {@const priceRange = maxPrice - minPrice || 1}
-                                    
-                                    <!-- 网格线 -->
-                                    {#each [0, 1, 2, 3, 4] as i}
-                                        <line x1="60" y1={50 + i * 40} x2="750" y2={50 + i * 40} stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
-                                    {/each}
-                                    {#each predictionChart.labels as label, i}
-                                        {@const x = chartX(i, predictionChart.labels.length)}
-                                        <line x1={x} y1="50" x2={x} y2="250" stroke="rgba(255,255,255,0.1)" stroke-width="1"/>
-                                    {/each}
-                                    
-                                    <!-- 价格曲线 -->
-                                    {@const pathD = priceData.map((price, i) => {
-                                        const x = chartX(i, priceData.length);
-                                        const y = 250 - ((price - minPrice) / priceRange) * 180;
-                                        return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
-                                    }).join(' ')}
-                                    <path d={pathD} fill="none" stroke="rgb(79, 70, 229)" stroke-width="3"/>
-                                    
-                                    <!-- 置信度柱状图 -->
-                                    {#each confidenceData as confidence, i}
-                                        {@const x = chartX(i, confidenceData.length)}
-                                        {@const height = (confidence / 100) * 60}
-                                        <rect x={x - 8} y={250 - height} width="16" height={height} fill="rgba(34, 197, 94, 0.6)" rx="2"/>
-                                    {/each}
-                                    
-                                    <!-- 数据点 -->
-                                    {#each priceData as price, i}
-                                        {@const x = chartX(i, priceData.length)}
-                                        {@const y = 250 - ((price - minPrice) / priceRange) * 180}
-                                        <circle cx={x} cy={y} r="5" fill="rgb(79, 70, 229)" stroke="white" stroke-width="2"/>
-                                        <text x={x} y={y - 15} text-anchor="middle" fill="white" font-size="11" font-weight="bold">{price.toFixed(2)}</text>
-                                    {/each}
-                                    
-                                    <!-- 日期标签 -->
-                                    {#each predictionChart.labels as label, i}
-                                        {@const x = chartX(i, predictionChart.labels.length)}
-                                        <text x={x} y={275} text-anchor="middle" fill="rgba(255,255,255,0.8)" font-size="12">{label}</text>
-                                    {/each}
-                                    
-                                    <!-- Y轴价格标签 -->
-                                    {#each [0, 1, 2, 3, 4] as i}
-                                        {@const price = minPrice + (priceRange * (4 - i) / 4)}
-                                        <text x="50" y={55 + i * 40} text-anchor="end" fill="rgba(255,255,255,0.8)" font-size="11">{price.toFixed(2)}</text>
-                                    {/each}
-                                    
-                                    <!-- 坐标轴标题 -->
-                                    <text x="400" y="295" text-anchor="middle" fill="rgba(255,255,255,0.8)" font-size="12" font-weight="bold">预测日期</text>
-                                    <text x="25" y="150" text-anchor="middle" fill="rgba(255,255,255,0.8)" font-size="12" font-weight="bold" transform="rotate(-90 25 150)">价格 (元)</text>
-                                {/if}
-                            </svg>
-                        </div>
-                        
-                    </div>
-                </div>
-            {:else}
-                <p class="chart-empty-note">暂无足够数据生成趋势图</p>
-            {/if}
+            <section class="prediction-chart">
+                <h3>校准区间路径</h3>
+                <PredictionRangeChart {predictions} {lastRealData} />
+            </section>
             
             <!-- 更多分析（多周期共振 · 量价背离）：默认折叠 -->
             {#if showProfessionalAnalysis && professionalAnalysis}
@@ -2404,7 +2339,7 @@
                                 <tr>
                                     <th>日期</th>
                                     <th>预测价格</th>
-                                    <th title="约80%概率落在此区间，由近20日已实现波动率校准。方向不可测但波动可测——区间才是诚实的不确定性。">预测区间(80%)</th>
+                                    <th title="历史走步样本经验覆盖约80%，由近20日已实现波动率校准；不代表个股结果的确定概率。">预测区间(80%)</th>
                                     <th>涨跌幅</th>
                                     <th title="技术信号强度，非方向命中概率">信号强度</th>
                                     <th>交易信号</th>
@@ -2418,7 +2353,7 @@
                                         <td>{prediction.predicted_price.toFixed(2)}</td>
                                         <td>
                                             {#if prediction.interval}
-                                                <span class="interval-band" title="约{(prediction.interval.confidence * 100).toFixed(0)}%概率落在此区间（由已实现波动率校准，非方向预测）">
+                                                <span class="interval-band" title="历史经验覆盖约{(prediction.interval.confidence * 100).toFixed(0)}%（由已实现波动率校准，不代表个股结果的确定概率）">
                                                     {prediction.interval.lower_price.toFixed(2)} ~ {prediction.interval.upper_price.toFixed(2)}
                                                     <small>({prediction.interval.lower_change_percent > 0 ? '+' : ''}{prediction.interval.lower_change_percent.toFixed(1)}% ~ {prediction.interval.upper_change_percent > 0 ? '+' : ''}{prediction.interval.upper_change_percent.toFixed(1)}%)</small>
                                                 </span>
@@ -2457,8 +2392,8 @@
                                                 <div class="pred-detail">
                                                     <div class="pred-detail-block">
                                                         <span class="pred-detail-label">风险评级</span>
-                                                        <span class="risk-badge {prediction.confidence > 0.8 ? 'low-risk' : prediction.confidence > 0.6 ? 'medium-risk' : 'high-risk'}">
-                                                            {prediction.confidence > 0.8 ? '低风险' : prediction.confidence > 0.6 ? '中风险' : '高风险'}
+                                                        <span class="risk-badge {predictionDiagnostics?.risk_summary.level === 'high' ? 'high-risk' : predictionDiagnostics?.risk_summary.level === 'medium' ? 'medium-risk' : 'low-risk'}">
+                                                            {predictionDiagnostics?.risk_summary.level_label ?? '未评估'}
                                                         </span>
                                                     </div>
                                                     <div class="pred-detail-block">
@@ -2558,9 +2493,9 @@
     }
 
     h1 {
-        font-size: 2rem;
-        margin-bottom: 2rem;
-        text-align: center;
+        font-size: 1.5rem;
+        margin: 0 0 1rem;
+        text-align: left;
     }
     
     h2 {
@@ -2572,7 +2507,7 @@
     .input-group {
         display: flex;
         gap: 1rem;
-        margin: 2rem 0;
+        margin: 1rem 0;
     }
 
     .search-input {
@@ -2641,6 +2576,10 @@
     
     .tabs button {
         flex: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.45rem;
         background: rgba(255, 255, 255, 0.1);
         color: rgba(255, 255, 255, 0.7);
     }
@@ -2653,7 +2592,124 @@
     .model-section {
         background: rgba(255, 255, 255, 0.05);
         padding: 1.5rem;
-        border-radius: 1rem;
+        border-radius: 8px;
+    }
+
+    .model-lab-switch {
+        width: fit-content;
+        display: flex;
+        gap: 0.25rem;
+        margin: 0 0 0.75rem;
+        padding: 0.25rem;
+        border: 1px solid #374151;
+        border-radius: 8px;
+        background: #171b22;
+    }
+
+    .model-lab-switch button {
+        padding: 0.5rem 0.8rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        border-radius: 5px;
+        background: transparent;
+        color: #9ca3af;
+        font-size: 0.82rem;
+    }
+
+    .model-lab-switch button.active {
+        background: #374151;
+        color: #f3f4f6;
+    }
+
+    .analysis-toolbar {
+        padding: 1rem;
+        border: 1px solid #374151;
+        border-radius: 8px;
+        background: #171b22;
+    }
+
+    .analysis-heading {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 1.25rem;
+    }
+
+    .analysis-heading h2 {
+        margin: 0 0 0.25rem;
+        font-size: 1.05rem;
+    }
+
+    .analysis-heading span,
+    .horizon-control label {
+        color: #9ca3af;
+        font-size: 0.76rem;
+    }
+
+    .horizon-control {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .horizon-presets {
+        display: flex;
+        overflow: hidden;
+        border: 1px solid #4b5563;
+        border-radius: 6px;
+    }
+
+    .horizon-presets button {
+        min-width: 48px;
+        padding: 0.45rem 0.6rem;
+        border-right: 1px solid #4b5563;
+        border-radius: 0;
+        background: transparent;
+        color: #cbd5e1;
+        font-size: 0.78rem;
+    }
+
+    .horizon-presets button:last-child {
+        border-right: none;
+    }
+
+    .horizon-presets button.active {
+        background: #0e7490;
+        color: white;
+    }
+
+    .horizon-control input {
+        width: 58px;
+        padding: 0.45rem;
+        box-sizing: border-box;
+        border: 1px solid #4b5563;
+        border-radius: 6px;
+        background: #11151b;
+        color: #f3f4f6;
+    }
+
+    .analysis-action {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 0.85rem;
+    }
+
+    .analysis-action .predict-btn {
+        width: auto;
+        min-width: 180px;
+        margin: 0;
+        padding: 0.65rem 1rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.45rem;
+        background: #0e7490;
+        font-size: 0.9rem;
+    }
+
+    :global(.spin) {
+        animation: spin 0.8s linear infinite;
     }
     
     .model-list {
@@ -2752,6 +2808,14 @@
         border-radius: 0.25rem;
         color: inherit;
     }
+
+    .professional-predict-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.4rem;
+        background: #0e7490;
+    }
     
     .training-form {
         display: flex;
@@ -2802,9 +2866,6 @@
     
     .prediction-results {
         margin-top: 2rem;
-        background: rgba(255, 255, 255, 0.05);
-        padding: 1rem; /* 减小内边距 */
-        border-radius: 1rem;
         width: 100%;
         box-sizing: border-box;
     }
@@ -2813,17 +2874,17 @@
     .conclusion-card {
         margin: 0 0 1.5rem;
         padding: 1.25rem 1.5rem;
-        border-radius: 0.75rem;
+        border-radius: 8px;
         border-left: 5px solid #6366f1;
         background: rgba(99, 102, 241, 0.08);
     }
     .conclusion-card.bull {
-        border-left-color: #10b981;
-        background: rgba(16, 185, 129, 0.1);
+        border-left-color: #ef4444;
+        background: rgba(239, 68, 68, 0.08);
     }
     .conclusion-card.bear {
-        border-left-color: #ef4444;
-        background: rgba(239, 68, 68, 0.1);
+        border-left-color: #22c55e;
+        background: rgba(34, 197, 94, 0.08);
     }
     .conclusion-card.neutral {
         border-left-color: #f59e0b;
@@ -2843,15 +2904,15 @@
         background: rgba(0, 0, 0, 0.2);
         white-space: nowrap;
     }
-    .conclusion-card.bull .conclusion-badge { color: #10b981; }
-    .conclusion-card.bear .conclusion-badge { color: #ef4444; }
+    .conclusion-card.bull .conclusion-badge { color: #f87171; }
+    .conclusion-card.bear .conclusion-badge { color: #4ade80; }
     .conclusion-card.neutral .conclusion-badge { color: #f59e0b; }
     .conclusion-headline {
         font-size: 1.05rem;
         font-weight: 600;
     }
-    .conclusion-change.price-up { color: #10b981; }
-    .conclusion-change.price-down { color: #ef4444; }
+    .conclusion-change.price-up { color: #ef4444; }
+    .conclusion-change.price-down { color: #22c55e; }
     .conclusion-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -2899,8 +2960,30 @@
     .cp-arrow {
         opacity: 0.6;
     }
-    .cp-target.price-up { color: #10b981; }
-    .cp-target.price-down { color: #ef4444; }
+    .cp-target.price-up { color: #ef4444; }
+    .cp-target.price-down { color: #22c55e; }
+
+    .stress-item .ci-value {
+        color: #fbbf24;
+    }
+
+    .method-note {
+        margin: 0.75rem 0 1rem;
+        padding: 0.7rem 0.85rem;
+        display: flex;
+        align-items: flex-start;
+        gap: 0.7rem;
+        border-left: 3px solid #22d3ee;
+        background: rgba(34, 211, 238, 0.06);
+        color: #cbd5e1;
+        font-size: 0.8rem;
+        line-height: 1.5;
+    }
+
+    .method-note strong {
+        flex: 0 0 auto;
+        color: #67e8f9;
+    }
 
     /* 折叠区（更多分析 / 逐日明细表） */
     .collapsible-section {
@@ -3063,8 +3146,8 @@
         font-weight: 600;
         font-variant-numeric: tabular-nums;
     }
-    .comp-value.price-up { color: #10b981; }
-    .comp-value.price-down { color: #ef4444; }
+    .comp-value.price-up { color: #ef4444; }
+    .comp-value.price-down { color: #22c55e; }
     .comprehensive-note {
         margin-top: 0.7rem;
         font-size: 0.75rem;
@@ -3079,6 +3162,9 @@
         border-radius: 0.5rem;
         color: #a5b4fc;
         font-size: 0.9rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
     }
     .pred-detail {
         display: flex;
@@ -3441,36 +3527,7 @@
         margin-top: 2rem;
         padding: 1.5rem;
         background-color: rgba(255, 255, 255, 0.05);
-        border-radius: 1rem;
-    }
-    
-    .chart-container {
-        width: 100%;
-    }
-    
-    .svg-chart-container {
-        width: 100%;
-        margin: 1rem 0;
-    }
-    
-    .chart-legend {
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        gap: 2rem;
-        margin-bottom: 1rem;
-    }
-    
-    .legend-item {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-    
-    .legend-color {
-        width: 1rem;
-        height: 1rem;
-        border-radius: 0.25rem;
+        border-radius: 8px;
     }
     
     .prediction-stats {
@@ -3493,7 +3550,21 @@
     }
     
     .positive {
-        color: #10b981;
+        color: #f3f4f6;
+    }
+
+    .stat-value.positive { color: #ef4444; }
+    .stat-value.negative { color: #22c55e; }
+
+    .backtest-warning {
+        margin: 1rem 0;
+        padding: 0.8rem 1rem;
+        border: 1px solid rgba(245, 158, 11, 0.45);
+        border-left: 4px solid #f59e0b;
+        border-radius: 8px;
+        background: rgba(245, 158, 11, 0.08);
+        color: #fde68a;
+        font-size: 0.85rem;
     }
     
     .negative {
@@ -3897,9 +3968,9 @@
     .professional-analysis {
         margin: 2rem 0;
         padding: 1.5rem;
-        background: linear-gradient(135deg, rgba(102, 126, 234, 0.1) 0%, rgba(118, 75, 162, 0.1) 100%);
-        border: 1px solid rgba(102, 126, 234, 0.3);
-        border-radius: 1rem;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid #374151;
+        border-radius: 8px;
     }
     
     .professional-analysis h3 {
@@ -3907,9 +3978,7 @@
         margin-bottom: 1.5rem;
         font-size: 1.5rem;
         text-align: center;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+        color: #e5e7eb;
     }
     
     .risk-level {
@@ -4027,14 +4096,6 @@
     
     .signal-row .stop-loss {
         color: #10b981;  /* 止损(下跌)用绿色 - 符合中国股市习惯 */
-    }
-    
-    .signal-row .take-profit {
-        color: #ef4444;  /* 止盈(上涨)用红色 - 符合中国股市习惯 */
-    }
-    
-    .signal-row .ratio {
-        color: #667eea;
     }
     
     .signal-row .confidence {
@@ -4224,18 +4285,6 @@
         color: #93c5fd;
     }
     
-    .factor-tag:has(⚠️) {
-        background: rgba(251, 191, 36, 0.2);
-        border-color: rgba(251, 191, 36, 0.4);
-        color: #fde047;
-    }
-    
-    .factor-tag:has(✅) {
-        background: rgba(16, 185, 129, 0.2);
-        border-color: rgba(16, 185, 129, 0.4);
-        color: #6ee7b7;
-    }
-    
     .no-reason {
         color: rgba(255, 255, 255, 0.5);
         font-size: 0.875rem;
@@ -4256,41 +4305,132 @@
         margin-bottom: 1.5rem;
     }
     
-    .info-box {
-        background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.1));
-        border: 1px solid rgba(99, 102, 241, 0.3);
-        border-radius: 0.75rem;
-        padding: 1.5rem;
-        margin-top: 1.5rem;
-    }
-    
-    .info-box h4 {
-        color: #818cf8;
-        margin-bottom: 1rem;
-        font-size: 1.1rem;
-    }
-    
-    .info-box ul {
-        list-style: none;
-        padding: 0;
-        margin: 0;
-    }
-    
-    .info-box li {
-        padding: 0.5rem 0;
-        color: rgba(255, 255, 255, 0.9);
-        line-height: 1.6;
-    }
-    
-    .info-box li strong {
-        color: #a5b4fc;
-    }
-    
     .predict-btn {
         width: 100%;
         padding: 1rem;
         font-size: 1.1rem;
         font-weight: 600;
         margin-top: 1rem;
+    }
+
+    /* 与应用工作台统一的视觉基线 */
+    .container {
+        max-width: 1320px;
+        padding: 0;
+    }
+
+    h2 {
+        font-size: 1.05rem;
+        margin-top: 1.15rem;
+    }
+
+    .input-group { gap: 0.55rem; margin: 0 0 1rem; }
+    .search-input { min-height: 42px; padding: 0.55rem 0.75rem; border-color: var(--border-strong); border-radius: 6px; background: var(--surface-2); }
+    .watch-star { width: 42px; min-width: 42px; padding: 0; background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text-muted); }
+    .watch-star.watched { color: var(--warning); border-color: rgba(232, 174, 74, 0.5); }
+    .error-message { margin: 0 0 1rem; padding: 0.75rem 0.85rem; border: 1px solid rgba(239, 107, 115, 0.42); border-radius: 6px; background: rgba(239, 107, 115, 0.08); color: #ffabb0; }
+
+    button { border-radius: 6px; background: #16899a; }
+    button:disabled { background: var(--surface-3); }
+    button.loading { background: #16899a; }
+    .tabs { gap: 0.4rem; margin: 1rem 0; padding: 0.25rem; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-1); }
+    .tabs button { min-height: 42px; padding: 0.55rem 0.75rem; background: transparent; color: var(--text-secondary); }
+    .tabs button.active { background: var(--accent-muted); color: var(--accent-hover); }
+    .model-lab-switch, .analysis-toolbar, .model-section { border: 1px solid var(--border); background: var(--surface-1); }
+    .model-lab-switch button.active { background: var(--surface-3); color: var(--text-primary); }
+    .analysis-heading span, .horizon-control label { color: var(--text-secondary); }
+    .horizon-presets { border-color: var(--border-strong); }
+    .horizon-presets button { border-right-color: var(--border-strong); color: var(--text-secondary); }
+    .horizon-presets button.active, .analysis-action .predict-btn, .professional-predict-btn { background: #16899a; }
+    .horizon-control input { border-color: var(--border-strong); background: var(--surface-2); color: var(--text-primary); }
+    .model-item { border: 1px solid var(--border); background: var(--surface-2); }
+    .model-item:hover { background: var(--surface-3); }
+    .model-item.selected { border-color: var(--accent); background: var(--accent-muted); }
+    .model-details { color: var(--text-secondary); }
+    .action-btn { background: var(--surface-3); }
+    .training-form input, .training-form select, .prediction-settings input { border-color: var(--border-strong); background: var(--surface-2); color: var(--text-primary); }
+    .training-form select, .training-form select option { background: var(--surface-2); color: var(--text-primary); }
+    .advanced-options, .prediction-settings { background: var(--surface-2); }
+    .prediction-results { margin-top: 1.25rem; }
+    .conclusion-card { border-left-color: var(--accent); background: var(--accent-muted); }
+    .conclusion-card.bull { border-left-color: var(--price-up); background: rgba(241, 91, 100, 0.08); }
+    .conclusion-card.bear { border-left-color: var(--price-down); background: rgba(53, 200, 137, 0.08); }
+    .conclusion-card.neutral { border-left-color: var(--warning); background: rgba(232, 174, 74, 0.08); }
+
+    @media (max-width: 768px) {
+        .container {
+            padding: 0.5rem;
+        }
+
+        .tabs {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.4rem;
+        }
+
+        .tabs button {
+            min-width: 0;
+            padding: 0.65rem 0.2rem;
+            gap: 0.25rem;
+            font-size: 0.75rem;
+            white-space: nowrap;
+        }
+
+        .analysis-heading {
+            align-items: flex-start;
+            flex-direction: column;
+        }
+
+        .horizon-control {
+            width: 100%;
+            align-items: flex-start;
+            flex-wrap: wrap;
+        }
+
+        .horizon-control label {
+            width: 100%;
+        }
+
+        .horizon-presets {
+            flex: 1;
+        }
+
+        .horizon-presets button {
+            min-width: 44px;
+            flex: 1;
+        }
+
+        .analysis-action .predict-btn {
+            width: 100%;
+        }
+
+        .input-group {
+            gap: 0.5rem;
+        }
+
+        .search-input {
+            min-width: 0;
+            box-sizing: border-box;
+        }
+
+        .conclusion-card,
+        .model-section {
+            padding: 0.85rem;
+        }
+
+        .summary-stats {
+            grid-template-columns: 1fr;
+        }
+
+        .model-item,
+        .prediction-settings {
+            align-items: stretch;
+            flex-direction: column;
+        }
+
+        .model-details,
+        .model-actions {
+            flex-wrap: wrap;
+        }
     }
 </style>

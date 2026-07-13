@@ -2,7 +2,7 @@
  * 预测服务
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand } from './core';
 import type {
   TrainingRequest,
   TrainingResult,
@@ -26,14 +26,14 @@ import type {
  * 列出模型
  */
 export async function listModels(symbol: string): Promise<ModelInfo[]> {
-  return invoke<ModelInfo[]>('list_stock_prediction_models', { symbol });
+  return invokeCommand<ModelInfo[]>('list_stock_prediction_models', { symbol });
 }
 
 /**
  * 删除模型
  */
 export async function deleteModel(modelId: string): Promise<void> {
-  await invoke('delete_stock_prediction_model', { modelId });
+  await invokeCommand('delete_stock_prediction_model', { modelId });
 }
 
 // =============================================================================
@@ -44,14 +44,14 @@ export async function deleteModel(modelId: string): Promise<void> {
  * 训练模型
  */
 export async function trainModel(request: TrainingRequest): Promise<TrainingResult> {
-  return invoke<TrainingResult>('train_stock_prediction_model', { request });
+  return invokeCommand<TrainingResult>('train_stock_prediction_model', { request });
 }
 
 /**
  * 使用 Candle 训练模型
  */
 export async function trainCandleModel(request: TrainingRequest): Promise<TrainingResult> {
-  return invoke<TrainingResult>('train_candle_model', { request });
+  return invokeCommand<TrainingResult>('train_candle_model', { request });
 }
 
 /**
@@ -63,7 +63,7 @@ export async function retrainModel(
   batchSize: number,
   learningRate: number
 ): Promise<void> {
-  await invoke('retrain_candle_model', {
+  await invokeCommand('retrain_candle_model', {
     modelId,
     epochs,
     batchSize,
@@ -79,21 +79,21 @@ export async function retrainModel(
  * 预测股价
  */
 export async function predictStockPrice(request: PredictionRequest): Promise<PredictionResponse> {
-  return invoke<PredictionResponse>('predict_stock_price', { request });
+  return invokeCommand<PredictionResponse>('predict_stock_price', { request });
 }
 
 /**
  * 使用 Candle 预测
  */
 export async function predictWithCandle(request: PredictionRequest): Promise<PredictionResponse> {
-  return invoke<PredictionResponse>('predict_with_candle', { request });
+  return invokeCommand<PredictionResponse>('predict_with_candle', { request });
 }
 
 /**
  * 简化策略预测
  */
 export async function predictSimple(request: PredictionRequest): Promise<PredictionResponse> {
-  return invoke<PredictionResponse>('predict_candle_price_simple', { request });
+  return invokeCommand<PredictionResponse>('predict_candle_price_simple', { request });
 }
 
 /**
@@ -102,7 +102,7 @@ export async function predictSimple(request: PredictionRequest): Promise<Predict
 export async function predictProfessional(
   request: PredictionRequest
 ): Promise<ProfessionalPredictionResponse> {
-  return invoke<ProfessionalPredictionResponse>('predict_with_professional_strategy', { request });
+  return invokeCommand<ProfessionalPredictionResponse>('predict_with_professional_strategy', { request });
 }
 
 /**
@@ -111,7 +111,7 @@ export async function predictProfessional(
 export async function predictTechnicalOnly(
   request: TechnicalOnlyRequest
 ): Promise<ProfessionalPredictionResponse> {
-  return invoke<ProfessionalPredictionResponse>('predict_with_technical_only', { request });
+  return invokeCommand<ProfessionalPredictionResponse>('predict_with_technical_only', { request });
 }
 
 // =============================================================================
@@ -122,14 +122,14 @@ export async function predictTechnicalOnly(
  * 评估模型
  */
 export async function evaluateModel(modelId: string): Promise<EvaluationResult> {
-  return invoke<EvaluationResult>('evaluate_candle_model', { modelId });
+  return invokeCommand<EvaluationResult>('evaluate_candle_model', { modelId });
 }
 
 /**
  * 执行回测
  */
 export async function runBacktest(request: BacktestRequest): Promise<BacktestReport> {
-  return invoke<BacktestReport>('run_model_backtest', { request });
+  return invokeCommand<BacktestReport>('run_model_backtest', { request });
 }
 
 /**
@@ -138,16 +138,12 @@ export async function runBacktest(request: BacktestRequest): Promise<BacktestRep
 export async function getOptimizationSuggestions(
   stockCode: string,
   modelName: string,
-  backtestReport: BacktestReport,
-  currentFeatures: string[],
-  currentConfig: any
+  backtestReport: BacktestReport
 ): Promise<OptimizationSuggestions> {
-  return invoke<OptimizationSuggestions>('get_optimization_suggestions', {
+  return invokeCommand<OptimizationSuggestions>('get_optimization_suggestions', {
     stockCode,
     modelName,
     backtestReport,
-    currentFeatures,
-    currentConfig,
   });
 }
 
@@ -159,7 +155,7 @@ export async function getOptimizationSuggestions(
  * 获取多周期信号
  */
 export async function getMultiTimeframeSignals(symbol: string): Promise<MultiTimeframeSignal[]> {
-  return invoke<MultiTimeframeSignal[]>('get_multi_timeframe_signals', { symbol });
+  return invokeCommand<MultiTimeframeSignal[]>('get_multi_timeframe_signals', { symbol });
 }
 
 /**
@@ -168,7 +164,7 @@ export async function getMultiTimeframeSignals(symbol: string): Promise<MultiTim
 export async function getLatestMultiTimeframeSignal(
   symbol: string
 ): Promise<MultiTimeframeSignal | null> {
-  return invoke<MultiTimeframeSignal | null>('get_latest_multi_timeframe_signal', { symbol });
+  return invokeCommand<MultiTimeframeSignal | null>('get_latest_multi_timeframe_signal', { symbol });
 }
 
 /**
@@ -177,6 +173,5 @@ export async function getLatestMultiTimeframeSignal(
 export async function analyzeMultiTimeframePredictionValue(
   symbol: string
 ): Promise<Record<string, number>> {
-  return invoke<Record<string, number>>('analyze_multi_timeframe_prediction_value', { symbol });
+  return invokeCommand<Record<string, number>>('analyze_multi_timeframe_prediction_value', { symbol });
 }
-

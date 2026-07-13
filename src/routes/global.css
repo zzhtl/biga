@@ -1,20 +1,300 @@
+:root {
+    font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    color: #f4f6f8;
+    background: #111315;
+    font-synthesis: none;
+    --app-bg: #111315;
+    --sidebar-bg: #17191c;
+    --surface-1: #191c20;
+    --surface-2: #20242a;
+    --surface-3: #292e35;
+    --border: #343a42;
+    --border-strong: #46505b;
+    --text-primary: #f4f6f8;
+    --text-secondary: #aeb7c2;
+    --text-muted: #78838f;
+    --accent: #31b5c8;
+    --accent-hover: #49c7d8;
+    --accent-muted: rgba(49, 181, 200, 0.14);
+    --success: #3ccf91;
+    --warning: #e8ae4a;
+    --danger: #ef6b73;
+    --price-up: #f15b64;
+    --price-down: #35c889;
+    letter-spacing: 0;
+}
+
 * {
-    margin: 0;
-    padding: 0;
     box-sizing: border-box;
 }
 
+html,
 body {
-    font-family:
-        "Inter",
-        system-ui,
-        -apple-system,
-        sans-serif;
+    margin: 0;
+    min-width: 320px;
+    min-height: 100%;
+    background: var(--app-bg);
+}
+
+body {
+    min-height: 100vh;
+    color: var(--text-primary);
     line-height: 1.5;
 }
 
+button,
+input,
+select {
+    font: inherit;
+    letter-spacing: 0;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+input,
+select {
+    min-height: 40px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--surface-2);
+    color: var(--text-primary);
+    padding: 0.55rem 0.75rem;
+}
+
+input::placeholder {
+    color: var(--text-muted);
+}
+
+input:focus,
+select:focus {
+    border-color: var(--accent);
+}
+
+.page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1.2rem;
+}
+
+.page-header h1 {
+    margin: 0;
+    font-size: 1.35rem;
+    line-height: 1.3;
+    font-weight: 680;
+}
+
+.page-header p {
+    margin: 0.35rem 0 0;
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+}
+
+.search-field {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-height: 40px;
+    padding: 0 0.75rem;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--surface-2);
+    color: var(--text-muted);
+}
+
+.search-field:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-muted);
+}
+
+.search-field input {
+    width: 100%;
+    min-height: 38px;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+}
+
+.icon-button,
+.primary-button,
+.secondary-button,
+.danger-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.42rem;
+    min-height: 40px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.icon-button {
+    width: 40px;
+    padding: 0;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text-secondary);
+}
+
+.primary-button,
+.secondary-button,
+.danger-button {
+    padding: 0.55rem 0.85rem;
+    border: 1px solid transparent;
+    font-weight: 600;
+    font-size: 0.84rem;
+}
+
+.primary-button {
+    background: #16899a;
+    color: #ffffff;
+}
+
+.secondary-button {
+    border-color: var(--border-strong);
+    background: var(--surface-2);
+    color: var(--text-primary);
+}
+
+.danger-button {
+    border-color: rgba(239, 107, 115, 0.4);
+    background: rgba(239, 107, 115, 0.08);
+    color: #ff9ba1;
+}
+
+.icon-button:hover:not(:disabled),
+.secondary-button:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.primary-button:hover:not(:disabled) {
+    background: #20a4b7;
+}
+
+.danger-button:hover:not(:disabled) {
+    background: rgba(239, 107, 115, 0.16);
+}
+
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.46;
+}
+
+.status-panel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-height: 44px;
+    margin-bottom: 1rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface-1);
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+}
+
+.status-panel.error {
+    border-color: rgba(239, 107, 115, 0.42);
+    background: rgba(239, 107, 115, 0.08);
+    color: #ffabb0;
+}
+
+.status-panel.success {
+    border-color: rgba(60, 207, 145, 0.4);
+    background: rgba(60, 207, 145, 0.08);
+    color: #8ee8bd;
+}
+
+.status-panel button {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-weight: 700;
+}
+
+.table-frame {
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface-1);
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+}
+
+th,
+td {
+    padding: 0.7rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
+    white-space: nowrap;
+}
+
+th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--surface-3);
+    color: #d9dfe5;
+    font-size: 0.76rem;
+    font-weight: 700;
+}
+
+tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+tbody tr:hover {
+    background: rgba(49, 181, 200, 0.05);
+}
+
+.table-state {
+    height: 120px;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.spin {
+    animation: spin 0.85s linear infinite;
+}
+
 @keyframes spin {
-    to {
-        transform: rotate(360deg);
+    to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
     }
 }

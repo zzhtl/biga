@@ -18,10 +18,11 @@ export interface Stock {
   area: string;
   industry: string;
   market: string;
-  exchange: string;
+  ts_code: string;
   list_date: string;
   act_name: string;
   act_ent_type: string;
+  category: string;
 }
 
 // =============================================================================
@@ -39,6 +40,7 @@ export interface HistoricalData {
   amount: number;
   amplitude: number;
   turnover_rate: number;
+  volume_ratio: number;
   change_percent: number;
   change: number;
 }
@@ -103,7 +105,8 @@ export interface Prediction {
   technical_indicators?: TechnicalIndicatorValues;
   prediction_reason?: string;
   key_factors?: string[];
-  interval?: PredictionInterval;
+  interval?: PredictionInterval | null;
+  stress_interval?: PredictionInterval | null;
 }
 
 /** 校准涨跌区间带：方向不可测但波动可测，区间才是诚实的不确定性表达 */
@@ -113,6 +116,54 @@ export interface PredictionInterval {
   upper_change_percent: number;
   lower_price: number;
   upper_price: number;
+  method: string;
+  lookback_days: number;
+}
+
+export type RiskLevel = 'low' | 'medium' | 'high';
+export type RiskCategory =
+  | 'data'
+  | 'uncertainty'
+  | 'volatility'
+  | 'trend'
+  | 'signal'
+  | 'liquidity'
+  | 'model';
+
+export interface RiskWarning {
+  code: string;
+  category: RiskCategory;
+  severity: RiskLevel;
+  title: string;
+  detail: string;
+  evidence: string[];
+}
+
+export interface RiskMetrics {
+  history_samples: number;
+  data_staleness_days?: number | null;
+  daily_volatility_percent: number;
+  volatility_percentile: number;
+  interval_80_width_percent?: number | null;
+  interval_80_lower_percent?: number | null;
+  stress_95_lower_percent?: number | null;
+  support_distance_percent?: number | null;
+  resistance_distance_percent?: number | null;
+  atr_percent?: number | null;
+}
+
+export interface RiskSummary {
+  level: RiskLevel;
+  level_label: string;
+  warnings: RiskWarning[];
+  metrics: RiskMetrics;
+}
+
+export interface PredictionDiagnostics {
+  point_estimate_kind: 'historical_unconditional_drift' | 'candle_model' | string;
+  point_estimate_note: string;
+  uncertainty_method: string;
+  risk_summary: RiskSummary;
 }
 
 export interface TechnicalIndicatorValues {
@@ -142,6 +193,7 @@ export interface LastRealData {
 export interface PredictionResponse {
   predictions: Prediction[];
   last_real_data?: LastRealData;
+  diagnostics?: PredictionDiagnostics | null;
 }
 
 // =============================================================================
@@ -234,6 +286,17 @@ export interface BacktestReport {
   price_error_distribution: number[];
   direction_correct_rate: number;
   volatility_vs_accuracy: Array<[number, number]>;
+  rmse: number;
+  baseline_direction_accuracy: number;
+  direction_edge: number;
+  predicted_up_ratio: number;
+  actual_up_ratio: number;
+  interval_80_samples: number;
+  interval_80_coverage: number;
+  stress_95_samples: number;
+  stress_95_coverage: number;
+  average_interval_80_width: number;
+  average_stress_95_width: number;
 }
 
 // =============================================================================
@@ -327,21 +390,11 @@ export interface ProfessionalPredictionResponse {
 // 优化建议相关
 // =============================================================================
 
-export interface ImplementationStep {
-  step_number: number;
-  description: string;
-  estimated_time: string;
-  difficulty: string;
-  expected_improvement: number;
-}
-
 export interface OptimizationSuggestions {
   stock_code: string;
   model_name: string;
-  feature_optimization: any;
-  hyperparameter_optimization: any;
-  implementation_steps: ImplementationStep[];
-  expected_overall_improvement: number;
+  suggestions: string[];
+  expected_improvement: number;
 }
 
 // =============================================================================
@@ -354,3 +407,38 @@ export interface PagedResponse<T> {
   page: number;
   page_size: number;
 }
+
+export type View =
+  | 'favorites'
+  | 'stock'
+  | 'list'
+  | 'realtime'
+  | 'historical'
+  | 'settings';
+
+export interface NavTarget {
+  view: View;
+  symbol?: string;
+  name?: string;
+  action?: 'history' | 'predict';
+}
+
+export type ApiTokenSource = 'keyring' | 'environment' | 'none';
+
+export interface ApiTokenStatus {
+  configured: boolean;
+  source: ApiTokenSource;
+  masked?: string | null;
+}
+
+export const REALTIME_SORT_COLUMNS = [
+  'symbol',
+  'name',
+  'volume',
+  'amount',
+  'change',
+  'change_percent',
+] as const;
+
+export type RealtimeSortColumn = (typeof REALTIME_SORT_COLUMNS)[number];
+export type SortDirection = 'asc' | 'desc';

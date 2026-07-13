@@ -1,884 +1,290 @@
 <script lang="ts">
     import { onMount } from "svelte";
-    import { invoke } from "@tauri-apps/api/core";
-    import * as echarts from "echarts";
-    import { formatVolume, formatDate, formatChange, formatChangePercent, formatPrice, formatPercent } from "../utils/utils";
+    import { Database, LoaderCircle, RefreshCw, Search } from "lucide-svelte";
+    import HistoricalChart from "./historical_chart.svelte";
+    import {
+        errorMessage,
+        getHistoricalData,
+        getStockInfos,
+        refreshHistoricalData,
+        refreshStockInfos,
+    } from "../services";
+    import type { HistoricalData, StockInfo } from "../types";
+    import {
+        formatChange,
+        formatChangePercent,
+        formatPrice,
+        formatVolume,
+    } from "../utils/utils";
 
-    type EChartsOption = echarts.EChartsOption;
-
-    // 跨页导航：其他页（收藏/列表/行情）点击股票跳转到本页时带入的目标
     type Props = {
         navTarget?: { symbol: string; name?: string } | null;
         onNavConsumed?: () => void;
     };
+
     let { navTarget = null, onNavConsumed = () => {} }: Props = $props();
-
-    // 新增图表实例声明
-    let chart: echarts.ECharts | null = null;
-    let chartContainer: HTMLDivElement;
-
-    // 新增图表初始化
-    $effect(() => {
-        if (typeof window === "undefined") return;
-
-        // 初始化图表
-        chart = echarts.init(chartContainer);
-
-        // 窗口调整时自适应
-        const resizeHandler = () => chart?.resize();
-        window.addEventListener("resize", resizeHandler);
-
-        return () => {
-            window.removeEventListener("resize", resizeHandler);
-            chart?.dispose();
-            chart = null;
-        };
-    });
-
-    // 技术指标计算函数
-    function calculateEMA(data: number[], period: number): number[] {
-        const ema: number[] = [];
-        const multiplier = 2 / (period + 1);
-        
-        if (data.length === 0) return ema;
-        
-        // 第一个值作为初始EMA
-        ema[0] = data[0];
-        
-        for (let i = 1; i < data.length; i++) {
-            ema[i] = (data[i] - ema[i - 1]) * multiplier + ema[i - 1];
-        }
-        
-        return ema;
-    }
-
-    function calculateMACD(closes: number[]): { macd: number[], signal: number[], histogram: number[] } {
-        const ema12 = calculateEMA(closes, 12);
-        const ema26 = calculateEMA(closes, 26);
-        
-        const macd = ema12.map((val, i) => val - ema26[i]);
-        const signal = calculateEMA(macd, 9);
-        const histogram = macd.map((val, i) => val - signal[i]);
-        
-        return { macd, signal, histogram };
-    }
-
-    function calculateKDJ(highs: number[], lows: number[], closes: number[], period = 9): { k: number[], d: number[], j: number[] } {
-        const k: number[] = [];
-        const d: number[] = [];
-        const j: number[] = [];
-        
-        let prevK = 50;
-        let prevD = 50;
-        
-        for (let i = 0; i < closes.length; i++) {
-            const start = Math.max(0, i - period + 1);
-            const periodHighs = highs.slice(start, i + 1);
-            const periodLows = lows.slice(start, i + 1);
-            
-            const highest = Math.max(...periodHighs);
-            const lowest = Math.min(...periodLows);
-            
-            const rsv = highest === lowest ? 0 : ((closes[i] - lowest) / (highest - lowest)) * 100;
-            
-            const currentK = (2 * prevK + rsv) / 3;
-            const currentD = (2 * prevD + currentK) / 3;
-            const currentJ = 3 * currentK - 2 * currentD;
-            
-            k.push(currentK);
-            d.push(currentD);
-            j.push(currentJ);
-            
-            prevK = currentK;
-            prevD = currentD;
-        }
-        
-        return { k, d, j };
-    }
-
-    // 新增图表更新逻辑
-    $effect(() => {
-        if (!chart || historyData.length === 0) return;
-
-        // 处理数据（按日期正序排列）
-        const sortedData = [...historyData].reverse();
-
-        // 准备图表数据
-        const xData = sortedData.map((d) => formatDate(d.date));
-        const kData = sortedData.map((d) => [d.open, d.close, d.low, d.high]);
-        const volumes = sortedData.map((d) => d.volume);
-        const changes = sortedData.map((d) => d.change_percent);
-        
-        // 计算技术指标
-        const closes = sortedData.map(d => d.close);
-        const highs = sortedData.map(d => d.high);
-        const lows = sortedData.map(d => d.low);
-        
-        const macdData = calculateMACD(closes);
-        const kdjData = calculateKDJ(highs, lows, closes);
-
-        // 图表配置
-        const option: EChartsOption = {
-            tooltip: {
-                trigger: "axis",
-                axisPointer: { type: "cross" },
-            },
-            grid: [
-                { left: "5%", right: "5%", top: "5%", height: "45%" }, // K线图区域
-                { left: "5%", right: "5%", top: "53%", height: "12%" }, // 成交量区域
-                { left: "5%", right: "5%", top: "68%", height: "12%" }, // MACD区域
-                { left: "5%", right: "5%", top: "83%", height: "12%" }, // KDJ区域
-            ],
-            xAxis: [
-                {
-                    type: "category",
-                    data: xData,
-                    axisLabel: { rotate: 45 },
-                    boundaryGap: false,
-                },
-                {
-                    type: "category",
-                    gridIndex: 1,
-                    show: false,
-                    data: xData,
-                },
-                {
-                    type: "category",
-                    gridIndex: 2,
-                    show: false,
-                    data: xData,
-                },
-                {
-                    type: "category",
-                    gridIndex: 3,
-                    axisLabel: { rotate: 45, fontSize: 10 },
-                    data: xData,
-                },
-            ],
-            yAxis: [
-                {
-                    scale: true,
-                    splitArea: { show: true },
-                },
-                {
-                    scale: true,
-                    gridIndex: 1,
-                    splitNumber: 2,
-                    axisLabel: { show: false },
-                    axisLine: { show: false },
-                    splitLine: { show: false },
-                },
-                {
-                    scale: true,
-                    gridIndex: 2,
-                    splitNumber: 2,
-                    axisLabel: { fontSize: 10 },
-                    axisLine: { show: false },
-                    splitLine: { show: false },
-                },
-                {
-                    scale: true,
-                    gridIndex: 3,
-                    splitNumber: 2,
-                    axisLabel: { fontSize: 10 },
-                    axisLine: { show: false },
-                    splitLine: { show: false },
-                    min: 0,
-                    max: 100,
-                },
-            ],
-            dataZoom: [
-                {
-                    type: "inside",
-                    xAxisIndex: [0, 1, 2, 3],
-                    start: 0,
-                    end: 100,
-                },
-                {
-                    type: "slider",
-                    xAxisIndex: [0, 1, 2, 3],
-                    show: true,
-                    top: "97%",
-                    height: 20,
-                    start: 0,
-                    end: 100,
-                },
-            ],
-            series: [
-                {
-                    name: "K线",
-                    type: "candlestick",
-                    data: kData,
-                    itemStyle: {
-                        // 上涨颜色配置
-                        color: "#FF0000", // 阳线填充色（默认红色）
-                        borderColor: "#FF0000", // 阳线边框色
-                        // 下跌颜色配置
-                        color0: "#00FF00", // 阴线填充色（默认绿色）
-                        borderColor0: "#00FF00", // 阴线边框色
-                    },
-                    emphasis: {
-                        itemStyle: {
-                            borderWidth: 2,
-                        },
-                    },
-                },
-                {
-                    name: "成交量",
-                    type: "bar",
-                    xAxisIndex: 1,
-                    yAxisIndex: 1,
-                    data: volumes.map((v, i) => ({
-                        value: v,
-                        itemStyle: {
-                            color:
-                                sortedData[i].change > 0
-                                    ? "#ef4444" // 上涨红色
-                                    : "#10b981", // 下跌绿色
-                        },
-                    })),
-                },
-                {
-                    name: "涨跌幅",
-                    type: "line",
-                    smooth: true,
-                    data: changes,
-                    symbol: "none",
-                    lineStyle: { color: "#3b82f6" },
-                    areaStyle: {
-                        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-                            { offset: 0, color: "rgba(59, 130, 246, 0.6)" },
-                            { offset: 1, color: "rgba(59, 130, 246, 0.02)" },
-                        ]),
-                    },
-                },
-                // MACD指标
-                {
-                    name: "MACD",
-                    type: "line",
-                    xAxisIndex: 2,
-                    yAxisIndex: 2,
-                    data: macdData.macd,
-                    symbol: "none",
-                    lineStyle: { color: "#FF6B6B", width: 1 },
-                },
-                {
-                    name: "Signal",
-                    type: "line",
-                    xAxisIndex: 2,
-                    yAxisIndex: 2,
-                    data: macdData.signal,
-                    symbol: "none",
-                    lineStyle: { color: "#4ECDC4", width: 1 },
-                },
-                {
-                    name: "Histogram",
-                    type: "bar",
-                    xAxisIndex: 2,
-                    yAxisIndex: 2,
-                    data: macdData.histogram.map(val => ({
-                        value: val,
-                        itemStyle: {
-                            color: val >= 0 ? "#FF4444" : "#00AA00"
-                        }
-                    })),
-                },
-                // KDJ指标
-                {
-                    name: "K",
-                    type: "line",
-                    xAxisIndex: 3,
-                    yAxisIndex: 3,
-                    data: kdjData.k,
-                    symbol: "none",
-                    lineStyle: { color: "#FFE66D", width: 1 },
-                },
-                {
-                    name: "D",
-                    type: "line",
-                    xAxisIndex: 3,
-                    yAxisIndex: 3,
-                    data: kdjData.d,
-                    symbol: "none",
-                    lineStyle: { color: "#FF6B6B", width: 1 },
-                },
-                {
-                    name: "J",
-                    type: "line",
-                    xAxisIndex: 3,
-                    yAxisIndex: 3,
-                    data: kdjData.j,
-                    symbol: "none",
-                    lineStyle: { color: "#4ECDC4", width: 1 },
-                },
-            ],
-        };
-
-        chart.setOption(option);
-    });
-
-    // 日期工具函数
-    function getTodayISO() {
-        const d = new Date();
-        d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-        return d.toISOString().slice(0, 10);
-    }
-
-    function getFiveMonthAgoISO() {
-        const d = new Date();
-        d.setMonth(d.getMonth() - 5); // 自动处理跨年问题
-        d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-        return d.toISOString().slice(0, 10);
-    }
-
-    // 初始化状态
-    let startDate = $state(getFiveMonthAgoISO());
-    let endDate = $state(getTodayISO());
-    let selectedSymbol = $state(""); // 改为空字符串，等待加载股票列表后设置
-    let stockSymbols = $state<
-        Array<{ symbol: string; name: string; exchange: string }>
-    >([]);
+    let startDate = $state(monthsAgoIso(5));
+    let endDate = $state(todayIso());
+    let selectedSymbol = $state("");
     let searchQuery = $state("");
-    let isDropdownOpen = $state(false);
-
-    // 新增类型定义
-    type StockInfo = {
-        symbol: string;
-        name: string;
-        exchange: string;
-    };
-
-    // 在原有类型定义后添加
-    type HistoricalData = {
-        date: string;
-        open: number;
-        close: number;
-        high: number;
-        low: number;
-        volume: number;
-        amount: number;
-        amplitude: number;
-        turnover_rate: number;
-        change: number;
-        change_percent: number;
-    };
-
-    // 添加历史数据状态
+    let stockSymbols = $state<StockInfo[]>([]);
     let historyData = $state<HistoricalData[]>([]);
-    let isLoading = $state(false);
-    let errorMessage = $state("");
+    let dropdownOpen = $state(false);
+    let loading = $state(false);
+    let refreshingHistory = $state(false);
+    let refreshingStocks = $state(false);
+    let error = $state("");
+    let requestSequence = 0;
+    let consumedTarget = "";
 
-    const filteredSymbols = $derived(
-        stockSymbols.filter((stock) => {
-            const query = searchQuery.toLowerCase();
-            return (
+    const filteredSymbols = $derived.by(() => {
+        const query = searchQuery.trim().toLowerCase();
+        if (!query || selectedSymbol) return stockSymbols.slice(0, 80);
+        return stockSymbols
+            .filter((stock) =>
                 stock.symbol.toLowerCase().includes(query) ||
                 stock.name.toLowerCase().includes(query) ||
-                stock.exchange.toLowerCase().includes(query)
-            );
-        }),
+                stock.exchange.toLowerCase().includes(query),
+            )
+            .slice(0, 80);
+    });
+
+    const sortedHistory = $derived.by(() =>
+        [...historyData].sort((left, right) => right.date.localeCompare(left.date)),
     );
+    const latest = $derived(sortedHistory[0] ?? null);
 
-    function handleSelect(stock: StockInfo) {
-        // 修改参数类型
+    function todayIso(): string {
+        const date = new Date();
+        date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+        return date.toISOString().slice(0, 10);
+    }
+
+    function monthsAgoIso(months: number): string {
+        const date = new Date();
+        date.setMonth(date.getMonth() - months);
+        date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+        return date.toISOString().slice(0, 10);
+    }
+
+    function displayStock(stock: StockInfo): string {
+        return `${stock.symbol} - ${stock.name}`;
+    }
+
+    function handleInput(): void {
+        selectedSymbol = "";
+        dropdownOpen = true;
+    }
+
+    async function selectStock(stock: StockInfo): Promise<void> {
         selectedSymbol = stock.symbol;
-        searchQuery = `${stock.symbol} - ${stock.name}`; // 显示完整信息
-        isDropdownOpen = false;
-        // 选中股票查询历史数据
-        fetchHistory();
+        searchQuery = displayStock(stock);
+        dropdownOpen = false;
+        await queryHistory();
     }
 
-    // 消费跨页导航目标（组件切入时挂载触发）：复用 handleSelect 的赋值逻辑，
-    // 不依赖 stockSymbols 已加载；消费完回调清空，防止手动切回本页时旧目标复放
-    $effect(() => {
-        if (navTarget?.symbol) {
-            selectedSymbol = navTarget.symbol;
-            searchQuery = navTarget.name
-                ? `${navTarget.symbol} - ${navTarget.name}`
-                : navTarget.symbol;
-            isDropdownOpen = false;
-            fetchHistory();
-            onNavConsumed();
-        }
-    });
-
-    // 修改后的 refreshStockSymbols 函数
-    async function refreshStockSymbols() {
-        console.log("开始刷新股票信息...");
+    async function loadStockSymbols(): Promise<void> {
         try {
-            // 先刷新远程数据
-            console.log("调用 refresh_stock_infos...");
-            const refreshResult = await invoke("refresh_stock_infos");
-            console.log("刷新结果:", refreshResult);
-
-            // 然后获取本地数据
-            console.log("调用 get_stock_infos...");
-            const symbols = await invoke<StockInfo[]>("get_stock_infos");
-            console.log("获取到股票数量:", symbols.length);
-
-            stockSymbols = symbols;
-        } catch (error) {
-            console.error("刷新股票列表失败:", error);
-            errorMessage = `刷新股票列表失败: ${error}`;
+            stockSymbols = await getStockInfos();
+        } catch (reason) {
+            error = errorMessage(reason, "股票目录加载失败");
         }
     }
 
-    // 同时需要修改 onMount 中的调用
-    onMount(async () => {
-        console.log("组件挂载，开始加载股票列表...");
+    async function refreshStockCatalog(): Promise<void> {
+        refreshingStocks = true;
+        error = "";
         try {
-            // 使用泛型指定返回类型
-            const symbols = await invoke<StockInfo[]>("get_stock_infos");
-            console.log("初始加载获取到股票数量:", symbols.length);
-            stockSymbols = symbols;
+            await refreshStockInfos();
+            await loadStockSymbols();
+        } catch (reason) {
+            error = errorMessage(reason, "股票目录刷新失败");
+        } finally {
+            refreshingStocks = false;
+        }
+    }
 
-            if (stockSymbols.length === 0) {
-                console.log("股票列表为空，尝试刷新...");
-                await refreshStockSymbols();
+    async function queryHistory(symbol = selectedSymbol): Promise<void> {
+        if (!symbol) {
+            error = "请先选择股票";
+            return;
+        }
+        if (!startDate || !endDate || startDate > endDate) {
+            error = "请选择有效的开始和结束日期";
+            return;
+        }
+
+        const sequence = ++requestSequence;
+        loading = true;
+        error = "";
+        try {
+            const data = await getHistoricalData(symbol, startDate, endDate);
+            if (sequence === requestSequence) {
+                historyData = data;
+                if (data.length === 0) error = "当前日期范围内没有历史数据";
             }
-        } catch (error) {
-            console.error("初始加载股票列表失败:", error);
-            errorMessage = `加载股票列表失败: ${error}`;
-            // 如果获取失败，尝试刷新
-            await refreshStockSymbols();
-        }
-    });
-
-    // 新增文档点击处理函数
-    function handleDocumentClick(event: MouseEvent) {
-        const target = event.target as HTMLElement;
-        const isInside = target.closest(".custom-select");
-        if (!isInside && isDropdownOpen) {
-            isDropdownOpen = false;
+        } catch (reason) {
+            if (sequence === requestSequence) {
+                historyData = [];
+                error = errorMessage(reason, "历史数据查询失败");
+            }
+        } finally {
+            if (sequence === requestSequence) loading = false;
         }
     }
 
-    // 自动清理的effect
-    $effect(() => {
-        if (isDropdownOpen) {
-            document.addEventListener("click", handleDocumentClick);
-        } else {
-            document.removeEventListener("click", handleDocumentClick);
+    async function refreshSelectedHistory(): Promise<void> {
+        if (!selectedSymbol) {
+            error = "请先选择股票";
+            return;
         }
+        refreshingHistory = true;
+        error = "";
+        try {
+            await refreshHistoricalData(selectedSymbol);
+            await queryHistory();
+        } catch (reason) {
+            error = errorMessage(reason, "历史数据刷新失败");
+        } finally {
+            refreshingHistory = false;
+        }
+    }
 
+    $effect(() => {
+        if (!navTarget?.symbol || navTarget.symbol === consumedTarget) return;
+        consumedTarget = navTarget.symbol;
+        selectedSymbol = navTarget.symbol;
+        searchQuery = navTarget.name
+            ? `${navTarget.symbol} - ${navTarget.name}`
+            : navTarget.symbol;
+        dropdownOpen = false;
+        void queryHistory(navTarget.symbol);
+        onNavConsumed();
+    });
+
+    onMount(() => {
+        void loadStockSymbols();
+        const closeDropdown = (event: MouseEvent) => {
+            if (!(event.target as HTMLElement).closest(".stock-picker")) {
+                dropdownOpen = false;
+            }
+        };
+        document.addEventListener("click", closeDropdown);
         return () => {
-            document.removeEventListener("click", handleDocumentClick);
+            requestSequence += 1;
+            document.removeEventListener("click", closeDropdown);
         };
     });
-
-    async function refreshHistory() {
-        if (!selectedSymbol) {
-            errorMessage = "请先选择股票";
-            return;
-        }
-        
-        console.log("开始刷新历史数据，股票代码:", selectedSymbol);
-        try {
-            const result = await invoke("refresh_historical_data", { symbol: selectedSymbol });
-            console.log("刷新历史数据结果:", result);
-            await fetchHistory();
-        } catch (error) {
-            console.error("刷新历史数据失败:", error);
-            errorMessage = `刷新历史数据失败: ${error}`;
-        }
-    }
-
-    async function fetchHistory() {
-        if (!selectedSymbol) {
-            console.log("没有选中的股票，跳过获取历史数据");
-            return;
-        }
-        
-        if (!startDate || !endDate) {
-            errorMessage = "请选择开始日期和结束日期";
-            return;
-        }
-
-        console.log("开始获取历史数据:", {
-            symbol: selectedSymbol,
-            start: startDate,
-            end: endDate
-        });
-
-        isLoading = true;
-        errorMessage = "";
-
-        try {
-            const data = await invoke<HistoricalData[]>("get_historical_data", {
-                symbol: selectedSymbol,
-                start: startDate,
-                end: endDate,
-            });
-            console.log("获取到历史数据条数:", data.length);
-            historyData = data;
-            
-            if (data.length === 0) {
-                errorMessage = "没有找到指定时间范围内的数据，请尝试刷新数据或调整时间范围";
-            }
-        } catch (error) {
-            console.error("获取历史数据失败:", error);
-            errorMessage = `获取数据失败: ${error}`;
-            historyData = [];
-        } finally {
-            isLoading = false;
-        }
-    }
 </script>
 
-<div class="container">
-    <h1>历史数据查询</h1>
+<div class="history-page">
+    <header class="page-header">
+        <div>
+            <h1>历史数据</h1>
+            <p>查看 K 线、成交量、MACD 与 KDJ，并核对具体交易日数据。</p>
+        </div>
+        <button class="secondary-button" onclick={refreshStockCatalog} disabled={refreshingStocks}>
+            {#if refreshingStocks}<LoaderCircle size={16} class="spin" aria-hidden="true" />刷新中{:else}<Database size={16} aria-hidden="true" />更新股票目录{/if}
+        </button>
+    </header>
 
-    <div class="controls">
-        <!-- 自定义下拉选择框 -->
-        <div class="custom-select">
-            <input
-                type="text"
-                class="search-input"
-                bind:value={searchQuery}
-                onfocus={() => (isDropdownOpen = true)}
-                placeholder="搜索股票代码或名称..."
-            />
-            {#if isDropdownOpen}
-                <div class="dropdown-list">
+    <section class="query-bar" aria-label="历史数据查询条件">
+        <div class="stock-picker">
+            <label for="stock-search">股票</label>
+            <div class="search-field">
+                <Search size={16} aria-hidden="true" />
+                <input id="stock-search" bind:value={searchQuery} oninput={handleInput} onfocus={() => (dropdownOpen = true)} placeholder="搜索股票代码或名称" autocomplete="off" />
+            </div>
+            {#if dropdownOpen}
+                <div class="dropdown" role="listbox" aria-label="股票搜索结果">
                     {#each filteredSymbols as stock (stock.symbol)}
-                        <div
-                            class="dropdown-item"
-                            onclick={() => handleSelect(stock)}
-                            class:selected={selectedSymbol === stock.symbol}
-                        >
-                            <span class="symbol">{stock.symbol}</span>
-                            <span class="name">{stock.name}</span>
-                        </div>
+                        <button type="button" role="option" aria-selected={selectedSymbol === stock.symbol} onclick={() => selectStock(stock)}>
+                            <span>{stock.symbol}</span><strong>{stock.name}</strong><small>{stock.exchange}</small>
+                        </button>
                     {:else}
-                        <div class="dropdown-empty">未找到匹配的股票</div>
+                        <div class="dropdown-empty">没有匹配的股票</div>
                     {/each}
                 </div>
             {/if}
         </div>
+        <label class="date-field" for="history-start">开始日期<input id="history-start" type="date" bind:value={startDate} max={endDate} /></label>
+        <label class="date-field" for="history-end">结束日期<input id="history-end" type="date" bind:value={endDate} min={startDate} max={todayIso()} /></label>
+        <button class="primary-button" onclick={() => queryHistory()} disabled={loading || !selectedSymbol}>
+            {#if loading}<LoaderCircle size={16} class="spin" aria-hidden="true" />查询中{:else}<Search size={16} aria-hidden="true" />查询{/if}
+        </button>
+        <button class="secondary-button" onclick={refreshSelectedHistory} disabled={refreshingHistory || !selectedSymbol}>
+            {#if refreshingHistory}<LoaderCircle size={16} class="spin" aria-hidden="true" />刷新中{:else}<RefreshCw size={16} aria-hidden="true" />刷新数据{/if}
+        </button>
+    </section>
 
-        <!-- 刷新按钮组 -->
-        <div class="action-buttons">
-            <button class="refresh" onclick={refreshStockSymbols}>
-                🔄 刷新股票
-            </button>
-            <button class="refresh" onclick={refreshHistory}>
-                🔄 刷新数据
-            </button>
+    {#if error}
+        <div class="status-panel error" role="alert"><span>{error}</span>{#if selectedSymbol}<button onclick={() => queryHistory()}>重试查询</button>{/if}</div>
+    {/if}
+
+    {#if latest}
+        <section class="market-summary" aria-label="最新交易日摘要">
+            <div><span>最新交易日</span><strong>{latest.date.slice(0, 10)}</strong></div>
+            <div><span>收盘价</span><strong>{formatPrice(latest.close)}</strong></div>
+            <div><span>涨跌幅</span><strong class:price-up={latest.change_percent > 0} class:price-down={latest.change_percent < 0}>{formatChangePercent(latest.change_percent)}</strong></div>
+            <div><span>成交量</span><strong>{formatVolume(latest.volume)}手</strong></div>
+        </section>
+
+        <section class="chart-section" aria-label="历史技术图表">
+            <HistoricalChart data={historyData} />
+        </section>
+
+        <div class="table-frame history-table">
+            <table>
+                <thead><tr><th>日期</th><th>开盘</th><th>收盘</th><th>最高</th><th>最低</th><th>成交量</th><th>成交额</th><th>振幅</th><th>涨跌额</th><th>涨跌幅</th></tr></thead>
+                <tbody>
+                    {#each sortedHistory as item (item.date)}
+                        <tr>
+                            <td>{item.date.slice(0, 10)}</td>
+                            <td>{formatPrice(item.open)}</td><td>{formatPrice(item.close)}</td><td>{formatPrice(item.high)}</td><td>{formatPrice(item.low)}</td>
+                            <td>{formatVolume(item.volume)}手</td><td>{formatVolume(item.amount)}</td><td>{item.amplitude.toFixed(2)}%</td>
+                            <td class:price-up={item.change > 0} class:price-down={item.change < 0}>{formatChange(item.change)}</td>
+                            <td class:price-up={item.change_percent > 0} class:price-down={item.change_percent < 0}>{formatChangePercent(item.change_percent)}</td>
+                        </tr>
+                    {/each}
+                </tbody>
+            </table>
         </div>
-
-        <!-- 日期选择 -->
-        <input type="date" bind:value={startDate} />
-        <span>至</span>
-        <input type="date" bind:value={endDate} />
-        <button onclick={fetchHistory}>查询</button>
-    </div>
-
-    <!-- 图表占位 -->
-    <div class="chart-container">
-        <div
-            bind:this={chartContainer}
-            style="width: 100%; height: 700px;"
-        ></div>
-    </div>
-
-    <!-- 数据表格 -->
-    <div class="data-table">
-        <div class="table-header">
-            <div>日期</div>
-            <div>开盘价</div>
-            <div>收盘价</div>
-            <div>最高价</div>
-            <div>最低价</div>
-            <div>成交量</div>
-            <div>成交额</div>
-            <div>振幅</div>
-            <div>涨跌额</div>
-            <div>涨跌幅</div>
+    {:else if !loading}
+        <div class="empty-state">
+            <Database size={24} aria-hidden="true" />
+            <h2>选择股票后查看历史数据</h2>
+            <p>图表只在查询到有效数据后显示。</p>
         </div>
-
-        {#if isLoading}
-            <div class="loading-indicator">⏳ 数据加载中...</div>
-        {:else if errorMessage}
-            <div class="error-message">
-                ❌ {errorMessage}
-            </div>
-        {:else if historyData.length === 0}
-            <div class="no-data">📭 暂无数据</div>
-        {:else}
-            {#each [...historyData].reverse() as data (data.date)}
-                <div class="table-row">
-                    <div>{formatDate(data.date)}</div>
-                    <div>{formatPrice(data.open)}</div>
-                    <div>{formatPrice(data.close)}</div>
-                    <div>{formatPrice(data.high)}</div>
-                    <div>{formatPrice(data.low)}</div>
-                    <div>{formatVolume(data.volume)}手</div>
-                    <div>{formatVolume(data.amount)}</div>
-                    <div>{formatPercent(data.amplitude)}</div>
-                    <!-- 涨跌额 -->
-                    <div
-                        class:up={data.change > 0}
-                        class:down={data.change < 0}
-                    >
-                        {data.change === null ? "-" : formatChange(data.change)}
-                    </div>
-                    <!-- 涨跌幅 -->
-                    <div
-                        class:up={data.change_percent > 0}
-                        class:down={data.change_percent < 0}
-                    >
-                        {data.change_percent === null
-                            ? "-"
-                            : formatChangePercent(data.change_percent)}
-                    </div>
-                </div>
-            {/each}
-        {/if}
-    </div>
+    {/if}
 </div>
 
 <style>
-    .container {
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 1rem;
-    }
-
-    /* 修改.controls容器样式 */
-    .controls {
-        display: flex;
-        gap: 1rem; /* 适中间距 */
-        align-items: center; /* 垂直居中对齐 */
-        flex-wrap: wrap; /* 允许换行以适应不同屏幕 */
-        margin-bottom: 2rem;
-    }
-
-    /* 自定义选择框增加弹性布局 */
-    .custom-select {
-        position: relative;
-        min-width: 200px; /* 最小宽度减小 */
-        max-width: 320px; /* 减少最大宽度限制 */
-        flex: 0 0 auto; /* 固定尺寸，不伸缩 */
-    }
-
-    /* 增加过渡动画 */
-    .dropdown-item {
-        transition: transform 0.2s ease;
-    }
-    .dropdown-item:hover {
-        transform: translateX(5px);
-    }
-
-    /* 调整输入框内部尺寸 */
-    .search-input {
-        width: 280px;
-        padding: 0.6rem 1rem; /* 减小内边距 */
-        font-size: 1rem; /* 适当减小字体 */
-    }
-
-    .dropdown-list {
-        position: absolute;
-        width: 100%;
-        max-height: 400px;
-        overflow-y: auto;
-        background: rgba(0, 0, 0, 0.9);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        border-radius: 0.5rem;
-        margin-top: 0.5rem;
-        z-index: 100;
-    }
-
-    .dropdown-item {
-        padding: 1rem;
-        cursor: pointer;
-        display: grid;
-        grid-template-columns: 100px 1fr;
-        gap: 1rem;
-        align-items: center;
-        transition: background 0.2s;
-    }
-
-    .dropdown-item:hover {
-        background: rgba(255, 255, 255, 0.1);
-    }
-
-    .dropdown-item.selected {
-        background: var(--active-color);
-    }
-
-    .symbol {
-        font-weight: bold;
-        color: #3b82f6;
-    }
-
-    .name {
-        color: #e2e8f0;
-        font-size: 0.95em;
-    }
-
-    .dropdown-empty {
-        padding: 1rem;
-        text-align: center;
-        color: #94a3b8;
-    }
-
-    button {
-        padding: 0.5rem 2rem;
-        background: var(--active-color);
-        color: white;
-        border: none;
-        border-radius: 0.5rem;
-        cursor: pointer;
-    }
-
-    /* 刷新按钮组样式调整 */
-    .action-buttons {
-        display: flex;
-        gap: 0.75rem;
-        flex-shrink: 0; /* 禁止缩小 */
-        align-items: center;
-    }
-
-    button.refresh {
-        background: #3b82f6;
-        padding: 0.5rem 1rem;
-    }
-
-    .container {
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 1rem;
-    }
-
-    .controls {
-        display: flex;
-        gap: 1rem;
-        flex-wrap: wrap;
-        margin-bottom: 2rem;
-    }
-
-    input {
-        padding: 0.5rem 1rem;
-        background: rgba(255, 255, 255, 0.1);
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        border-radius: 0.5rem;
-        color: inherit;
-    }
-
-    button {
-        padding: 0.5rem 2rem;
-        background: var(--active-color);
-        color: white;
-        border: none;
-        border-radius: 0.5rem;
-        cursor: pointer;
-    }
-
-    .data-table {
-        margin-top: 2rem;
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 0.5rem;
-        overflow: hidden;
-    }
-
-    .table-header,
-    .table-row {
-        display: grid;
-        grid-template-columns: repeat(10, 1fr);
-        gap: 1rem;
-        padding: 1rem;
-    }
-
-    /* 修正颜色定义 */
-    .up {
-        color: #ef4444; /* 红色表示上涨 */
-    }
-    .down {
-        color: #10b981; /* 绿色表示下跌 */
-    }
-    /* 添加箭头指示 */
-    .up::before {
-        content: "↑";
-        margin-right: 4px;
-        font-size: 0.9em;
-    }
-    .down::before {
-        content: "↓";
-        margin-right: 4px;
-        font-size: 0.9em;
-    }
-
-    .table-header {
-        background: rgba(255, 255, 255, 0.1);
-        font-weight: 600;
-    }
-
-    .table-row {
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    }
-
-    .action-buttons {
-        display: flex;
-        gap: 0.5rem;
-    }
-
-    button.refresh {
-        background: #3b82f6;
-        padding: 0.5rem 1rem;
-    }
-
-    button.refresh:hover {
-        background: #2563eb;
-    }
-
-    .loading-indicator,
-    .error-message,
-    .no-data {
-        padding: 2rem;
-        text-align: center;
-        color: #94a3b8;
-    }
-
-    .error-message {
-        color: #ef4444;
-    }
-
-    .table-row div {
-        padding: 0.15rem;
-        display: flex;
-        align-items: center;
-    }
-
-    .chart-container {
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 0.5rem;
-        padding: 1rem;
-        margin: 1rem 0;
-    }
-
-    @media (max-width: 768px) {
-        .controls {
-            flex-wrap: wrap; /* 小屏幕允许换行 */
-            flex-direction: column;
-        }
-
-        .custom-select {
-            min-width: 100%;
-            max-width: 100%;
-        }
-
-        .search-input {
-            font-size: 0.9rem;
-        }
-
-        .table-header,
-        .table-row {
-            grid-template-columns: repeat(4, 1fr);
-        }
-
-        .chart-container {
-            margin: 1rem 0;
-            padding: 0.5rem;
-        }
+    .history-page { max-width: 1320px; margin: 0 auto; }
+    .query-bar { display: grid; grid-template-columns: minmax(260px, 1fr) 158px 158px auto auto; gap: 0.65rem; align-items: end; margin-bottom: 1rem; }
+    .stock-picker { position: relative; min-width: 0; }
+    .stock-picker > label, .date-field { display: grid; gap: 0.35rem; color: var(--text-muted); font-size: 0.74rem; }
+    .dropdown { position: absolute; top: calc(100% + 5px); left: 0; right: 0; z-index: 20; max-height: 320px; overflow: auto; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface-2); box-shadow: 0 12px 28px rgba(0, 0, 0, 0.3); }
+    .dropdown button { display: grid; grid-template-columns: 92px 1fr auto; gap: 0.7rem; width: 100%; padding: 0.65rem 0.75rem; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text-secondary); text-align: left; cursor: pointer; }
+    .dropdown button:hover, .dropdown button[aria-selected="true"] { background: var(--accent-muted); }
+    .dropdown button span { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .dropdown button strong { color: var(--text-primary); }
+    .dropdown button small { color: var(--text-muted); }
+    .dropdown-empty { padding: 1rem; color: var(--text-muted); text-align: center; }
+    .market-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: 8px; background: var(--surface-1); }
+    .market-summary div { display: grid; gap: 0.2rem; padding: 0.8rem 1rem; border-right: 1px solid var(--border); }
+    .market-summary div:last-child { border-right: 0; }
+    .market-summary span { color: var(--text-muted); font-size: 0.72rem; }
+    .market-summary strong { font-size: 0.95rem; }
+    .price-up { color: var(--price-up); }
+    .price-down { color: var(--price-down); }
+    .chart-section { margin: 0.9rem 0; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-1); padding: 0.5rem; }
+    .history-table { max-height: 480px; }
+    .empty-state { display: grid; justify-items: center; gap: 0.45rem; min-height: 240px; padding: 3rem 1rem; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--text-muted); text-align: center; }
+    .empty-state h2 { margin: 0.35rem 0 0; color: var(--text-primary); font-size: 1rem; }
+    .empty-state p { margin: 0; font-size: 0.84rem; }
+    @media (max-width: 1120px) {
+        .query-bar { grid-template-columns: minmax(260px, 1fr) 150px 150px; }
+        .query-bar > button { width: 100%; }
+        .history-table table { min-width: 980px; }
     }
 </style>

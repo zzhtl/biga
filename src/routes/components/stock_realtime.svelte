@@ -1,73 +1,135 @@
 <script lang="ts">
-    import { invoke } from "@tauri-apps/api/core";
     import { onMount } from "svelte";
-    import { formatVolume } from "../utils/utils";
+    import {
+        ArrowDown,
+        ArrowUp,
+        ArrowUpDown,
+        ChevronLeft,
+        ChevronRight,
+        History,
+        RefreshCw,
+        Search,
+        Star,
+    } from "lucide-svelte";
+    import {
+        errorMessage,
+        getRealtimeData,
+        getWatchlistSymbols,
+        setWatchlistMembership,
+    } from "../services";
+    import type {
+        NavTarget,
+        PagedResponse,
+        RealtimeData,
+        RealtimeSortColumn,
+        SortDirection,
+    } from "../types";
+    import { formatDate, formatVolume } from "../utils/utils";
 
-    // 定义类型
-    interface RealtimeData {
-        symbol: string;
-        name: string;
-        date: Date;
-        close: number;
-        volume: number;
-        amount: number;
-        amplitude: number;
-        turnover_rate: number;
-        change: number;
-        change_percent: number;
-    }
+    const PAGE_SIZE = 50;
 
-    // 跨页导航：点击行跳转历史数据页
-    type NavTarget = {
-        view: "favorites" | "stock" | "list" | "realtime" | "historical" | "settings";
-        symbol?: string;
-        name?: string;
-        action?: "history" | "predict";
-    };
-    export let onNavigate: (target: NavTarget) => void = () => {};
+    let { onNavigate = () => {} }: { onNavigate?: (target: NavTarget) => void } =
+        $props();
+    let result = $state<PagedResponse<RealtimeData>>({
+        data: [],
+        total: 0,
+        page: 1,
+        page_size: PAGE_SIZE,
+    });
+    let watchSet = $state(new Set<string>());
+    let searchQuery = $state("");
+    let sortColumn = $state<RealtimeSortColumn>("change_percent");
+    let sortDirection = $state<SortDirection>("desc");
+    let loading = $state(true);
+    let error = $state("");
+    let searchTimer: ReturnType<typeof setTimeout> | undefined;
+    let requestSequence = 0;
 
-    // 状态管理
-    let stocks: RealtimeData[] = [];
-    let loading = true;
-    let error: string | null = null;
-    let searchQuery = "";
-    let searchDebounce: number | null = null;
-    // 排序状态
-    let sortColumn = "change_percent"; // 默认按股票代码排序
-    let sortDirection = "desc"; // 默认升序
+    const totalPages = $derived(
+        Math.max(1, Math.ceil(result.total / result.page_size)),
+    );
 
-    // 收藏星标（与收藏池联动）
-    let watchSet: Set<string> = new Set();
+    const sortableColumns: Array<{
+        key: RealtimeSortColumn;
+        label: string;
+    }> = [
+        { key: "symbol", label: "股票代码" },
+        { key: "name", label: "名称" },
+        { key: "volume", label: "成交量" },
+        { key: "amount", label: "成交额" },
+        { key: "change", label: "涨跌额" },
+        { key: "change_percent", label: "涨跌幅" },
+    ];
 
-    // 与后端 canonical_symbol 同口径：提取到恰好 6 位数字则用之，否则原样 trim
     function sixDigit(value: string): string {
         const digits = value.replace(/\D/g, "");
         return digits.length === 6 ? digits : value.trim();
     }
 
-    async function loadWatchSet() {
+    async function loadQuotes(page = result.page): Promise<void> {
+        const sequence = ++requestSequence;
+        loading = true;
+        error = "";
         try {
-            const symbols = await invoke<string[]>("get_watchlist_symbols");
-            watchSet = new Set(symbols);
-        } catch (e) {
-            console.warn("获取收藏列表失败:", e);
-        }
-    }
-
-    async function toggleWatch(stock: RealtimeData) {
-        const key = sixDigit(stock.symbol);
-        try {
-            await invoke(
-                watchSet.has(key) ? "remove_from_watchlist" : "add_to_watchlist",
-                { symbol: stock.symbol },
+            const next = await getRealtimeData(
+                searchQuery.trim(),
+                sortColumn,
+                sortDirection,
+                page,
+                PAGE_SIZE,
             );
-            await loadWatchSet();
-        } catch (e) {
-            error = `收藏操作失败: ${e}`;
+            if (sequence === requestSequence) result = next;
+        } catch (reason) {
+            if (sequence === requestSequence) {
+                error = errorMessage(reason, "实时行情加载失败");
+            }
+        } finally {
+            if (sequence === requestSequence) loading = false;
         }
     }
 
-    function goHistory(stock: RealtimeData) {
+    async function loadWatchlist(): Promise<void> {
+        try {
+            watchSet = new Set(await getWatchlistSymbols());
+        } catch {
+            watchSet = new Set();
+        }
+    }
+
+    function handleSearch(): void {
+        if (searchTimer) clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => loadQuotes(1), 300);
+    }
+
+    async function sortBy(column: RealtimeSortColumn): Promise<void> {
+        if (column === sortColumn) {
+            sortDirection = sortDirection === "asc" ? "desc" : "asc";
+        } else {
+            sortColumn = column;
+            sortDirection = "desc";
+        }
+        await loadQuotes(1);
+    }
+
+    async function changePage(page: number): Promise<void> {
+        if (page < 1 || page > totalPages || page === result.page) return;
+        await loadQuotes(page);
+    }
+
+    async function toggleWatch(stock: RealtimeData): Promise<void> {
+        const symbol = sixDigit(stock.symbol);
+        const watched = watchSet.has(symbol);
+        try {
+            await setWatchlistMembership(stock.symbol, watched);
+            const next = new Set(watchSet);
+            watched ? next.delete(symbol) : next.add(symbol);
+            watchSet = next;
+        } catch (reason) {
+            error = errorMessage(reason, "收藏操作失败");
+        }
+    }
+
+    function goHistory(stock: RealtimeData): void {
         onNavigate({
             view: "historical",
             symbol: stock.symbol,
@@ -76,315 +138,161 @@
         });
     }
 
-    // 日期格式化
-    const formatDate = (date: Date) => {
-        return new Intl.DateTimeFormat("zh-CN").format(date);
-    };
-
-    // 数据获取函数（添加排序参数）
-    async function fetchData(query?: string, sortBy?: string, order?: string) {
-        try {
-            loading = true;
-            error = null;
-            const response = await invoke<RealtimeData[]>("get_realtime_data", {
-                search: query,
-                column: sortBy,
-                sort: order,
-            });
-            stocks = response; // 保持引用（如果允许修改原始数据）
-            for (const item of stocks) {
-                item.date = new Date(item.date);
-            }
-        } catch (err) {
-            console.error("获取数据失败:", err);
-            error = "无法获取实时数据，请稍后重试";
-        } finally {
-            loading = false;
-        }
-    }
-
-    // 初始化加载（传递默认排序参数）
-    onMount(async () => {
-        await fetchData("", sortColumn, sortDirection);
-        loadWatchSet();
+    onMount(() => {
+        void loadQuotes(1);
+        void loadWatchlist();
+        return () => {
+            requestSequence += 1;
+            if (searchTimer) clearTimeout(searchTimer);
+        };
     });
-
-    // 监听搜索输入变化
-    $: if (searchQuery) {
-        if (searchDebounce) clearTimeout(searchDebounce);
-        searchDebounce = setTimeout(() => {
-            // 传递当前排序参数
-            fetchData(searchQuery, sortColumn, sortDirection);
-        }, 300);
-    } else {
-        fetchData("", sortColumn, sortDirection);
-    }
-
-    // 排序函数（触发数据重新获取）
-    function sortData(column: string) {
-        if (column === sortColumn) {
-            sortDirection = sortDirection === "asc" ? "desc" : "asc";
-        } else {
-            sortColumn = column;
-            sortDirection = "desc";
-        }
-
-        // 触发数据重新获取（传递当前排序参数和搜索词）
-        fetchData(searchQuery, sortColumn, sortDirection);
-    }
 </script>
 
-<!-- 页面布局 -->
-<div class="container">
-    <!-- 搜索框 -->
-    <div class="search-container">
-        <input
-            bind:value={searchQuery}
-            placeholder="搜索股票代码或名称"
-            class="search-input"
-        />
-    </div>
-
-    <!-- 数据展示 -->
-    <div class="data-table">
-        <div class="table-header">
-            <div title="收藏"></div>
-            <div onclick={() => sortData("symbol")} class="sort-column">
-                股票代码
-                {#if sortColumn === "symbol"}
-                    {sortDirection === "asc" ? "↑" : "↓"}
-                {/if}
-            </div>
-            <div onclick={() => sortData("name")} class="sort-column">
-                名称
-                {#if sortColumn === "name"}
-                    {sortDirection === "asc" ? "↑" : "↓"}
-                {/if}
-            </div>
-            <div>日期</div>
-            <div>最新价</div>
-            <div onclick={() => sortData("volume")} class="sort-column">
-                成交量
-                {#if sortColumn === "volume"}
-                    {sortDirection === "asc" ? "↑" : "↓"}
-                {/if}
-            </div>
-            <div onclick={() => sortData("amount")} class="sort-column">
-                成交额
-                {#if sortColumn === "amount"}
-                    {sortDirection === "asc" ? "↑" : "↓"}
-                {/if}
-            </div>
-            <div>振幅</div>
-            <div onclick={() => sortData("change")} class="sort-column">
-                涨跌额
-                {#if sortColumn === "change"}
-                    {sortDirection === "asc" ? "↑" : "↓"}
-                {/if}
-            </div>
-            <div onclick={() => sortData("change_percent")} class="sort-column">
-                涨跌幅
-                {#if sortColumn === "change_percent"}
-                    {sortDirection === "asc" ? "↑" : "↓"}
-                {/if}
-            </div>
+<div class="page-shell">
+    <header class="page-header">
+        <div>
+            <h1>实时行情</h1>
+            <p>浏览本地最新行情快照，按关键指标排序并快速进入历史分析。</p>
         </div>
+        <span class="result-count">{result.total.toLocaleString("zh-CN")} 条记录</span>
+    </header>
 
-        {#if loading}
-            <div class="loading">加载中...</div>
-        {:else if error}
-            <div class="error">{error}</div>
-        {:else}
-            {#each stocks as stock}
-                <div
-                    class="table-row row-click"
-                    role="button"
-                    tabindex="0"
-                    title="点击查看历史K线"
-                    onclick={() => goHistory(stock)}
-                    onkeydown={(e) => {
-                        if (e.key === "Enter") goHistory(stock);
-                    }}
-                >
-                    <div>
-                        <button
-                            class="star"
-                            class:on={watchSet.has(sixDigit(stock.symbol))}
-                            title={watchSet.has(sixDigit(stock.symbol))
-                                ? "移出收藏池"
-                                : "加入收藏池"}
-                            onclick={(e) => {
-                                e.stopPropagation();
-                                toggleWatch(stock);
-                            }}
-                        >
-                            {watchSet.has(sixDigit(stock.symbol)) ? "★" : "☆"}
-                        </button>
-                    </div>
-                    <div class="symbol">{stock.symbol}</div>
-                    <div class="name">{stock.name}</div>
-                    <div class="date">{formatDate(stock.date)}</div>
-                    <div class="close">{stock.close}</div>
-                    <div class="volume">{formatVolume(stock.volume)}手</div>
-                    <div class="amount">{formatVolume(stock.amount)}</div>
-                    <div class="amplitude">{stock.amplitude}%</div>
-                    <div
-                        class:negative={stock.change > 0}
-                        class:positive={stock.change < 0}
-                    >
-                        {stock.change > 0 ? "+" : ""}{stock.change.toFixed(2)}
-                    </div>
-                    <div
-                        class:negative={stock.change_percent > 0}
-                        class:positive={stock.change_percent < 0}
-                    >
-                        {stock.change_percent > 0
-                            ? "+"
-                            : ""}{stock.change_percent}%
-                    </div>
-                </div>
-            {/each}
-        {/if}
+    <div class="toolbar-row">
+        <label class="search-field">
+            <Search size={17} aria-hidden="true" />
+            <input bind:value={searchQuery} oninput={handleSearch} placeholder="搜索股票代码或名称" aria-label="搜索实时行情" />
+        </label>
+        <button class="icon-button" onclick={() => loadQuotes()} title="刷新行情" aria-label="刷新行情">
+            <RefreshCw size={17} class={loading ? "spin" : undefined} aria-hidden="true" />
+        </button>
     </div>
+
+    {#if error}
+        <div class="status-panel error" role="alert">
+            <span>{error}</span>
+            <button onclick={() => loadQuotes()}>重试</button>
+        </div>
+    {/if}
+
+    <div class="table-frame" aria-busy={loading}>
+        <table>
+            <thead>
+                <tr>
+                    <th class="watch-column"><span class="sr-only">收藏</span></th>
+                    {#each sortableColumns.slice(0, 2) as column (column.key)}
+                        <th>
+                            <button class="sort-button" onclick={() => sortBy(column.key)}>
+                                {column.label}
+                                {#if column.key !== sortColumn}
+                                    <ArrowUpDown size={14} aria-hidden="true" />
+                                {:else if sortDirection === "asc"}
+                                    <ArrowUp size={14} aria-hidden="true" />
+                                {:else}
+                                    <ArrowDown size={14} aria-hidden="true" />
+                                {/if}
+                            </button>
+                        </th>
+                    {/each}
+                    <th>日期</th>
+                    <th>最新价</th>
+                    {#each sortableColumns.slice(2, 4) as column (column.key)}
+                        <th>
+                            <button class="sort-button" onclick={() => sortBy(column.key)}>
+                                {column.label}
+                                {#if column.key !== sortColumn}
+                                    <ArrowUpDown size={14} aria-hidden="true" />
+                                {:else if sortDirection === "asc"}
+                                    <ArrowUp size={14} aria-hidden="true" />
+                                {:else}
+                                    <ArrowDown size={14} aria-hidden="true" />
+                                {/if}
+                            </button>
+                        </th>
+                    {/each}
+                    <th>振幅</th>
+                    {#each sortableColumns.slice(4) as column (column.key)}
+                        <th>
+                            <button class="sort-button" onclick={() => sortBy(column.key)}>
+                                {column.label}
+                                {#if column.key !== sortColumn}
+                                    <ArrowUpDown size={14} aria-hidden="true" />
+                                {:else if sortDirection === "asc"}
+                                    <ArrowUp size={14} aria-hidden="true" />
+                                {:else}
+                                    <ArrowDown size={14} aria-hidden="true" />
+                                {/if}
+                            </button>
+                        </th>
+                    {/each}
+                    <th class="actions-column">操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {#if loading && result.data.length === 0}
+                    <tr><td colspan="11" class="table-state">正在加载实时行情...</td></tr>
+                {:else if result.data.length === 0}
+                    <tr><td colspan="11" class="table-state">暂无行情数据</td></tr>
+                {:else}
+                    {#each result.data as stock (stock.symbol)}
+                        <tr>
+                            <td class="watch-column">
+                                <button
+                                    class="star-button"
+                                    class:active={watchSet.has(sixDigit(stock.symbol))}
+                                    onclick={() => toggleWatch(stock)}
+                                    title={watchSet.has(sixDigit(stock.symbol)) ? "移出收藏" : "加入收藏"}
+                                    aria-label={watchSet.has(sixDigit(stock.symbol)) ? `移出收藏 ${stock.name}` : `加入收藏 ${stock.name}`}
+                                >
+                                    <Star size={17} fill={watchSet.has(sixDigit(stock.symbol)) ? "currentColor" : "none"} aria-hidden="true" />
+                                </button>
+                            </td>
+                            <td><span class="symbol">{stock.symbol}</span></td>
+                            <td class="stock-name">{stock.name || "-"}</td>
+                            <td>{formatDate(stock.date)}</td>
+                            <td>{stock.close.toFixed(2)}</td>
+                            <td>{formatVolume(stock.volume)}手</td>
+                            <td>{formatVolume(stock.amount)}</td>
+                            <td>{stock.amplitude.toFixed(2)}%</td>
+                            <td class:price-up={stock.change > 0} class:price-down={stock.change < 0}>{stock.change > 0 ? "+" : ""}{stock.change.toFixed(2)}</td>
+                            <td class:price-up={stock.change_percent > 0} class:price-down={stock.change_percent < 0}>{stock.change_percent > 0 ? "+" : ""}{stock.change_percent.toFixed(2)}%</td>
+                            <td class="actions-column">
+                                <button class="row-action" onclick={() => goHistory(stock)} title="查看历史数据">
+                                    <History size={15} aria-hidden="true" />历史数据
+                                </button>
+                            </td>
+                        </tr>
+                    {/each}
+                {/if}
+            </tbody>
+        </table>
+        {#if loading && result.data.length > 0}<div class="table-loading">正在更新...</div>{/if}
+    </div>
+
+    <nav class="pagination" aria-label="实时行情分页">
+        <button class="icon-button" onclick={() => changePage(result.page - 1)} disabled={result.page <= 1} aria-label="上一页"><ChevronLeft size={18} aria-hidden="true" /></button>
+        <span>第 {result.page} / {totalPages} 页</span>
+        <button class="icon-button" onclick={() => changePage(result.page + 1)} disabled={result.page >= totalPages} aria-label="下一页"><ChevronRight size={18} aria-hidden="true" /></button>
+    </nav>
 </div>
 
 <style>
-    /* 主容器 */
-    .container {
-        max-width: 1200px;
-        margin: 0 auto;
-    }
-
-    /* 搜索框样式 */
-    .search-container {
-        margin: 1rem 0;
-        text-align: center;
-    }
-
-    .search-input {
-        padding: 0.8rem 1.5rem;
-        width: 300px;
-        border: 2px solid #3b82f6;
-        border-radius: 24px;
-        background: #2d2d30;
-        color: #ffffff;
-        font-size: 1rem;
-        transition: border-color 0.3s ease;
-    }
-
-    .search-input:focus {
-        outline: none;
-        border-color: #0ea5e9;
-        box-shadow: 0 0 0 2px rgba(14, 182, 129, 0.2);
-    }
-
-    .search-input::placeholder {
-        color: #666666;
-    }
-
-    @media (max-width: 768px) {
-        .search-input {
-            width: 100%;
-            margin: 0 1rem;
-        }
-    }
-
-    /* 数据表格样式 */
-    .data-table {
-        margin-top: 2rem;
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 0.5rem;
-        overflow: hidden;
-    }
-
-    .table-header,
-    .table-row {
-        display: grid;
-        grid-template-columns: 2.2rem repeat(9, 1fr);
-        gap: 1rem;
-        padding: 1rem;
-    }
-
-    .row-click {
-        cursor: pointer;
-    }
-
-    .row-click:hover {
-        background: rgba(99, 102, 241, 0.1);
-    }
-
-    .star {
-        padding: 0 0.2rem;
-        background: none;
-        border: none;
-        color: #64748b;
-        font-size: 1rem;
-        line-height: 1;
-        cursor: pointer;
-    }
-
-    .star:hover {
-        color: #cbd5e1;
-    }
-
-    .star.on {
-        color: #fbbf24;
-    }
-
-    .table-header {
-        background: rgba(255, 255, 255, 0.1);
-        font-weight: 600;
-    }
-
-    .table-row {
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-    }
-
-    .table-row div {
-        padding: 0.15rem;
-        display: flex;
-        align-items: center;
-    }
-
-    .positive {
-        color: #10b981;
-    }
-
-    .negative {
-        color: #ef4444;
-    }
-
-    /* 排序样式 */
-    .sort-column {
-        cursor: pointer;
-    }
-
-    .sort-column:active {
-        opacity: 0.8;
-    }
-
-    /* 移动端适配 */
-    @media (max-width: 768px) {
-        .header-row,
-        .data-row {
-            grid-template-columns: repeat(2, 1fr);
-        }
-
-        .header-row div:nth-child(n + 3),
-        .data-row div:nth-child(n + 3) {
-            display: none;
-        }
-    }
-
-    /* 加载/错误状态样式 */
-    .loading,
-    .error {
-        padding: 2rem;
-        text-align: center;
-        color: #ffffff;
-    }
-
-    .error {
-        color: #ef4444;
-    }
+    .page-shell { max-width: 1320px; margin: 0 auto; }
+    .result-count { color: var(--text-secondary); font-size: 0.86rem; white-space: nowrap; }
+    .toolbar-row { display: flex; gap: 0.65rem; margin-bottom: 1rem; }
+    .search-field { width: min(420px, 100%); }
+    .table-frame { position: relative; }
+    table { min-width: 1180px; }
+    .watch-column { width: 46px; text-align: center; }
+    .actions-column { width: 112px; text-align: right; }
+    .sort-button { display: inline-flex; align-items: center; gap: 0.3rem; border: 0; padding: 0; background: transparent; color: inherit; font: inherit; font-weight: inherit; cursor: pointer; white-space: nowrap; }
+    .sort-button:hover { color: var(--accent); }
+    .symbol { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--accent); }
+    .stock-name { color: var(--text-primary); font-weight: 600; }
+    .star-button { display: inline-grid; place-items: center; width: 32px; height: 32px; border: 0; background: transparent; color: var(--text-muted); cursor: pointer; }
+    .star-button:hover, .star-button.active { color: var(--warning); }
+    .row-action { display: inline-flex; align-items: center; gap: 0.3rem; border: 0; background: transparent; color: var(--accent); cursor: pointer; font: inherit; font-size: 0.8rem; }
+    .price-up { color: var(--price-up); }
+    .price-down { color: var(--price-down); }
+    .table-loading { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(17, 19, 21, 0.58); color: var(--text-secondary); }
+    .pagination { display: flex; align-items: center; justify-content: flex-end; gap: 0.75rem; margin-top: 1rem; color: var(--text-secondary); font-size: 0.86rem; }
 </style>

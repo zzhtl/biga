@@ -4,4 +4,5 @@
 
 export * from './stock';
 export * from './prediction';
-
+export * from './settings';
+export * from './core';

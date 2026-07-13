@@ -1,87 +1,67 @@
-/**
- * 股票服务
- */
+import type {
+  HistoricalData,
+  PagedResponse,
+  RealtimeData,
+  RealtimeSortColumn,
+  SortDirection,
+  Stock,
+  StockInfo,
+} from '../types';
+import { invokeCommand } from './core';
 
-import { invoke } from '@tauri-apps/api/core';
-import type { StockInfo, HistoricalData, RealtimeData, PagedResponse } from '../types';
-
-/**
- * 获取股票列表
- */
-export async function getStockList(
-  keyword?: string,
-  page: number = 1,
-  pageSize: number = 20
-): Promise<PagedResponse<StockInfo>> {
-  const result = await invoke<{ data: StockInfo[]; total: number }>('get_stock_list', {
-    keyword,
-    page,
-    pageSize,
-  });
-  
-  return {
-    data: result.data,
-    total: result.total,
-    page,
-    page_size: pageSize,
-  };
+export function getStockList(
+  search = '',
+  page = 1,
+  pageSize = 50,
+): Promise<PagedResponse<Stock>> {
+  return invokeCommand('get_stock_list', { search, page, pageSize });
 }
 
-/**
- * 获取股票信息
- */
-export async function getStockInfos(symbols: string[]): Promise<StockInfo[]> {
-  return invoke<StockInfo[]>('get_stock_infos', { symbols });
+export function getStockInfos(): Promise<StockInfo[]> {
+  return invokeCommand('get_stock_infos');
 }
 
-/**
- * 刷新股票信息
- */
 export async function refreshStockInfos(): Promise<void> {
-  await invoke('refresh_stock_infos');
+  await invokeCommand('refresh_stock_infos');
 }
 
-/**
- * 获取历史数据
- */
-export async function getHistoricalData(
+export function getHistoricalData(
   symbol: string,
-  startDate?: string,
-  endDate?: string
+  start: string,
+  end: string,
 ): Promise<HistoricalData[]> {
-  return invoke<HistoricalData[]>('get_historical_data', {
-    symbol,
-    startDate,
-    endDate,
-  });
+  return invokeCommand('get_historical_data', { symbol, start, end });
 }
 
-/**
- * 刷新历史数据
- */
 export async function refreshHistoricalData(symbol: string): Promise<void> {
-  await invoke('refresh_historical_data', { symbol });
+  await invokeCommand('refresh_historical_data', { symbol });
 }
 
-/**
- * 获取实时数据
- */
-export async function getRealtimeData(
-  keyword?: string,
-  page: number = 1,
-  pageSize: number = 20
+export function getRealtimeData(
+  search = '',
+  column: RealtimeSortColumn = 'change_percent',
+  sort: SortDirection = 'desc',
+  page = 1,
+  pageSize = 50,
 ): Promise<PagedResponse<RealtimeData>> {
-  const result = await invoke<{ data: RealtimeData[]; total: number }>('get_realtime_data', {
-    keyword,
+  return invokeCommand('get_realtime_data', {
+    search,
+    column,
+    sort,
     page,
     pageSize,
   });
-  
-  return {
-    data: result.data,
-    total: result.total,
-    page,
-    page_size: pageSize,
-  };
 }
 
+export function getWatchlistSymbols(): Promise<string[]> {
+  return invokeCommand('get_watchlist_symbols');
+}
+
+export async function setWatchlistMembership(
+  symbol: string,
+  watched: boolean,
+): Promise<void> {
+  await invokeCommand(watched ? 'remove_from_watchlist' : 'add_to_watchlist', {
+    symbol,
+  });
+}
