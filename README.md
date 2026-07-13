@@ -78,7 +78,7 @@ src-tauri/src/
 
 ### 前端
 - **Svelte + TypeScript**：响应式用户界面
-- **TailwindCSS**：现代化样式框架
+- **原生 CSS 设计变量**：专业深色数据工作台
 
 ### 后端
 - **Rust**：高性能后端逻辑
@@ -133,7 +133,7 @@ src-tauri/src/
 ### 前置要求
 - Node.js（推荐 LTS 版本）
 - Rust 工具链（最新稳定版）
-- pnpm 包管理器
+- bun 包管理器
 
 ### 初始化步骤
 ```bash
@@ -142,10 +142,10 @@ git clone https://github.com/zzhtl/biga.git
 cd biga
 
 # 安装依赖
-pnpm install
+bun install
 
 # 运行开发环境
-cargo tauri dev
+bun run tauri dev
 ```
 
 ### 运行示例 / 量化评测工具

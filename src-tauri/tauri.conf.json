@@ -1,24 +1,24 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "biga",
+  "productName": "BigA",
   "version": "0.1.0",
   "identifier": "com.biga.app",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:5173",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "bun run build",
     "frontendDist": "../build"
   },
   "app": {
     "windows": [
       {
-        "title": "biga",
+        "title": "BigA 股票分析工作台",
         "width": 1500,
         "height": 1100
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {
