@@ -1,5 +1,6 @@
 use crate::db::models::Stock;
 use crate::error::AppError;
+use crate::commands::pagination::{normalize_page, PagedResponse};
 use sqlx::SqlitePool;
 use tauri::State;
 
@@ -7,9 +8,27 @@ use tauri::State;
 pub async fn get_stock_list(
     pool: State<'_, SqlitePool>,
     search: String,
-) -> Result<Vec<Stock>, AppError> {
+    page: u32,
+    page_size: u32,
+) -> Result<PagedResponse<Stock>, AppError> {
     let search = search.trim();
     let search_pattern = format!("%{search}%");
+    let (page, page_size, offset) = normalize_page(page, page_size);
+
+    let total = sqlx::query_scalar::<_, i64>(
+        r#"
+            SELECT COUNT(*)
+            FROM stock
+            WHERE ? = '' OR (symbol LIKE ? OR name LIKE ? OR industry LIKE ? OR category LIKE ?)
+            "#,
+    )
+    .bind(search)
+    .bind(search_pattern.clone())
+    .bind(search_pattern.clone())
+    .bind(search_pattern.clone())
+    .bind(search_pattern.clone())
+    .fetch_one(&*pool)
+    .await?;
 
     let records = sqlx::query_as::<_, Stock>(
         r#"
@@ -27,6 +46,7 @@ pub async fn get_stock_list(
             FROM stock
             WHERE ? = '' OR (symbol LIKE ? OR name LIKE ? OR industry LIKE ? OR category LIKE ?)
             ORDER BY category, symbol
+            LIMIT ? OFFSET ?
             "#,
     )
     .bind(search)
@@ -34,8 +54,15 @@ pub async fn get_stock_list(
     .bind(search_pattern.clone())
     .bind(search_pattern.clone())
     .bind(search_pattern)
+    .bind(i64::from(page_size))
+    .bind(offset)
     .fetch_all(&*pool)
     .await?;
 
-    Ok(records)
+    Ok(PagedResponse {
+        data: records,
+        total,
+        page,
+        page_size,
+    })
 }

@@ -7,7 +7,7 @@
 
 pub mod weights;
 pub mod constants;
+pub mod api_token;
 
 pub use weights::*;
 pub use constants::*;
-

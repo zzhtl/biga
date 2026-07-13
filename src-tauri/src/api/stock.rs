@@ -3,21 +3,18 @@ use crate::db::models::{
     StockInfoItem,
 };
 use crate::error::AppError;
+use crate::config::api_token::resolve_api_token;
 use chrono::NaiveDate;
 
-// 查看全部股票名称以及代码 - 使用更稳定的API端点
-const ALL_SYMBOL_API: &str = "https://api.zhituapi.com/hs/list/all?token=ZHITU_TOKEN_LIMIT_TEST";
+// 查看全部股票名称以及代码
+const ALL_SYMBOL_API: &str = "https://api.zhituapi.com/hs/list/all";
 // 查看股票历史
 const HISTORY_API: &str = "https://api.zhituapi.com/hs/history";
 // 实时交易（含流通市值 lt、总市值 sz、换手率 hs、量比 lb）
 const REALTIME_API: &str = "https://api.zhituapi.com/hs/real/ssjy";
 // 财务指标（含 ROE、每股收益、每股净资产、增长率等基本面数据）
 const FINANCIAL_API: &str = "https://api.zhituapi.com/hs/gs/cwzb";
-
-fn api_token() -> String {
-    std::env::var("STOCK_API_TOKEN")
-        .unwrap_or_else(|_| "8FBF3E47-9A7E-4405-856B-FDC0C5FD1B26".to_string())
-}
+const TOKEN_VALIDATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// 将各种格式的股票代码归一化为 zhitu 实时接口所需的纯 6 位数字代码。
 /// 例如 "000002.SZ" / "sz000002" → "000002"。
@@ -32,9 +29,11 @@ fn normalize_quote_symbol(symbol: &str) -> String {
 
 pub async fn fetch_stock_infos() -> Result<Vec<StockInfo>, AppError> {
     println!("开始获取股票信息...");
-    
+    let (token, _) = resolve_api_token().await?;
+
     let response = reqwest::Client::new()
         .get(ALL_SYMBOL_API)
+        .query(&[("token", token)])
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await?;
@@ -65,13 +64,13 @@ fn parse_stock_info(items: Vec<StockInfoItem>) -> Result<Vec<StockInfo>, AppErro
 
 pub async fn fetch_historical_data(symbol: &str) -> Result<Vec<HistoricalData>, AppError> {
     println!("开始获取股票 {symbol} 的历史数据...");
-    
-    let token = api_token();
-    let url = format!("{HISTORY_API}/{symbol}/d/n?token={token}");
-    println!("请求URL: {url}");
-    
+
+    let (token, _) = resolve_api_token().await?;
+    let url = format!("{HISTORY_API}/{symbol}/d/n");
+
     let response = reqwest::Client::new()
         .get(&url)
+        .query(&[("token", token)])
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await?;
@@ -88,7 +87,6 @@ pub async fn fetch_historical_data(symbol: &str) -> Result<Vec<HistoricalData>, 
     let historical_items: Vec<HistoricalDataItem> = serde_json::from_str(&response_text)
         .map_err(|e| {
             println!("JSON解析失败: {e}");
-            println!("响应内容: {}", &response_text[..std::cmp::min(500, response_text.len())]);
             AppError::DeserializationError(format!("JSON解析失败: {e}"))
         })?;
     
@@ -155,13 +153,14 @@ fn parse_historical_data(
 ///
 /// 用于推导流通股本以计算历史换手率。网络或解析失败时返回 Err，调用方应优雅降级。
 pub async fn fetch_stock_capital(symbol: &str) -> Result<RealtimeQuoteItem, AppError> {
-    let token = api_token();
+    let (token, _) = resolve_api_token().await?;
     // ssjy 接口只接受纯 6 位数字代码（如 000002），需从 000002.SZ / sz000002 归一化
     let code = normalize_quote_symbol(symbol);
-    let url = format!("{REALTIME_API}/{code}?token={token}");
+    let url = format!("{REALTIME_API}/{code}");
 
     let response = reqwest::Client::new()
         .get(&url)
+        .query(&[("token", token)])
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await?;
@@ -194,12 +193,13 @@ fn parse_cw_number(s: &str) -> Option<f64> {
 /// 接口返回按报告期倒序的数组，字段为字符串（缺失为 "--"）。网络或解析失败返回 Err，
 /// 调用方应优雅降级。
 pub async fn fetch_financial_indicators(symbol: &str) -> Result<Vec<StockFundamental>, AppError> {
-    let token = api_token();
+    let (token, _) = resolve_api_token().await?;
     let code = normalize_quote_symbol(symbol);
-    let url = format!("{FINANCIAL_API}/{code}?token={token}");
+    let url = format!("{FINANCIAL_API}/{code}");
 
     let response = reqwest::Client::new()
         .get(&url)
+        .query(&[("token", token)])
         .timeout(std::time::Duration::from_secs(30))
         .send()
         .await?;
@@ -239,9 +239,85 @@ pub async fn fetch_financial_indicators(symbol: &str) -> Result<Vec<StockFundame
     Ok(out)
 }
 
+fn map_validation_request_error(error: reqwest::Error) -> AppError {
+    if error.is_timeout() {
+        AppError::ApiTimeout
+    } else if error.is_connect() {
+        AppError::ApiConnection
+    } else {
+        AppError::ApiError(error)
+    }
+}
+
+async fn send_validation_request(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    timeout: std::time::Duration,
+) -> Result<reqwest::Response, AppError> {
+    client
+        .get(url)
+        .query(&[("token", token)])
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(map_validation_request_error)
+}
+
+async fn send_validation_request_with_fallback(
+    client: &reqwest::Client,
+    token: &str,
+    endpoints: &[(&str, std::time::Duration)],
+) -> Result<reqwest::Response, AppError> {
+    let Some((last, primary)) = endpoints.split_last() else {
+        return Err(AppError::ApiConnection);
+    };
+
+    for (url, timeout) in primary {
+        match send_validation_request(client, url, token, *timeout).await {
+            Ok(response) => return Ok(response),
+            Err(AppError::ApiTimeout) | Err(AppError::ApiConnection) => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    send_validation_request(client, last.0, token, last.1).await
+}
+
+pub async fn validate_api_token(token: &str) -> Result<(), AppError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let primary_url = format!("{FINANCIAL_API}/000001");
+    let fallback_url = format!("{REALTIME_API}/000001");
+    let response = send_validation_request_with_fallback(
+        &client,
+        token,
+        &[
+            (&primary_url, TOKEN_VALIDATION_TIMEOUT),
+            (&fallback_url, TOKEN_VALIDATION_TIMEOUT),
+        ],
+    )
+    .await?;
+
+    if !response.status().is_success() {
+        return Err(AppError::InvalidInput(format!(
+            "API 密钥验证失败: {}",
+            response.status()
+        )));
+    }
+
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| AppError::InvalidInput("API 密钥无效或服务暂不可用".to_string()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn test_normalize_quote_symbol() {
@@ -251,6 +327,98 @@ mod tests {
         assert_eq!(normalize_quote_symbol("600519.SH"), "600519");
         assert_eq!(normalize_quote_symbol("600519"), "600519");
         assert_eq!(normalize_quote_symbol("000001"), "000001");
+    }
+
+    #[tokio::test]
+    async fn validation_uses_a_fallback_after_a_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a local test port should be available");
+        let address = listener
+            .local_addr()
+            .expect("the local test address should be readable");
+        let server = tokio::spawn(async move {
+            let (first, _) = listener
+                .accept()
+                .await
+                .expect("the first request should connect");
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                drop(first);
+            });
+
+            let (mut second, _) = listener
+                .accept()
+                .await
+                .expect("the retry should connect");
+            let mut request = [0_u8; 1024];
+            let bytes_read = second
+                .read(&mut request)
+                .await
+                .expect("the retry request should be readable");
+            assert!(bytes_read > 0, "the retry request should not be empty");
+            second
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\nConnection: close\r\n\r\n{\"lt\":1}",
+                )
+                .await
+                .expect("the retry response should be sent");
+        });
+
+        let url = format!("http://{address}");
+        let response = send_validation_request_with_fallback(
+            &reqwest::Client::new(),
+            "test-token",
+            &[
+                (&url, std::time::Duration::from_millis(20)),
+                (&url, std::time::Duration::from_millis(20)),
+            ],
+        )
+        .await
+        .expect("the retry should succeed");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        server.await.expect("the test server should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn validation_returns_a_safe_timeout_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a local test port should be available");
+        let address = listener
+            .local_addr()
+            .expect("the local test address should be readable");
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (connection, _) = listener
+                    .accept()
+                    .await
+                    .expect("each validation attempt should connect");
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    drop(connection);
+                });
+            }
+        });
+
+        let url = format!("http://{address}");
+        let error = send_validation_request_with_fallback(
+            &reqwest::Client::new(),
+            "sensitive-test-token",
+            &[
+                (&url, std::time::Duration::from_millis(20)),
+                (&url, std::time::Duration::from_millis(20)),
+            ],
+        )
+        .await
+        .expect_err("both attempts should time out");
+        let message = error.to_string();
+
+        assert!(matches!(error, AppError::ApiTimeout));
+        assert_eq!(message, "股票数据服务响应超时，API 密钥已保存，请稍后重试");
+        assert!(!message.contains("sensitive-test-token"));
+        server.await.expect("the test server should stop cleanly");
     }
 
     #[test]

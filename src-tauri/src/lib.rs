@@ -75,7 +75,12 @@ pub fn run() {
             commands::watchlist::add_to_watchlist,
             commands::watchlist::remove_from_watchlist,
             commands::watchlist::get_watchlist_symbols,
-            commands::watchlist::comprehensive_predict
+            commands::watchlist::comprehensive_predict,
+            // 安全设置命令
+            commands::settings::get_api_token_status,
+            commands::settings::save_api_token,
+            commands::settings::clear_api_token,
+            commands::settings::test_api_token
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {
