@@ -16,6 +16,7 @@
         formatPrice,
         formatVolume,
     } from "../utils/utils";
+    import { calculateHistoricalSummary } from "../utils/historical_summary";
 
     type Props = {
         navTarget?: { symbol: string; name?: string } | null;
@@ -53,6 +54,7 @@
         [...historyData].sort((left, right) => right.date.localeCompare(left.date)),
     );
     const latest = $derived(sortedHistory[0] ?? null);
+    const historySummary = $derived(calculateHistoricalSummary(historyData));
 
     function todayIso(): string {
         const date = new Date();
@@ -229,6 +231,19 @@
             <div><span>成交量</span><strong>{formatVolume(latest.volume)}手</strong></div>
         </section>
 
+        {#if historySummary}
+            <section class="range-summary" aria-label="查询区间统计">
+                <div><span>实际区间</span><strong>{historySummary.startDate.slice(0, 10)} 至 {historySummary.endDate.slice(0, 10)}</strong></div>
+                <div><span>交易日</span><strong>{historySummary.tradingDays} 天</strong></div>
+                <div><span>区间涨跌额</span><strong class:price-up={historySummary.rangeChange !== null && historySummary.rangeChange > 0} class:price-down={historySummary.rangeChange !== null && historySummary.rangeChange < 0}>{historySummary.rangeChange === null ? "--" : formatChange(historySummary.rangeChange)}</strong></div>
+                <div><span>区间涨跌幅</span><strong class:price-up={historySummary.rangeChangePercent !== null && historySummary.rangeChangePercent > 0} class:price-down={historySummary.rangeChangePercent !== null && historySummary.rangeChangePercent < 0}>{historySummary.rangeChangePercent === null ? "--" : formatChangePercent(historySummary.rangeChangePercent)}</strong></div>
+                <div><span>区间最高</span><strong>{formatPrice(historySummary.highestPrice)}</strong></div>
+                <div><span>区间最低</span><strong>{formatPrice(historySummary.lowestPrice)}</strong></div>
+                <div><span>平均日涨跌幅</span><strong class:price-up={historySummary.averageDailyChangePercent > 0} class:price-down={historySummary.averageDailyChangePercent < 0}>{formatChangePercent(historySummary.averageDailyChangePercent)}</strong></div>
+                <div><span>上涨 / 下跌 / 平盘</span><strong class="day-counts"><span class="price-up">{historySummary.upDays}</span> / <span class="price-down">{historySummary.downDays}</span> / {historySummary.flatDays}</strong></div>
+            </section>
+        {/if}
+
         <section class="chart-section" aria-label="历史技术图表">
             <HistoricalChart data={historyData} />
         </section>
@@ -275,6 +290,14 @@
     .market-summary div:last-child { border-right: 0; }
     .market-summary span { color: var(--text-muted); font-size: 0.72rem; }
     .market-summary strong { font-size: 0.95rem; }
+    .range-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 0.65rem; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-1); }
+    .range-summary > div { display: grid; gap: 0.2rem; padding: 0.8rem 1rem; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .range-summary > div:nth-child(4n) { border-right: 0; }
+    .range-summary > div:nth-last-child(-n + 4) { border-bottom: 0; }
+    .range-summary > div > span { color: var(--text-muted); font-size: 0.72rem; }
+    .range-summary strong { font-size: 0.95rem; }
+    .day-counts .price-up { color: var(--price-up); }
+    .day-counts .price-down { color: var(--price-down); }
     .price-up { color: var(--price-up); }
     .price-down { color: var(--price-down); }
     .chart-section { margin: 0.9rem 0; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-1); padding: 0.5rem; }
