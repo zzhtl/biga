@@ -15,6 +15,9 @@ use crate::prediction::types::{Prediction, PredictionInterval};
 /// 已实现波动率回看窗口（交易日）
 const REALIZED_VOL_WINDOW: usize = 20;
 
+/// 序列化到响应中的稳定方法名。
+pub const METHOD: &str = "realized_volatility_calibrated";
+
 /// 默认名义覆盖率
 pub const DEFAULT_COVERAGE: f64 = 0.80;
 
@@ -60,21 +63,45 @@ pub fn attach_prediction_intervals(
         return;
     }
     let sigma = realized_daily_vol(closes);
-    let z = calibrated_z(confidence);
     for (idx, prediction) in predictions.iter_mut().enumerate() {
         let day = (idx + 1) as f64;
-        // 累计半宽（相对 base 的百分点）
-        let half_pct = z * sigma * day.sqrt() * 100.0;
         let cum_change = (prediction.predicted_price - base_price) / base_price * 100.0;
-        let lower_change = cum_change - half_pct;
-        let upper_change = cum_change + half_pct;
-        prediction.interval = Some(PredictionInterval {
+        prediction.interval = Some(build_interval(
+            base_price,
+            cum_change,
+            sigma,
+            day,
             confidence,
-            lower_change_percent: lower_change,
-            upper_change_percent: upper_change,
-            lower_price: (base_price * (1.0 + lower_change / 100.0)).max(0.0),
-            upper_price: base_price * (1.0 + upper_change / 100.0),
-        });
+        ));
+        prediction.stress_interval = Some(build_interval(
+            base_price,
+            cum_change,
+            sigma,
+            day,
+            0.95,
+        ));
+    }
+}
+
+fn build_interval(
+    base_price: f64,
+    cumulative_change: f64,
+    sigma: f64,
+    day: f64,
+    confidence: f64,
+) -> PredictionInterval {
+    let half_pct = calibrated_z(confidence) * sigma * day.sqrt() * 100.0;
+    let lower_change = cumulative_change - half_pct;
+    let upper_change = cumulative_change + half_pct;
+
+    PredictionInterval {
+        confidence,
+        lower_change_percent: lower_change,
+        upper_change_percent: upper_change,
+        lower_price: (base_price * (1.0 + lower_change / 100.0)).max(0.0),
+        upper_price: base_price * (1.0 + upper_change / 100.0),
+        method: METHOD.to_string(),
+        lookback_days: REALIZED_VOL_WINDOW,
     }
 }
 
@@ -99,6 +126,7 @@ mod tests {
                     prediction_reason: None,
                     key_factors: None,
                     interval: None,
+                    stress_interval: None,
                 }
             })
             .collect()
@@ -126,8 +154,14 @@ mod tests {
         // 点预测落在自身区间内，且区间对称
         for p in &preds {
             let iv = p.interval.as_ref().unwrap();
+            let stress = p.stress_interval.as_ref().unwrap();
             assert!(iv.lower_price < p.predicted_price && p.predicted_price < iv.upper_price);
             assert!((iv.confidence - 0.80).abs() < 1e-9);
+            assert!((stress.confidence - 0.95).abs() < 1e-9);
+            assert!(stress.lower_price <= iv.lower_price);
+            assert!(stress.upper_price >= iv.upper_price);
+            assert_eq!(iv.method, METHOD);
+            assert_eq!(iv.lookback_days, REALIZED_VOL_WINDOW);
         }
     }
 
@@ -135,7 +169,9 @@ mod tests {
     fn test_zero_base_price_is_noop() {
         let mut preds = make_predictions(100.0, 0.0, 3);
         attach_prediction_intervals(&mut preds, &[], 0.0, DEFAULT_COVERAGE);
-        assert!(preds.iter().all(|p| p.interval.is_none()));
+        assert!(preds
+            .iter()
+            .all(|p| p.interval.is_none() && p.stress_interval.is_none()));
     }
 
     #[test]

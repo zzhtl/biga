@@ -234,6 +234,17 @@ pub async fn run_model_backtest(request: BacktestRequest) -> Result<BacktestRepo
         price_error_distribution,
         direction_correct_rate: m.direction_accuracy,
         volatility_vs_accuracy,
+        rmse: m.rmse,
+        baseline_direction_accuracy: m.baseline_accuracy,
+        direction_edge: m.edge(),
+        predicted_up_ratio: m.predicted_up_ratio,
+        actual_up_ratio: m.actual_up_ratio,
+        interval_80_samples: m.interval_80_total,
+        interval_80_coverage: m.interval_80_coverage,
+        stress_95_samples: m.stress_95_total,
+        stress_95_coverage: m.stress_95_coverage,
+        average_interval_80_width: m.average_interval_80_width,
+        average_stress_95_width: m.average_stress_95_width,
     })
 }
 
@@ -267,7 +278,8 @@ fn backtest_entry_from_observation(
                 format!("基准价格: {:.2}", observation.base_price),
                 format!("实际涨跌幅: {:+.2}%", observation.actual_change),
             ]),
-            interval: None,
+            interval: observation.interval.clone(),
+            stress_interval: observation.stress_interval.clone(),
         }],
         actual_prices: vec![observation.actual_price],
         actual_changes: vec![observation.actual_change],
@@ -541,6 +553,11 @@ pub(crate) async fn predict_with_professional_strategy_inner(
         professional_result.key_factors.push(adjustment.summary);
     }
     let risk = &professional_result.risk_assessment;
+    let diagnostics_risk_level = predictions
+        .diagnostics
+        .as_ref()
+        .map(|diagnostics| diagnostics.risk_summary.level_label.clone())
+        .filter(|label| !label.is_empty());
     
     // 生成买卖点
     let mut buy_points = Vec::new();
@@ -555,18 +572,14 @@ pub(crate) async fn predict_with_professional_strategy_inner(
             .copied()
             .unwrap_or(current_price);
         let stop_loss = price_level * (1.0 - risk.suggested_stop_loss / 100.0);
-        let take_profit = vec![
-            price_level * (1.0 + risk.suggested_take_profit / 200.0),
-            price_level * (1.0 + risk.suggested_take_profit / 100.0),
-        ];
         
         buy_points.push(BuySellPoint {
             point_type: "买入".to_string(),
             signal_strength: professional_result.confidence,
             price_level,
             stop_loss,
-            take_profit,
-            risk_reward_ratio: risk.risk_reward_ratio,
+            take_profit: Vec::new(),
+            risk_reward_ratio: 0.0,
             reasons: vec![
                 format!("专业方向: {}", professional_result.direction.to_string()),
                 format!("量价信号: {}", analysis.volume_signal.signal),
@@ -585,18 +598,14 @@ pub(crate) async fn predict_with_professional_strategy_inner(
             .copied()
             .unwrap_or(current_price);
         let stop_loss = price_level * (1.0 + risk.suggested_stop_loss / 100.0);
-        let take_profit = vec![
-            price_level * (1.0 - risk.suggested_take_profit / 200.0),
-            price_level * (1.0 - risk.suggested_take_profit / 100.0),
-        ];
         
         sell_points.push(BuySellPoint {
             point_type: "卖出".to_string(),
             signal_strength: professional_result.confidence,
             price_level,
             stop_loss,
-            take_profit,
-            risk_reward_ratio: risk.risk_reward_ratio,
+            take_profit: Vec::new(),
+            risk_reward_ratio: 0.0,
             reasons: vec![
                 format!("专业方向: {}", professional_result.direction.to_string()),
                 format!("量价信号: {}", analysis.volume_signal.signal),
@@ -617,7 +626,7 @@ pub(crate) async fn predict_with_professional_strategy_inner(
         multi_timeframe,
         divergence: summarize_divergence(&analysis.divergence_analysis),
         current_advice: professional_result.suggested_action.clone(),
-        risk_level: risk.risk_level.clone(),
+        risk_level: diagnostics_risk_level.unwrap_or_else(|| risk.risk_level.clone()),
         candle_patterns: analysis.patterns,
         volume_analysis: summarize_volume(&analysis.volume_signal, analysis.tech_indicators.obv_trend),
         multi_factor_score: analysis.multi_factor_score,
@@ -806,6 +815,7 @@ mod tests {
                     prediction_reason: None,
                     key_factors: None,
                     interval: None,
+                    stress_interval: None,
                 },
                 Prediction {
                     target_date: "2026-01-05".to_string(),
@@ -818,6 +828,7 @@ mod tests {
                     prediction_reason: None,
                     key_factors: None,
                     interval: None,
+                    stress_interval: None,
                 },
             ],
             last_real_data: Some(LastRealData {
@@ -825,6 +836,7 @@ mod tests {
                 price: 10.0,
                 change_percent: 0.0,
             }),
+            diagnostics: None,
         };
 
         append_prediction_factor(&mut response, "截面测试");

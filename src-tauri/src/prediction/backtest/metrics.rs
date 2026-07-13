@@ -37,6 +37,15 @@ pub struct BacktestMetrics {
     pub actual_up_ratio: f64,
     /// 朴素基准准确率 = 总是猜多数类（max(上涨率, 下跌率)）
     pub baseline_accuracy: f64,
+    /// 80%校准区间的有效评估样本数与实际覆盖率。
+    pub interval_80_total: usize,
+    pub interval_80_coverage: f64,
+    /// 95%压力区间的有效评估样本数与实际覆盖率。
+    pub stress_95_total: usize,
+    pub stress_95_coverage: f64,
+    /// 两档区间的平均宽度（百分点）。
+    pub average_interval_80_width: f64,
+    pub average_stress_95_width: f64,
 }
 
 impl BacktestMetrics {
@@ -61,6 +70,12 @@ impl Default for BacktestMetrics {
             predicted_up_ratio: 0.0,
             actual_up_ratio: 0.0,
             baseline_accuracy: 0.0,
+            interval_80_total: 0,
+            interval_80_coverage: 0.0,
+            stress_95_total: 0,
+            stress_95_coverage: 0.0,
+            average_interval_80_width: 0.0,
+            average_stress_95_width: 0.0,
         }
     }
 }
@@ -137,6 +152,12 @@ pub fn compute_metrics(samples: &[BacktestSample]) -> BacktestMetrics {
         predicted_up_ratio: predicted_up as f64 / total as f64,
         actual_up_ratio: actual_up as f64 / total as f64,
         baseline_accuracy: actual_up.max(actual_down) as f64 / total as f64,
+        interval_80_total: 0,
+        interval_80_coverage: 0.0,
+        stress_95_total: 0,
+        stress_95_coverage: 0.0,
+        average_interval_80_width: 0.0,
+        average_stress_95_width: 0.0,
     }
 }
 

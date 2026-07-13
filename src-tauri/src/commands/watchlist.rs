@@ -17,7 +17,9 @@ use crate::db::repository::{
     get_stock_fundamentals, resolve_historical_symbol,
 };
 use crate::error::AppError;
-use crate::prediction::types::{PredictionInterval, PredictionRequest, ProfessionalPredictionResponse};
+use crate::prediction::types::{
+    PredictionInterval, PredictionRequest, ProfessionalPredictionResponse, RiskSummary,
+};
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -367,6 +369,9 @@ pub struct ComprehensiveReport {
     pub interval: Option<PredictionInterval>,
     pub current_advice: String,
     pub risk_level: String,
+    /// 结构化风险事实，供收藏页筛选、排序和展开证据。
+    #[serde(default)]
+    pub risk_summary: RiskSummary,
     /// 自适应多因子得分（0-100，引擎既有输出）
     pub adaptive_score: f64,
     pub buy_point_count: usize,
@@ -464,6 +469,12 @@ pub async fn comprehensive_predict(
         0.0
     };
     let pa = &prediction.professional_analysis;
+    let risk_summary = prediction
+        .predictions
+        .diagnostics
+        .as_ref()
+        .map(|diagnostics| diagnostics.risk_summary.clone())
+        .unwrap_or_default();
     let up20 = daily_up_ratio(&bars, 20);
     let up60 = daily_up_ratio(&bars, 60);
     let up250 = daily_up_ratio(&bars, 250);
@@ -485,6 +496,7 @@ pub async fn comprehensive_predict(
         interval: last_pred.interval.clone(),
         current_advice: pa.current_advice.clone(),
         risk_level: pa.risk_level.clone(),
+        risk_summary,
         adaptive_score: pa.multi_factor_score.adaptive_score,
         buy_point_count: pa.buy_points.len(),
         sell_point_count: pa.sell_points.len(),

@@ -8,7 +8,7 @@ pub mod metrics;
 
 use crate::db::models::HistoricalData;
 use crate::prediction::model::inference::{predict_from_historical, MAX_ANALYSIS_DAYS};
-use crate::prediction::types::{PredictionRequest, PredictionResponse};
+use crate::prediction::types::{PredictionInterval, PredictionRequest, PredictionResponse};
 use chrono::NaiveDate;
 use metrics::{compute_metrics, BacktestMetrics, BacktestSample};
 
@@ -41,6 +41,8 @@ pub struct BacktestObservation {
     pub confidence: f64,
     pub key_factors: Vec<String>,
     pub prediction_reason: Option<String>,
+    pub interval: Option<PredictionInterval>,
+    pub stress_interval: Option<PredictionInterval>,
 }
 
 /// 走步回测。
@@ -110,6 +112,12 @@ pub fn run_backtest_window_with_predictor(
 
     let mut samples = Vec::new();
     let mut observations = Vec::new();
+    let mut interval_80_total = 0usize;
+    let mut interval_80_covered = 0usize;
+    let mut interval_80_width_sum = 0.0;
+    let mut stress_95_total = 0usize;
+    let mut stress_95_covered = 0usize;
+    let mut stress_95_width_sum = 0.0;
     let mut t = lookback;
     while t + horizon <= historical.len() {
         let prediction_date = historical[t - 1].date;
@@ -148,6 +156,27 @@ pub fn run_backtest_window_with_predictor(
             0.0
         };
 
+        if let Some(interval) = prediction.interval.as_ref() {
+            interval_80_total += 1;
+            interval_80_width_sum +=
+                interval.upper_change_percent - interval.lower_change_percent;
+            if (interval.lower_change_percent..=interval.upper_change_percent)
+                .contains(&actual_change)
+            {
+                interval_80_covered += 1;
+            }
+        }
+        if let Some(interval) = prediction.stress_interval.as_ref() {
+            stress_95_total += 1;
+            stress_95_width_sum +=
+                interval.upper_change_percent - interval.lower_change_percent;
+            if (interval.lower_change_percent..=interval.upper_change_percent)
+                .contains(&actual_change)
+            {
+                stress_95_covered += 1;
+            }
+        }
+
         samples.push(BacktestSample {
             predicted_change,
             actual_change,
@@ -168,16 +197,42 @@ pub fn run_backtest_window_with_predictor(
             confidence: prediction.confidence,
             key_factors: prediction.key_factors.clone().unwrap_or_default(),
             prediction_reason: prediction.prediction_reason.clone(),
+            interval: prediction.interval.clone(),
+            stress_interval: prediction.stress_interval.clone(),
         });
         t += step;
     }
 
+    let mut metrics = compute_metrics(&samples);
+    metrics.interval_80_total = interval_80_total;
+    metrics.interval_80_coverage = ratio(interval_80_covered, interval_80_total);
+    metrics.stress_95_total = stress_95_total;
+    metrics.stress_95_coverage = ratio(stress_95_covered, stress_95_total);
+    metrics.average_interval_80_width = average(interval_80_width_sum, interval_80_total);
+    metrics.average_stress_95_width = average(stress_95_width_sum, stress_95_total);
+
     Ok(BacktestReport {
         stock_code: stock_code.to_string(),
         horizon,
-        metrics: compute_metrics(&samples),
+        metrics,
         observations,
     })
+}
+
+fn ratio(count: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        count as f64 / total as f64
+    }
+}
+
+fn average(sum: f64, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        sum / total as f64
+    }
 }
 
 fn visible_history_start(end: usize, max_window: usize) -> usize {
@@ -270,8 +325,10 @@ mod tests {
                         prediction_reason: Some("injected".to_string()),
                         key_factors: None,
                         interval: None,
+                        stress_interval: None,
                     }],
                     last_real_data: None,
+                    diagnostics: None,
                 })
             },
         )
@@ -279,5 +336,60 @@ mod tests {
 
         assert_eq!(calls, 1);
         assert!((report.observations[0].predicted_change - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_backtest_records_interval_coverage() {
+        let historical = synthetic_history(75);
+        let prediction_date = historical[64].date;
+        let report = run_backtest_window_with_predictor(
+            "test",
+            &historical,
+            60,
+            5,
+            1,
+            Some(prediction_date),
+            Some(prediction_date),
+            |_request, visible_history| {
+                let last = visible_history.last().unwrap();
+                let interval = PredictionInterval {
+                    confidence: 0.80,
+                    lower_change_percent: -10.0,
+                    upper_change_percent: 10.0,
+                    lower_price: last.close * 0.9,
+                    upper_price: last.close * 1.1,
+                    method: "test".to_string(),
+                    lookback_days: 20,
+                };
+                let mut stress = interval.clone();
+                stress.confidence = 0.95;
+                stress.lower_change_percent = -20.0;
+                stress.upper_change_percent = 20.0;
+                Ok(PredictionResponse {
+                    predictions: vec![crate::prediction::types::Prediction {
+                        target_date: "2026-01-01".to_string(),
+                        predicted_price: last.close,
+                        predicted_change_percent: 0.0,
+                        confidence: 0.5,
+                        trading_signal: Some("中性".to_string()),
+                        signal_strength: Some(0.5),
+                        technical_indicators: None,
+                        prediction_reason: None,
+                        key_factors: None,
+                        interval: Some(interval),
+                        stress_interval: Some(stress),
+                    }],
+                    last_real_data: None,
+                    diagnostics: None,
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.metrics.interval_80_total, 1);
+        assert_eq!(report.metrics.stress_95_total, 1);
+        assert!((report.metrics.interval_80_coverage - 1.0).abs() < 1e-9);
+        assert!((report.metrics.stress_95_coverage - 1.0).abs() < 1e-9);
+        assert!((report.metrics.average_interval_80_width - 20.0).abs() < 1e-9);
     }
 }

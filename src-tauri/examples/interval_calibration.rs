@@ -7,6 +7,7 @@
 use biga_lib::db::connection::create_pool;
 use biga_lib::db::models::HistoricalData;
 use biga_lib::db::repository::get_recent_historical_data_for_symbols;
+use biga_lib::prediction::analysis::prediction_interval;
 use biga_lib::prediction::analysis::volatility_forecast::{
     calculate_realized_volatility, GarchForecaster,
 };
@@ -39,6 +40,11 @@ async fn main() {
 
     // 正态分位（参照：若残差服从正态，名义 z 应给出对应覆盖率）
     let nominal = [(1.0_f64, 68.3), (1.2816, 80.0), (1.6449, 90.0), (1.9600, 95.0)];
+    let production_80_z =
+        prediction_interval::calibrated_z(prediction_interval::DEFAULT_COVERAGE);
+    let production_95_z = prediction_interval::calibrated_z(0.95);
+    let mut production_passed = true;
+    let mut production_checks = 0usize;
 
     for &horizon in &[1usize, 5, 10] {
         for method in ["garch", "realized20"] {
@@ -112,8 +118,27 @@ async fn main() {
                 quantile(90.0),
                 quantile(95.0)
             );
+            if method == "realized20" {
+                production_checks += 1;
+                let production_80 = cov_at(production_80_z);
+                let production_95 = cov_at(production_95_z);
+                let pass_80 = (75.0..=85.0).contains(&production_80);
+                let pass_95 = (90.0..=98.0).contains(&production_95);
+                production_passed &= pass_80 && pass_95;
+                println!(
+                    "  生产口径：80% z={production_80_z:.2} → {:.1}% [{}]；95% z={production_95_z:.2} → {:.1}% [{}]",
+                    production_80,
+                    if pass_80 { "PASS" } else { "FAIL" },
+                    production_95,
+                    if pass_95 { "PASS" } else { "FAIL" },
+                );
+            } else {
+                println!("  研究对照：此方法不用于生产区间输出");
+            }
         }
     }
+    assert_eq!(production_checks, 3, "生产区间校准样本不足");
+    assert!(production_passed, "生产区间经验覆盖率未达到校准目标");
     println!(
         "\n判读：若'名义z覆盖'低于右列正态值→真实分布更厚尾，需用更大 z（见'经验分位z'）。\n带宽=区间是否有用的尺度（如5日±X%）。"
     );

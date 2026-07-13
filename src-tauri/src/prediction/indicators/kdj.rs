@@ -106,7 +106,7 @@ mod tests {
         let lows = vec![9.0, 10.0, 10.5, 10.0, 11.0, 11.5, 12.0, 12.5, 13.0];
         let closes = vec![9.5, 10.5, 11.5, 11.0, 12.5, 12.0, 13.5, 13.0, 14.5];
         
-        let (k, d, j) = calculate_kdj(&highs, &lows, &closes, 9);
+        let (k, d, _j) = calculate_kdj(&highs, &lows, &closes, 9);
         
         assert!(k >= 0.0 && k <= 100.0);
         assert!(d >= 0.0 && d <= 100.0);
@@ -118,4 +118,3 @@ mod tests {
         assert!(is_kdj_death_cross(60.0, 50.0, 45.0, 50.0));
     }
 }
-

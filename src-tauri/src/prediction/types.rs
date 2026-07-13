@@ -63,6 +63,9 @@ pub struct Prediction {
     /// 校准涨跌区间带（方向不可测但波动可测；点预测仅供参考，区间才是诚实的不确定性）
     #[serde(default)]
     pub interval: Option<PredictionInterval>,
+    /// 95% 压力区间，用于观察低概率但影响较大的尾部波动。
+    #[serde(default)]
+    pub stress_interval: Option<PredictionInterval>,
 }
 
 /// 校准涨跌区间带。
@@ -72,7 +75,7 @@ pub struct Prediction {
 /// 这是对"单股方向无 alpha、但波动率可预测"事实的诚实表达。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PredictionInterval {
-    /// 名义覆盖率（如 0.80 表示约 80% 概率实际落在带内）
+    /// 名义覆盖率（如 0.80 表示历史走步样本经验覆盖目标约 80%）
     pub confidence: f64,
     /// 区间下沿：相对发起日真实价的累计涨跌幅（%）
     pub lower_change_percent: f64,
@@ -82,6 +85,12 @@ pub struct PredictionInterval {
     pub lower_price: f64,
     /// 区间上沿价格
     pub upper_price: f64,
+    /// 区间生成方法，便于前端和回测追溯口径。
+    #[serde(default)]
+    pub method: String,
+    /// 波动率估计使用的历史窗口（交易日）。
+    #[serde(default)]
+    pub lookback_days: usize,
 }
 
 /// 技术指标值
@@ -109,6 +118,100 @@ pub struct TechnicalIndicatorValues {
 pub struct PredictionResponse {
     pub predictions: Vec<Prediction>,
     pub last_real_data: Option<LastRealData>,
+    /// 预测口径、风险事实与不确定性诊断。旧响应反序列化时允许缺省。
+    #[serde(default)]
+    pub diagnostics: Option<PredictionDiagnostics>,
+}
+
+/// 风险等级。它表示已触发事实规则的最高严重度，不是风险发生概率。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskLevel {
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+
+impl RiskLevel {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Low => "低风险",
+            Self::Medium => "中风险",
+            Self::High => "高风险",
+        }
+    }
+}
+
+/// 风险来源分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskCategory {
+    Data,
+    Uncertainty,
+    Volatility,
+    Trend,
+    Signal,
+    Liquidity,
+    Model,
+}
+
+/// 单条可追溯风险告警。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskWarning {
+    /// 稳定代码，供前端去重、筛选和排序。
+    pub code: String,
+    pub category: RiskCategory,
+    pub severity: RiskLevel,
+    pub title: String,
+    pub detail: String,
+    /// 触发该告警的可核验数值或状态。
+    pub evidence: Vec<String>,
+}
+
+/// 风险面板使用的原始度量，不合成为未经校准的风险分数。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RiskMetrics {
+    pub history_samples: usize,
+    pub data_staleness_days: Option<i64>,
+    pub daily_volatility_percent: f64,
+    pub volatility_percentile: f64,
+    pub interval_80_width_percent: Option<f64>,
+    pub interval_80_lower_percent: Option<f64>,
+    pub stress_95_lower_percent: Option<f64>,
+    pub support_distance_percent: Option<f64>,
+    pub resistance_distance_percent: Option<f64>,
+    pub atr_percent: Option<f64>,
+}
+
+/// 当前预测的风险汇总。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskSummary {
+    pub level: RiskLevel,
+    pub level_label: String,
+    pub warnings: Vec<RiskWarning>,
+    pub metrics: RiskMetrics,
+}
+
+impl Default for RiskSummary {
+    fn default() -> Self {
+        Self {
+            level: RiskLevel::Low,
+            level_label: RiskLevel::Low.label().to_string(),
+            warnings: Vec::new(),
+            metrics: RiskMetrics::default(),
+        }
+    }
+}
+
+/// 预测诊断元数据。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PredictionDiagnostics {
+    /// `historical_unconditional_drift` 或 `candle_model`。
+    pub point_estimate_kind: String,
+    pub point_estimate_note: String,
+    pub uncertainty_method: String,
+    pub risk_summary: RiskSummary,
 }
 
 /// 最新真实数据
@@ -215,6 +318,28 @@ pub struct BacktestReport {
     pub price_error_distribution: Vec<f64>,
     pub direction_correct_rate: f64,
     pub volatility_vs_accuracy: Vec<(f64, f64)>,
+    #[serde(default)]
+    pub rmse: f64,
+    #[serde(default)]
+    pub baseline_direction_accuracy: f64,
+    #[serde(default)]
+    pub direction_edge: f64,
+    #[serde(default)]
+    pub predicted_up_ratio: f64,
+    #[serde(default)]
+    pub actual_up_ratio: f64,
+    #[serde(default)]
+    pub interval_80_samples: usize,
+    #[serde(default)]
+    pub interval_80_coverage: f64,
+    #[serde(default)]
+    pub stress_95_samples: usize,
+    #[serde(default)]
+    pub stress_95_coverage: f64,
+    #[serde(default)]
+    pub average_interval_80_width: f64,
+    #[serde(default)]
+    pub average_stress_95_width: f64,
 }
 
 /// 单次回测记录

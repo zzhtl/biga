@@ -1542,6 +1542,8 @@ mod tests {
             confidence: 0.35,
             key_factors: Vec::new(),
             prediction_reason: None,
+            interval: None,
+            stress_interval: None,
         };
         let mut sweeps = one_day_ma5_bullish_threshold_sweeps();
 
@@ -1571,6 +1573,8 @@ mod tests {
                 "真实数据校准: 7日中幅预测方向由看涨反向为看跌，已按7日中幅方向反向校准".to_string(),
             ],
             prediction_reason: None,
+            interval: None,
+            stress_interval: None,
         };
         let mut sweep = SevenDayMidReversalSweep::default();
 

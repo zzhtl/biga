@@ -12,7 +12,7 @@
 
 use crate::prediction::types::{
     PredictionRequest, PredictionResponse, Prediction, LastRealData,
-    EvaluationResult, TechnicalIndicatorValues, ModelInfo,
+    EvaluationResult, TechnicalIndicatorValues, ModelInfo, PredictionDiagnostics,
 };
 use crate::prediction::model::ml_inference::MlPredictor;
 use crate::prediction::model::management::load_model_metadata;
@@ -21,6 +21,7 @@ use crate::prediction::indicators;
 use crate::prediction::analysis::{trend, volume, pattern, support_resistance};
 use crate::prediction::analysis::{market_regime, divergence, signal_confirmation, volatility_forecast};
 use crate::prediction::analysis::prediction_interval;
+use crate::prediction::analysis::risk_warning::{self, ModelRiskInput, RiskAnalysisInput};
 use crate::prediction::strategy::{multi_factor, professional_engine, adaptive_weights, price_model};
 use crate::utils::date::get_next_trading_day;
 use crate::db::{
@@ -49,7 +50,11 @@ pub async fn predict_with_history(
         .await
         .map_err(|e| format!("获取历史数据失败: {e}"))?;
 
-    predict_from_historical(&request, &historical)
+    let mut response = predict_from_historical(&request, &historical)?;
+    if let Some(last) = historical.last() {
+        attach_live_data_staleness(&mut response, last.date);
+    }
+    Ok(response)
 }
 
 /// 使用调用方提供的历史数据进行预测；回测复用该函数以保持生产预测口径一致。
@@ -110,19 +115,15 @@ pub fn predict_from_historical(
     for day in 1..=prediction_days {
         let target_date = get_next_trading_day(last_date);
         
-        // 使用增强模型计算预测
+        // 点估计严格使用历史无条件漂移锚；技术分析仅保留为状态解释和信号强度。
         let daily_ctx = DailyPredictionContext {
             professional_result: &professional_result,
             prediction_days,
-            regime: &analysis.regime_analysis,
-            multi_factor: &analysis.multi_factor_score,
-            enhanced_pred: &analysis.enhanced_prediction,
             signal_confirm: &analysis.signal_confirm,
             vol_forecast: &analysis.vol_forecast,
-            divergence: &analysis.divergence_analysis,
             stock_code: Some(&request.stock_code),
         };
-        let (change_percent, confidence) = calculate_enhanced_daily_prediction(day, &daily_ctx);
+        let (change_percent, confidence) = calculate_drift_daily_prediction(day, &daily_ctx);
         
         let predicted_price = last_price * (1.0 + change_percent / 100.0);
         
@@ -156,12 +157,13 @@ pub fn predict_from_historical(
             predicted_price,
             predicted_change_percent: change_percent,
             confidence,
-            trading_signal: Some(signal_from_change_percent(change_percent).to_string()),
+            trading_signal: Some(professional_result.direction.to_string()),
             signal_strength: Some(confidence),
             technical_indicators: Some(convert_indicators(&analysis.tech_indicators)),
             prediction_reason: Some(prediction_reason),
             key_factors: Some(key_factors),
             interval: None,
+            stress_interval: None,
         });
         
         last_date = target_date;
@@ -176,6 +178,15 @@ pub fn predict_from_historical(
         prediction_interval::DEFAULT_COVERAGE,
     );
 
+    let diagnostics = diagnostics_from_analysis(
+        historical,
+        &analysis,
+        &predictions,
+        "historical_unconditional_drift",
+        "点估计为对应预测周期的历史无条件漂移中枢；技术信号仅描述当前状态，不参与点预测方向。",
+        None,
+    );
+
     Ok(PredictionResponse {
         predictions,
         last_real_data: Some(LastRealData {
@@ -183,6 +194,7 @@ pub fn predict_from_historical(
             price: current_price,
             change_percent: last_data.change_percent,
         }),
+        diagnostics: Some(diagnostics),
     })
 }
 
@@ -193,6 +205,46 @@ fn signal_from_change_percent(change: f64) -> &'static str {
         "看跌"
     } else {
         "中性"
+    }
+}
+
+fn diagnostics_from_analysis(
+    historical: &[HistoricalData],
+    analysis: &AnalysisBundle,
+    predictions: &[Prediction],
+    point_estimate_kind: &str,
+    point_estimate_note: &str,
+    model: Option<ModelRiskInput>,
+) -> PredictionDiagnostics {
+    let current_price = historical.last().map_or(0.0, |bar| bar.close);
+    let risk_summary = risk_warning::analyze_prediction_risk(RiskAnalysisInput {
+        history_samples: historical.len(),
+        current_price,
+        regime: &analysis.regime_analysis,
+        volatility_forecast: &analysis.vol_forecast,
+        signal_confirmation: &analysis.signal_confirm,
+        divergence: &analysis.divergence_analysis,
+        support_resistance: &analysis.support_resistance,
+        indicators: &analysis.tech_indicators,
+        volume_signal: &analysis.volume_signal,
+        predictions,
+        model,
+    });
+
+    PredictionDiagnostics {
+        point_estimate_kind: point_estimate_kind.to_string(),
+        point_estimate_note: point_estimate_note.to_string(),
+        uncertainty_method: prediction_interval::METHOD.to_string(),
+        risk_summary,
+    }
+}
+
+fn attach_live_data_staleness(response: &mut PredictionResponse, latest_date: chrono::NaiveDate) {
+    let staleness_days = (chrono::Local::now().date_naive() - latest_date)
+        .num_days()
+        .max(0);
+    if let Some(diagnostics) = response.diagnostics.as_mut() {
+        risk_warning::add_data_staleness(&mut diagnostics.risk_summary, staleness_days);
     }
 }
 
@@ -356,7 +408,7 @@ pub fn calibrate_professional_result(
     historical: &[HistoricalData],
     result: &mut professional_engine::ProfessionalPredictionResult,
     horizon: usize,
-    stock_code: Option<&str>,
+    _stock_code: Option<&str>,
 ) -> Option<EngineCalibration> {
     const MIN_EMPIRICAL_SAMPLES: usize = 20;
 
@@ -394,26 +446,22 @@ pub fn calibrate_professional_result(
     let average_actual_change = empirical_sum / empirical_samples as f64;
     let original_change = result.expected_change;
 
-    // 诚实校准：单股次日方向无 alpha（见 .claude/CLAUDE.md），不下方向赌注、不含任何评测拟合阈值。
+    // 诚实校准：单股方向无 alpha（见 .claude/CLAUDE.md），不下方向赌注、不含任何评测拟合阈值。
     // 点预测锚定到历史无条件漂移（无技能最优估计，方向自然贴近中性），真实不确定性交由
     // attach_prediction_intervals 的校准区间带表达。
-    let (limit_down, limit_up) = professional_engine::get_stock_price_limits(stock_code);
-    let calibrated_change = average_actual_change.clamp(limit_down, limit_up);
-
-    if (calibrated_change - original_change).abs() >= 0.05 {
-        let lower_width = (original_change - result.prediction_range.0).abs().max(0.5);
-        let upper_width = (result.prediction_range.1 - original_change).abs().max(0.5);
-        result.expected_change = calibrated_change;
-        result.prediction_range = (
-            (calibrated_change - lower_width).clamp(limit_down, limit_up),
-            (calibrated_change + upper_width).clamp(limit_down, limit_up),
-        );
-        result.direction = direction_from_change(calibrated_change);
-        result.key_factors.push(format!(
-            "诚实校准: 近{}次历史无条件漂移{:+.2}%（方向不可预测，点预测取无技能锚，请以区间带为准）",
-            empirical_samples, average_actual_change,
-        ));
-    }
+    // 涨跌停是单日约束，不能用于截断多日累计漂移。
+    let calibrated_change = average_actual_change;
+    let lower_width = (original_change - result.prediction_range.0).abs().max(0.5);
+    let upper_width = (result.prediction_range.1 - original_change).abs().max(0.5);
+    result.expected_change = calibrated_change;
+    result.prediction_range = (
+        calibrated_change - lower_width,
+        calibrated_change + upper_width,
+    );
+    result.key_factors.push(format!(
+        "诚实校准: 近{}次历史无条件漂移{:+.2}%（方向不可预测，点预测取无技能锚，请以区间带为准）",
+        empirical_samples, average_actual_change,
+    ));
 
     Some(EngineCalibration {
         samples: empirical_samples,
@@ -423,20 +471,6 @@ pub fn calibrate_professional_result(
         inverted: false,
         used_empirical_baseline: true,
     })
-}
-
-fn direction_from_change(change: f64) -> professional_engine::PredictionDirection {
-    if change > 3.0 {
-        professional_engine::PredictionDirection::StrongBullish
-    } else if change > 0.2 {
-        professional_engine::PredictionDirection::Bullish
-    } else if change < -3.0 {
-        professional_engine::PredictionDirection::StrongBearish
-    } else if change < -0.2 {
-        professional_engine::PredictionDirection::Bearish
-    } else {
-        professional_engine::PredictionDirection::Neutral
-    }
 }
 
 /// 计算单日预测（基础版本，保留向后兼容）
@@ -498,103 +532,27 @@ fn calculate_daily_prediction(
 struct DailyPredictionContext<'a> {
     professional_result: &'a professional_engine::ProfessionalPredictionResult,
     prediction_days: usize,
-    regime: &'a market_regime::MarketRegimeAnalysis,
-    multi_factor: &'a multi_factor::MultiFactorScore,
-    enhanced_pred: &'a price_model::PricePredictionResult,
     signal_confirm: &'a signal_confirmation::SignalConfirmationResult,
     vol_forecast: &'a volatility_forecast::VolatilityForecast,
-    divergence: &'a divergence::DivergenceAnalysis,
     stock_code: Option<&'a str>,
 }
 
-fn calculate_enhanced_daily_prediction(
+fn calculate_drift_daily_prediction(
     day: usize,
     ctx: &DailyPredictionContext<'_>,
 ) -> (f64, f64) {
-    // 1. 基础预测：结合专业引擎和增强模型
-    let professional_change = daily_change_from_horizon_change(
+    let daily_change = daily_change_from_horizon_change(
         ctx.professional_result.expected_change,
         ctx.prediction_days,
     );
-    let enhanced_change = ctx.enhanced_pred.expected_change;
-    
-    // 真实历史校准后的专业引擎是方向主来源；增强价格模型只作幅度修正。
-    let (pro_weight, enh_weight) = prediction_blend_weights(
-        ctx.signal_confirm.confirmation_level,
-        professional_change,
-        enhanced_change,
-    );
-    
-    let base_change = professional_change * pro_weight + enhanced_change * enh_weight;
-    
-    // 2. 时间衰减（根据市场状态和波动率预测动态调整）
-    let decay_rate: f64 = match ctx.regime.regime {
-        market_regime::MarketRegime::StrongUptrend | 
-        market_regime::MarketRegime::StrongDowntrend => 0.97,
-        market_regime::MarketRegime::ModerateUptrend | 
-        market_regime::MarketRegime::ModerateDowntrend => 0.95,
-        market_regime::MarketRegime::Ranging => 0.88,
-        _ => 0.92,
-    };
-    
-    // 波动率趋势影响衰减速度
-    let vol_decay_adj = match ctx.vol_forecast.volatility_trend {
-        volatility_forecast::VolatilityTrend::Expanding => 0.98,    // 波动率扩张，衰减慢
-        volatility_forecast::VolatilityTrend::Contracting => 1.02,  // 波动率收缩，衰减快
-        volatility_forecast::VolatilityTrend::Stable => 1.0,
-    };
-    
-    let adjusted_decay = decay_rate * vol_decay_adj;
-    let time_decay = adjusted_decay.powi(day as i32 - 1);
-    
-    // 3. 信号确认调整
-    let signal_factor = ctx.signal_confirm.confidence_factor;
-    
-    // 假信号惩罚
-    let false_signal_penalty = if ctx.signal_confirm.is_potential_false_signal {
-        0.6
-    } else {
-        1.0
-    };
-    
-    // 4. 背离信号调整：只在方向一致时放大，冲突时降低幅度，避免把反向风险当成确认信号。
-    let divergence_factor = divergence_factor_for_change(base_change, ctx.divergence);
-    
-    // 5. 波动率状态调整
-    let _vol_regime_factor = ctx.vol_forecast.volatility_regime.to_risk_multiplier();
-    
-    // 6. 多因子得分调整
-    let mf_factor = if ctx.multi_factor.adaptive_score > 70.0 {
-        1.1
-    } else if ctx.multi_factor.adaptive_score < 30.0 {
-        0.9
-    } else {
-        1.0
-    };
-    
-    // 7. 综合计算
-    let mut change_percent = base_change 
-        * time_decay 
-        * signal_factor 
-        * false_signal_penalty
-        * divergence_factor
-        * mf_factor;
-    
-    // 高波动环境下限制预测幅度
-    if matches!(ctx.vol_forecast.volatility_regime,
-        volatility_forecast::VolatilityRegime::VeryHigh | 
-        volatility_forecast::VolatilityRegime::Extreme) 
-    {
-        change_percent *= 0.7;
-    }
-    
-    // 限制单日变化幅度（A股涨跌停限制）
+    // A股涨跌停只限制单日路径，不限制周期累计漂移和区间。
     let (limit_down, limit_up) = professional_engine::get_stock_price_limits(ctx.stock_code);
-    let change_percent = change_percent.clamp(limit_down, limit_up);
+    let change_percent = daily_change.clamp(limit_down, limit_up);
     
-    // 8. 置信度计算
-    let base_confidence = ctx.professional_result.confidence
-        .min(ctx.enhanced_pred.confidence)
+    // confidence 仍是技术信号强度，并明确不参与点预测方向。
+    let base_confidence = ctx
+        .professional_result
+        .confidence
         .min(ctx.signal_confirm.strength + 0.3);
     
     let confidence_decay = 0.92_f64.powi(day as i32 - 1);
@@ -615,58 +573,6 @@ fn calculate_enhanced_daily_prediction(
         .min(0.90);
     
     (change_percent, confidence)
-}
-
-fn prediction_blend_weights(
-    confirmation_level: signal_confirmation::ConfirmationLevel,
-    professional_change: f64,
-    enhanced_change: f64,
-) -> (f64, f64) {
-    const CONFLICT_DIRECTION_THRESHOLD: f64 = 0.2;
-
-    if professional_change.abs() >= CONFLICT_DIRECTION_THRESHOLD
-        && enhanced_change.abs() >= CONFLICT_DIRECTION_THRESHOLD
-        && professional_change.signum() != enhanced_change.signum()
-    {
-        return (1.0, 0.0);
-    }
-
-    match confirmation_level {
-        signal_confirmation::ConfirmationLevel::Strong => (0.75, 0.25),
-        signal_confirmation::ConfirmationLevel::Moderate => (0.80, 0.20),
-        signal_confirmation::ConfirmationLevel::Weak => (0.85, 0.15),
-        signal_confirmation::ConfirmationLevel::Invalid => (0.90, 0.10),
-    }
-}
-
-fn divergence_factor_for_change(
-    change: f64,
-    divergence: &divergence::DivergenceAnalysis,
-) -> f64 {
-    if !divergence.has_divergence || !change.is_finite() || change.abs() < 1e-12 {
-        return 1.0;
-    }
-
-    let divergence_direction = divergence.composite_score.signum();
-    if divergence_direction == 0.0 {
-        return 1.0;
-    }
-
-    let strong_factor = if divergence.is_triple_divergence {
-        1.25
-    } else if divergence.divergence_count >= 2 {
-        1.15
-    } else {
-        1.05
-    };
-
-    if change.signum() == divergence_direction {
-        strong_factor
-    } else if divergence.is_triple_divergence || divergence.divergence_count >= 2 {
-        0.85
-    } else {
-        0.95
-    }
 }
 
 fn daily_change_from_horizon_change(change: f64, horizon: usize) -> f64 {
@@ -838,7 +744,12 @@ pub async fn predict_with_model(request: PredictionRequest) -> Result<Prediction
     }
 
     let predictor = MlPredictor::load(&get_model_file_path(&model.id))?;
-    predict_with_model_from_historical(&request, &historical, &model, &predictor)
+    let mut response =
+        predict_with_model_from_historical(&request, &historical, &model, &predictor)?;
+    if let Some(last) = historical.last() {
+        attach_live_data_staleness(&mut response, last.date);
+    }
+    Ok(response)
 }
 
 /// 使用已加载模型和调用方提供的可见历史数据预测；回测复用该函数以避免未来函数。
@@ -902,6 +813,7 @@ pub fn predict_with_model_from_historical(
                 format!("单日等效收益 {daily_ml_return:.2}%"),
             ]),
             interval: None,
+            stress_interval: None,
         });
 
         last_date = target_date;
@@ -917,6 +829,35 @@ pub fn predict_with_model_from_historical(
         prediction_interval::DEFAULT_COVERAGE,
     );
 
+    let prices: Vec<f64> = historical.iter().map(|bar| bar.close).collect();
+    let highs: Vec<f64> = historical.iter().map(|bar| bar.high).collect();
+    let lows: Vec<f64> = historical.iter().map(|bar| bar.low).collect();
+    let volumes: Vec<i64> = historical.iter().map(|bar| bar.volume).collect();
+    let opens: Vec<f64> = historical.iter().map(|bar| bar.open).collect();
+    let analysis = analyze(
+        &prices,
+        &highs,
+        &lows,
+        &volumes,
+        &opens,
+        AnalysisOptions {
+            turnover_rate: last_data.turnover_rate,
+            prediction_days,
+            stock_code: Some(&request.stock_code),
+        },
+    );
+    let diagnostics = diagnostics_from_analysis(
+        historical,
+        &analysis,
+        &predictions,
+        "candle_model",
+        "点估计来自所选 Candle 模型；模型方向准确率不是上涨概率，需与朴素基准和走步回测对照。",
+        Some(ModelRiskInput {
+            direction_accuracy: model.accuracy,
+            test_samples: model.test_samples,
+        }),
+    );
+
     Ok(PredictionResponse {
         predictions,
         last_real_data: Some(LastRealData {
@@ -924,6 +865,7 @@ pub fn predict_with_model_from_historical(
             price: current_price,
             change_percent: last_data.change_percent,
         }),
+        diagnostics: Some(diagnostics),
     })
 }
 
@@ -1179,6 +1121,8 @@ mod tests {
         assert!(calibration.average_actual_change > 0.0);
         // 点预测跟随正漂移，不被翻转为负。
         assert!(result.expected_change > 0.0);
+        // 技术状态保持原始分析方向，不被历史漂移符号改写。
+        assert_eq!(result.direction, PredictionDirection::Bearish);
     }
 
     #[test]
@@ -1223,59 +1167,37 @@ mod tests {
     }
 
     #[test]
-    fn test_prediction_blend_uses_calibrated_direction_on_conflict() {
-        let weights = prediction_blend_weights(
-            signal_confirmation::ConfirmationLevel::Strong,
-            0.8,
-            -1.2,
-        );
+    fn test_horizon_drift_is_not_clamped_by_single_day_limit() {
+        let start = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        let mut close = 10.0;
+        let historical: Vec<HistoricalData> = (0..80)
+            .map(|i| {
+                close *= 1.02;
+                HistoricalData {
+                    symbol: "test".to_string(),
+                    date: start + Duration::days(i),
+                    open: close,
+                    close,
+                    high: close * 1.01,
+                    low: close * 0.99,
+                    volume: 1000,
+                    amount: close * 1000.0,
+                    amplitude: 2.0,
+                    turnover_rate: 1.0,
+                    volume_ratio: 1.0,
+                    change_percent: 2.0,
+                    change: 0.0,
+                }
+            })
+            .collect();
+        let mut result = bearish_result();
 
-        assert_eq!(weights, (1.0, 0.0));
-    }
+        let calibration =
+            calibrate_professional_result(&historical, &mut result, 10, Some("600000"))
+                .unwrap();
 
-    #[test]
-    fn test_prediction_blend_keeps_enhanced_model_as_magnitude_adjustment() {
-        let strong = prediction_blend_weights(
-            signal_confirmation::ConfirmationLevel::Strong,
-            0.8,
-            1.2,
-        );
-        let invalid = prediction_blend_weights(
-            signal_confirmation::ConfirmationLevel::Invalid,
-            0.8,
-            1.2,
-        );
-
-        assert_eq!(strong, (0.75, 0.25));
-        assert_eq!(invalid, (0.90, 0.10));
-    }
-
-    #[test]
-    fn test_divergence_factor_amplifies_aligned_direction() {
-        let divergence = divergence::DivergenceAnalysis {
-            has_divergence: true,
-            composite_score: 0.8,
-            divergence_count: 2,
-            ..Default::default()
-        };
-
-        let factor = divergence_factor_for_change(0.6, &divergence);
-
-        assert!(factor > 1.0);
-    }
-
-    #[test]
-    fn test_divergence_factor_reduces_conflicting_direction() {
-        let divergence = divergence::DivergenceAnalysis {
-            has_divergence: true,
-            composite_score: 0.8,
-            divergence_count: 2,
-            ..Default::default()
-        };
-
-        let factor = divergence_factor_for_change(-0.6, &divergence);
-
-        assert!(factor < 1.0);
+        assert!(calibration.average_actual_change > 9.5);
+        assert!((result.expected_change - calibration.average_actual_change).abs() < 1e-9);
     }
 
     #[test]

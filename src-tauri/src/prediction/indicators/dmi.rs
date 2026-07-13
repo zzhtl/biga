@@ -129,10 +129,9 @@ mod tests {
         let closes = vec![9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5, 16.5, 17.5, 18.5,
                          19.5, 20.5, 21.5, 22.5, 23.5];
         
-        let (di_plus, di_minus, adx, _) = calculate_dmi(&highs, &lows, &closes, 14);
+        let (di_plus, di_minus, _adx, _) = calculate_dmi(&highs, &lows, &closes, 14);
         
         // 上涨趋势，+DI 应该大于 -DI
         assert!(di_plus >= di_minus);
     }
 }
-

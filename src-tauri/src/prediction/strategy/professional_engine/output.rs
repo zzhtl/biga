@@ -59,77 +59,72 @@ pub(super) fn generate_suggested_action(
     risk: &RiskAssessment,
     regime: &MarketRegime,
 ) -> String {
-    // 信号不足时保守操作
+    // 这里只描述技术状态与风险关注点，不把信号强度包装成方向命中概率。
     if matches!(confirmation, SignalConfirmation::NoConfirm) || confidence < 0.45 {
-        return "信号不明确，建议观望等待更清晰信号".to_string();
+        return "技术信号相互冲突，当前状态不支持方向性结论".to_string();
     }
 
-    // 高风险时降低建议力度
     if risk.risk_level == "高风险" {
         return match direction {
             PredictionDirection::StrongBullish | PredictionDirection::Bullish => {
                 format!(
-                    "谨慎看涨，建议小仓位试探，止损{:.1}%",
+                    "技术状态偏多，但波动风险较高；下行失效参考幅度约{:.1}%",
                     risk.suggested_stop_loss
                 )
             }
             PredictionDirection::StrongBearish | PredictionDirection::Bearish => {
-                format!("谨慎看跌，建议减仓观望，注意反弹风险")
+                "技术状态偏空且波动风险较高，需重点关注95%压力区间".to_string()
             }
-            PredictionDirection::Neutral => "高波动震荡，建议暂时观望".to_string(),
+            PredictionDirection::Neutral => "高波动震荡，方向信号不足".to_string(),
         };
     }
 
-    // 正常信号建议
     match (direction, confirmation) {
         (PredictionDirection::StrongBullish, SignalConfirmation::StrongConfirm) => {
             format!(
-                "强烈看涨信号({:.0}%置信度)，建议积极做多，目标涨幅{:.1}%，止损{:.1}%",
+                "技术状态明显偏多，信号强度{:.0}%；下行失效参考幅度约{:.1}%",
                 confidence * 100.0,
-                risk.suggested_take_profit,
                 risk.suggested_stop_loss
             )
         }
         (PredictionDirection::StrongBullish, _)
         | (PredictionDirection::Bullish, SignalConfirmation::StrongConfirm) => {
             format!(
-                "看涨信号({:.0}%置信度)，可考虑分批建仓，止损{:.1}%",
+                "技术状态偏多，信号强度{:.0}%；下行失效参考幅度约{:.1}%",
                 confidence * 100.0,
                 risk.suggested_stop_loss
             )
         }
         (PredictionDirection::Bullish, _) => {
             format!(
-                "温和看涨({:.0}%置信度)，可小仓位参与，严格止损{:.1}%",
-                confidence * 100.0,
-                risk.suggested_stop_loss
+                "技术状态温和偏多，信号强度{:.0}%；不代表上涨概率",
+                confidence * 100.0
             )
         }
         (PredictionDirection::StrongBearish, SignalConfirmation::StrongConfirm) => {
             format!(
-                "强烈看跌信号({:.0}%置信度)，建议减仓或对冲，预计下跌{:.1}%",
-                confidence * 100.0,
-                risk.suggested_take_profit
+                "技术状态明显偏空，信号强度{:.0}%；重点观察下方支撑与压力区间",
+                confidence * 100.0
             )
         }
         (PredictionDirection::StrongBearish, _)
         | (PredictionDirection::Bearish, SignalConfirmation::StrongConfirm) => {
             format!(
-                "看跌信号({:.0}%置信度)，建议降低仓位，等待企稳",
+                "技术状态偏空，信号强度{:.0}%；需关注趋势失效条件",
                 confidence * 100.0
             )
         }
         (PredictionDirection::Bearish, _) => {
             format!(
-                "温和看跌({:.0}%置信度)，建议谨慎持有，设好止损",
+                "技术状态温和偏空，信号强度{:.0}%；不代表下跌概率",
                 confidence * 100.0
             )
         }
         (PredictionDirection::Neutral, _) => {
             if regime.is_trending() {
-                "趋势中继整理，建议持有等待方向明确".to_string()
+                "趋势中继整理，当前方向证据不足".to_string()
             } else {
-                "震荡行情，可考虑区间操作，高抛低吸".to_string()
+                "震荡状态，当前方向证据不足".to_string()
             }
         }
     }
