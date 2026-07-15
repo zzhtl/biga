@@ -120,10 +120,12 @@ pub fn analyze_prediction_risk(input: RiskAnalysisInput<'_>) -> RiskSummary {
         );
     }
 
-    if let Some(lower) = stress_95_lower {
-        if let Some(item) = stress_downside_warning(lower) {
-            push_warning(&mut summary, item);
-        }
+    if let Some(item) = downside_uncertainty_warning(
+        interval_80_lower,
+        stress_95_lower,
+        input.predictions.len(),
+    ) {
+        push_warning(&mut summary, item);
     }
 
     if input.signal_confirmation.is_potential_false_signal
@@ -345,21 +347,43 @@ fn volatility_warning(percentile: f64) -> Option<RiskWarning> {
     ))
 }
 
-fn stress_downside_warning(lower_change: f64) -> Option<RiskWarning> {
-    let severity = if lower_change <= -15.0 {
+fn downside_uncertainty_warning(
+    interval_80_lower: Option<f64>,
+    stress_95_lower: Option<f64>,
+    prediction_days: usize,
+) -> Option<RiskWarning> {
+    let severity = if interval_80_lower.is_some_and(|lower| lower <= -15.0) {
         RiskLevel::High
-    } else if lower_change <= -8.0 {
+    } else if interval_80_lower.is_some_and(|lower| lower <= -8.0)
+        || stress_95_lower.is_some_and(|lower| lower <= -15.0)
+    {
         RiskLevel::Medium
     } else {
         return None;
     };
+
+    let prediction_days = prediction_days.max(1);
+    let mut evidence = Vec::new();
+    if let Some(lower) = interval_80_lower {
+        evidence.push(format!(
+            "{}日80%区间下沿 {:+.2}%",
+            prediction_days, lower
+        ));
+    }
+    if let Some(lower) = stress_95_lower {
+        evidence.push(format!(
+            "{}日95%压力下沿 {:+.2}%",
+            prediction_days, lower
+        ));
+    }
+
     Some(warning(
         "UNCERTAINTY_STRESS_DOWNSIDE",
         RiskCategory::Uncertainty,
         severity,
-        "压力区间下行空间较大",
-        "95%校准压力区间显示尾部回撤不可忽略。",
-        vec![format!("95%区间下沿 {:+.2}%", lower_change)],
+        "预测区间下行空间较大",
+        "80%校准区间用于风险分级；95%压力区间仅提示低概率尾部情景，不单独判为高风险。",
+        evidence,
     ))
 }
 
@@ -443,16 +467,26 @@ mod tests {
     }
 
     #[test]
-    fn stress_downside_thresholds_are_stable() {
-        assert!(stress_downside_warning(-7.99).is_none());
-        assert_eq!(
-            stress_downside_warning(-8.0).unwrap().severity,
-            RiskLevel::Medium
-        );
-        assert_eq!(
-            stress_downside_warning(-15.0).unwrap().severity,
-            RiskLevel::High
-        );
+    fn calibrated_downside_uses_the_primary_interval_for_high_risk() {
+        assert!(downside_uncertainty_warning(Some(-7.99), Some(-14.99), 5).is_none());
+
+        let tail_only = downside_uncertainty_warning(Some(-7.0), Some(-15.0), 5).unwrap();
+        assert_eq!(tail_only.severity, RiskLevel::Medium);
+
+        for (interval_80, stress_95) in [(-8.74, -17.31), (-10.42, -20.01), (-12.83, -24.56)] {
+            assert_eq!(
+                downside_uncertainty_warning(Some(interval_80), Some(stress_95), 5)
+                    .unwrap()
+                    .severity,
+                RiskLevel::Medium,
+                "95%尾部压力不应单独把整票判为高风险",
+            );
+        }
+
+        let high = downside_uncertainty_warning(Some(-15.0), Some(-25.0), 5).unwrap();
+        assert_eq!(high.severity, RiskLevel::High);
+        assert!(high.evidence.iter().any(|item| item.contains("5日80%区间下沿")));
+        assert!(high.evidence.iter().any(|item| item.contains("5日95%压力下沿")));
     }
 
     #[test]
