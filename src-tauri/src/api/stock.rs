@@ -4,6 +4,7 @@ use crate::db::models::{
 };
 use crate::error::AppError;
 use crate::config::api_token::resolve_api_token;
+use crate::utils::canonical_stock_symbol;
 use chrono::NaiveDate;
 
 // 查看全部股票名称以及代码
@@ -19,12 +20,7 @@ const TOKEN_VALIDATION_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// 将各种格式的股票代码归一化为 zhitu 实时接口所需的纯 6 位数字代码。
 /// 例如 "000002.SZ" / "sz000002" → "000002"。
 fn normalize_quote_symbol(symbol: &str) -> String {
-    let digits: String = symbol.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.len() >= 6 {
-        digits[..6].to_string()
-    } else {
-        symbol.to_string()
-    }
+    canonical_stock_symbol(symbol)
 }
 
 pub async fn fetch_stock_infos() -> Result<Vec<StockInfo>, AppError> {

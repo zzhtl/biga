@@ -96,6 +96,7 @@ pub fn run() {
                     "05_capital_valuation.sql",
                     "06_stock_category.sql",
                     "07_watchlist.sql",
+                    "08_canonical_stock_symbols.sql",
                 ];
                 for file in &migration_files {
                     let path = Path::new("migrations").join(file);

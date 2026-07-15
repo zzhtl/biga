@@ -5,6 +5,7 @@
 use crate::config::constants::BATCH_SIZE;
 use crate::db::models::*;
 use crate::error::AppError;
+use crate::utils::canonical_stock_symbol;
 use crate::utils::volume_metrics::{
     calculate_turnover_rate, calculate_volume_ratio_series, DEFAULT_VOLUME_RATIO_PERIOD,
 };
@@ -92,11 +93,27 @@ pub async fn batch_insert_stock_info(
         let mut query_builder =
             QueryBuilder::new("INSERT INTO stock_info (symbol, name, exchange) ");
         query_builder.push_values(chunk, |mut b, data| {
-            b.push_bind(&data.symbol)
-                .push_bind(&data.name)
-                .push_bind(&data.exchange);
+            let symbol = canonical_stock_symbol(&data.symbol);
+            let name = if canonical_stock_symbol(&data.name) == symbol {
+                symbol.clone()
+            } else {
+                data.name.trim().to_string()
+            };
+            b.push_bind(symbol)
+                .push_bind(name)
+                .push_bind(data.exchange.trim().to_ascii_lowercase());
         });
-        query_builder.push(" ON CONFLICT(symbol) DO NOTHING");
+        query_builder.push(
+            " ON CONFLICT(symbol) DO UPDATE SET
+                name = CASE
+                    WHEN EXCLUDED.name <> EXCLUDED.symbol THEN EXCLUDED.name
+                    ELSE stock_info.name
+                END,
+                exchange = CASE
+                    WHEN EXCLUDED.exchange <> '' THEN EXCLUDED.exchange
+                    ELSE stock_info.exchange
+                END",
+        );
         let result = query_builder.build().execute(&mut *tx).await?;
         affected_rows += result.rows_affected();
     }
@@ -123,7 +140,7 @@ pub async fn batch_insert_stock(
         );
         query_builder.push_values(chunk, |mut b, data| {
             let exchange = data.exchange.split('.').next_back().unwrap_or("").to_lowercase();
-            b.push_bind(&data.symbol)
+            b.push_bind(canonical_stock_symbol(&data.symbol))
                 .push_bind(&data.name)
                 .push_bind(&data.area)
                 .push_bind(&data.industry)
@@ -181,6 +198,8 @@ pub async fn batch_insert_historical_data(
         return Ok(0);
     }
 
+    let symbol = canonical_stock_symbol(symbol);
+    let stock_info = get_stock_info(&symbol, pool).await?;
     let mut tx = pool.begin().await?;
     let mut batch_size: u64 = 0;
     
@@ -190,7 +209,7 @@ pub async fn batch_insert_historical_data(
             amount, amplitude, turnover_rate, volume_ratio, change, change_percent) ",
         );
         query_builder.push_values(chunk, |mut b, data| {
-            b.push_bind(&data.symbol)
+            b.push_bind(&symbol)
                 .push_bind(data.date)
                 .push_bind(data.open)
                 .push_bind(data.close)
@@ -212,13 +231,11 @@ pub async fn batch_insert_historical_data(
     
     // 更新实时数据
     if let Some(last_history) = data_list.last() {
-        let stock_info = get_stock_info(symbol, pool).await?;
-        
         let mut realtime_builder = QueryBuilder::new(
             "INSERT INTO realtime_data (symbol, name, date, close, volume, amount, amplitude, turnover_rate, volume_ratio, change, change_percent) ",
         );
         realtime_builder.push_values(&[last_history], |mut b, data| {
-            b.push_bind(&data.symbol)
+            b.push_bind(&symbol)
                 .push_bind(&stock_info.name)
                 .push_bind(data.date)
                 .push_bind(data.close)
@@ -542,6 +559,7 @@ pub async fn upsert_stock_capital(
     pool: &SqlitePool,
     capital: &StockCapital,
 ) -> Result<(), AppError> {
+    let symbol = canonical_stock_symbol(&capital.symbol);
     sqlx::query(
         r#"
         INSERT INTO stock_capital (symbol, circulating_shares, total_shares, circulating_market_cap, pe, pb, updated_at)
@@ -555,7 +573,7 @@ pub async fn upsert_stock_capital(
             updated_at = CURRENT_TIMESTAMP
         "#,
     )
-    .bind(&capital.symbol)
+    .bind(symbol)
     .bind(capital.circulating_shares)
     .bind(capital.total_shares)
     .bind(capital.circulating_market_cap)
@@ -588,6 +606,7 @@ pub async fn upsert_stock_fundamental(
     pool: &SqlitePool,
     f: &StockFundamental,
 ) -> Result<(), AppError> {
+    let symbol = canonical_stock_symbol(&f.symbol);
     sqlx::query(
         r#"
         INSERT INTO stock_fundamentals
@@ -603,7 +622,7 @@ pub async fn upsert_stock_fundamental(
             updated_at = CURRENT_TIMESTAMP
         "#,
     )
-    .bind(&f.symbol)
+    .bind(symbol)
     .bind(&f.report_date)
     .bind(f.eps)
     .bind(f.bps)
@@ -642,6 +661,7 @@ pub async fn backfill_volume_metrics(
     symbol: &str,
     pool: &SqlitePool,
 ) -> Result<u64, AppError> {
+    let symbol = canonical_stock_symbol(symbol);
     // 取全部历史数据（按日期正序）
     let rows = sqlx::query_as::<_, HistoricalData>(
         r#"
@@ -652,7 +672,7 @@ pub async fn backfill_volume_metrics(
         ORDER BY date ASC
         "#,
     )
-    .bind(symbol)
+    .bind(&symbol)
     .fetch_all(pool)
     .await?;
 
@@ -662,7 +682,7 @@ pub async fn backfill_volume_metrics(
 
     let volumes: Vec<f64> = rows.iter().map(|r| r.volume as f64).collect();
     let volume_ratios = calculate_volume_ratio_series(&volumes, DEFAULT_VOLUME_RATIO_PERIOD);
-    let circulating_shares = get_stock_capital(symbol, pool)
+    let circulating_shares = get_stock_capital(&symbol, pool)
         .await?
         .map(|c| c.circulating_shares)
         .unwrap_or(0.0);
@@ -676,7 +696,7 @@ pub async fn backfill_volume_metrics(
         )
         .bind(volume_ratios[i])
         .bind(turnover)
-        .bind(symbol)
+        .bind(&symbol)
         .bind(row.date)
         .execute(&mut *tx)
         .await?;
@@ -692,7 +712,7 @@ pub async fn backfill_volume_metrics(
         )
         .bind(volume_ratios[rows.len() - 1])
         .bind(last_turnover)
-        .bind(symbol)
+        .bind(&symbol)
         .execute(pool)
         .await?;
     }
@@ -765,6 +785,155 @@ mod tests {
         .execute(pool)
         .await
         .expect("应插入历史数据");
+    }
+
+    async fn stock_data_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("应创建内存 SQLite");
+
+        for sql in [
+            include_str!("../../migrations/01_create_tables.sql"),
+            include_str!("../../migrations/03_volume_metrics.sql"),
+            include_str!("../../migrations/04_stock_fundamentals.sql"),
+            include_str!("../../migrations/05_capital_valuation.sql"),
+            include_str!("../../migrations/06_stock_category.sql"),
+        ] {
+            for statement in sql.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                sqlx::query(statement)
+                    .execute(&pool)
+                    .await
+                    .expect("应创建股票数据测试表");
+            }
+        }
+
+        pool
+    }
+
+    #[tokio::test]
+    async fn test_repository_writes_merge_symbol_variants() {
+        let pool = stock_data_pool().await;
+
+        batch_insert_stock_info(
+            &pool,
+            vec![StockInfo {
+                symbol: "002466".to_string(),
+                name: "002466".to_string(),
+                exchange: "sz".to_string(),
+            }],
+        )
+        .await
+        .expect("首次写入应成功");
+        batch_insert_stock_info(
+            &pool,
+            vec![StockInfo {
+                symbol: "002466.SZ".to_string(),
+                name: "天齐锂业".to_string(),
+                exchange: "SZ".to_string(),
+            }],
+        )
+        .await
+        .expect("后缀代码写入应成功");
+
+        batch_insert_stock(
+            &pool,
+            vec![Stock {
+                symbol: "002466.SZ".to_string(),
+                name: "天齐锂业".to_string(),
+                exchange: "002466.SZ".to_string(),
+                ..Stock::default()
+            }],
+        )
+        .await
+        .expect("带后缀代码的股票详情应写入成功");
+
+        batch_insert_historical_data(
+            "002466.SZ",
+            &pool,
+            vec![HistoricalData {
+                symbol: "002466.SZ".to_string(),
+                date: chrono::NaiveDate::from_ymd_opt(2026, 7, 15).expect("测试日期应有效"),
+                open: 47.0,
+                close: 47.43,
+                high: 48.0,
+                low: 46.5,
+                volume: 754_792,
+                amount: 3_627_171_202.52,
+                amplitude: 4.39,
+                turnover_rate: 5.18,
+                volume_ratio: 1.09,
+                change_percent: 0.17,
+                change: 0.08,
+            }],
+        )
+        .await
+        .expect("带后缀代码的历史数据应写入成功");
+
+        upsert_stock_capital(
+            &pool,
+            &StockCapital {
+                symbol: "002466.SZ".to_string(),
+                circulating_shares: 100.0,
+                total_shares: 120.0,
+                circulating_market_cap: 4_700.0,
+                pe: 10.8,
+                pb: 1.75,
+            },
+        )
+        .await
+        .expect("带后缀代码的股本应写入成功");
+
+        upsert_stock_fundamental(
+            &pool,
+            &StockFundamental {
+                symbol: "002466.SZ".to_string(),
+                report_date: "2026-03-31".to_string(),
+                eps: Some(0.5),
+                bps: Some(10.0),
+                roe: Some(5.0),
+                profit_growth: Some(6.0),
+                revenue_growth: Some(7.0),
+                debt_ratio: Some(8.0),
+            },
+        )
+        .await
+        .expect("带后缀代码的基本面应写入成功");
+
+        let updated = backfill_volume_metrics("002466.SZ", &pool)
+            .await
+            .expect("带后缀代码应能回填规范代码的数据");
+        assert_eq!(updated, 1);
+
+        let stock_info: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT symbol, name, exchange FROM stock_info")
+                .fetch_all(&pool)
+                .await
+                .expect("应查询股票信息");
+        assert_eq!(
+            stock_info,
+            vec![(
+                "002466".to_string(),
+                "天齐锂业".to_string(),
+                "sz".to_string()
+            )]
+        );
+
+        for table in [
+            "stock",
+            "historical_data",
+            "realtime_data",
+            "stock_capital",
+            "stock_fundamentals",
+        ] {
+            let symbols: Vec<(String,)> =
+                sqlx::query_as(&format!("SELECT DISTINCT symbol FROM {table}"))
+                    .fetch_all(&pool)
+                    .await
+                    .expect("应查询规范化后的股票代码");
+            assert_eq!(symbols, vec![("002466".to_string(),)], "{table}");
+        }
     }
 
     #[tokio::test]

@@ -20,6 +20,7 @@ use crate::error::AppError;
 use crate::prediction::types::{
     PredictionInterval, PredictionRequest, ProfessionalPredictionResponse, RiskSummary,
 };
+use crate::utils::canonical_stock_symbol;
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -36,12 +37,7 @@ const COMPREHENSIVE_HISTORY_DAYS: usize = 1500;
 
 /// 归一为纯 6 位代码（收藏池存库规范）；提不出恰好 6 位数字时原样返回 trim 结果
 fn canonical_symbol(symbol: &str) -> String {
-    let digits: String = symbol.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.len() == 6 {
-        digits
-    } else {
-        symbol.trim().to_string()
-    }
+    canonical_stock_symbol(symbol)
 }
 
 /// N 个交易日涨跌幅（%）：末收盘 / 倒数第 N+1 根收盘 - 1。
@@ -730,4 +726,5 @@ mod tests {
             .await
             .expect("清理失败");
     }
+
 }
