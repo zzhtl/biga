@@ -115,6 +115,8 @@
     } | null>(null);
     let reports = $state<Record<string, ComprehensiveReport>>({});
     let reportErrors = $state<Record<string, string>>({});
+    let rowAnalyzing = $state<Record<string, boolean>>({});
+    let expandedRiskSymbol = $state<string | null>(null);
     let showComparison = $state(false);
     // 一键优选：从综合报告中选出相对强弱靠前的几只（描述性参考，非上涨概率）
     let showPicks = $state(false);
@@ -134,7 +136,13 @@
     let sortKey = $state<SortKey>("signal_strength");
     let sortDir = $state<"asc" | "desc">("desc");
 
-    const busy = $derived(refreshing !== null || predicting !== null);
+    const rowOperationActive = $derived(
+        Object.values(rowRefreshing).some(Boolean) ||
+            Object.values(rowAnalyzing).some(Boolean),
+    );
+    const busy = $derived(
+        refreshing !== null || predicting !== null || rowOperationActive,
+    );
 
     // 与后端 canonical_symbol 同口径：提取到恰好 6 位数字则用之，否则原样 trim
     function sixDigit(value: string): string {
@@ -244,6 +252,7 @@
 
     // ---------- 刷新（走 zhitu API，受每日额度限制） ----------
     async function refreshOne(symbol: string) {
+        if (busy) return;
         rowRefreshing = { ...rowRefreshing, [symbol]: true };
         errorMessage = "";
         try {
@@ -303,7 +312,7 @@
     }
 
     // ---------- 一键综合预测（纯本地计算，不消耗 API 额度） ----------
-    async function predictOne(symbol: string) {
+    async function predictOne(symbol: string): Promise<ComprehensiveReport | null> {
         try {
             const report = await invokeCommand<ComprehensiveReport>(
                 "comprehensive_predict",
@@ -313,8 +322,21 @@
             const next = { ...reportErrors };
             delete next[symbol];
             reportErrors = next;
+            return report;
         } catch (e) {
             reportErrors = { ...reportErrors, [symbol]: readableError(e, "综合分析失败") };
+            return null;
+        }
+    }
+
+    async function analyzeOne(symbol: string) {
+        if (busy) return;
+        expandedRiskSymbol = symbol;
+        rowAnalyzing = { ...rowAnalyzing, [symbol]: true };
+        try {
+            await predictOne(symbol);
+        } finally {
+            rowAnalyzing = { ...rowAnalyzing, [symbol]: false };
         }
     }
 
@@ -654,7 +676,7 @@
             </div>
             {#if riskReports.length}
                 <div class="risk-scan-list">
-                    {#each riskReports.slice(0, 5) as report (report.symbol)}
+                    {#each riskReports as report (report.symbol)}
                         <div class="risk-scan-row">
                             <button class="risk-symbol" onclick={() => goPredict(report.symbol)} title="打开完整风险报告">
                                 <span>{report.symbol}</span>
@@ -782,7 +804,7 @@
                             <td class="ops">
                                 <button
                                     class="mini"
-                                    title="刷新该股全部数据"
+                                    title="仅更新该股行情数据，更新后需重新执行风险分析"
                                     disabled={busy ||
                                         rowRefreshing[item.symbol]}
                                     onclick={(e) => {
@@ -795,10 +817,29 @@
                                     {:else}
                                         <RefreshCw size={15} aria-hidden="true" />
                                     {/if}
+                                    更新数据
+                                </button>
+                                <button
+                                    class="mini risk-action"
+                                    title="仅分析该股，并在当前行下方展示完整风险明细"
+                                    disabled={busy}
+                                    aria-expanded={expandedRiskSymbol === item.symbol}
+                                    onclick={(e) => {
+                                        e.stopPropagation();
+                                        void analyzeOne(item.symbol);
+                                    }}
+                                >
+                                    {#if rowAnalyzing[item.symbol]}
+                                        <RotateCw size={15} class="spin" aria-hidden="true" />
+                                        分析中
+                                    {:else}
+                                        <ShieldAlert size={15} aria-hidden="true" />
+                                        风险分析
+                                    {/if}
                                 </button>
                                 <button
                                     class="mini"
-                                    title="跳转预测页生成综合报告"
+                                    title="跳转预测页查看完整预测报告"
                                     onclick={(e) => {
                                         e.stopPropagation();
                                         goPredict(item.symbol);
@@ -819,6 +860,37 @@
                                 </button>
                             </td>
                         </tr>
+                        {#if expandedRiskSymbol === item.symbol}
+                            <tr class="risk-detail-row">
+                                <td colspan="19">
+                                    <div class="risk-detail-head">
+                                        <div>
+                                            <strong>{item.symbol} {item.name || "—"} · 风险分析明细</strong>
+                                            {#if reports[item.symbol]}
+                                                <span>数据截至 {reports[item.symbol].latest_date} · 预测周期 {reports[item.symbol].prediction_days} 日 · 生成于 {reports[item.symbol].generated_at}</span>
+                                            {/if}
+                                        </div>
+                                        <button
+                                            class="mini"
+                                            aria-label="收起风险分析明细"
+                                            onclick={() => (expandedRiskSymbol = null)}
+                                        >
+                                            <X size={14} aria-hidden="true" />收起
+                                        </button>
+                                    </div>
+                                    {#if rowAnalyzing[item.symbol]}
+                                        <div class="risk-detail-loading"><RotateCw size={16} class="spin" aria-hidden="true" />正在基于本地最新数据分析风险...</div>
+                                    {:else if reportErrors[item.symbol]}
+                                        <div class="risk-detail-error">{reportErrors[item.symbol]}</div>
+                                    {:else if reports[item.symbol]}
+                                        <RiskAlertPanel summary={reports[item.symbol].risk_summary} />
+                                        <p class="risk-detail-disclaimer">{reports[item.symbol].disclaimer}</p>
+                                    {:else}
+                                        <div class="risk-detail-empty">数据已变化或尚未分析，请点击“风险分析”生成最新明细。</div>
+                                    {/if}
+                                </td>
+                            </tr>
+                        {/if}
                     {/each}
                 </tbody>
             </table>
@@ -1479,6 +1551,67 @@
     .mini.danger:hover:not(:disabled) {
         background: rgba(239, 68, 68, 0.3);
         border-color: rgba(239, 68, 68, 0.5);
+    }
+
+    .mini.risk-action {
+        border-color: rgba(245, 158, 11, 0.45);
+        color: #fde68a;
+    }
+
+    .risk-detail-row td {
+        padding: 0.8rem 1rem;
+        border-bottom: 1px solid #374151;
+        background: #11151b;
+        white-space: normal;
+    }
+
+    .risk-detail-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+    }
+
+    .risk-detail-head > div {
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+    }
+
+    .risk-detail-head strong {
+        color: #f8fafc;
+        font-size: 0.95rem;
+    }
+
+    .risk-detail-head span,
+    .risk-detail-disclaimer {
+        color: #94a3b8;
+        font-size: 0.78rem;
+    }
+
+    .risk-detail-loading,
+    .risk-detail-empty,
+    .risk-detail-error {
+        margin-top: 0.75rem;
+        padding: 0.8rem;
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        border: 1px solid #374151;
+        border-radius: 6px;
+        color: #cbd5e1;
+        background: #171b22;
+        font-size: 0.82rem;
+    }
+
+    .risk-detail-error {
+        border-color: rgba(239, 68, 68, 0.45);
+        color: #fecaca;
+    }
+
+    .risk-detail-disclaimer {
+        margin: 0.5rem 0 0;
+        line-height: 1.5;
     }
 
     /* 优选卡 */
