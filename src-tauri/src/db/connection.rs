@@ -1,11 +1,43 @@
 //! 数据库连接管理
 
-use sqlx::{Pool, Sqlite, sqlite::SqlitePoolOptions};
-use std::path::PathBuf;
+use sqlx::{Pool, Sqlite, sqlite::{SqliteConnectOptions, SqlitePoolOptions}};
+use std::path::{Path, PathBuf};
 use std::fs;
 
 /// 数据库连接池类型
 pub type DbPool = Pool<Sqlite>;
+
+/// 按给定路径打开连接池，库文件不存在时创建它。
+///
+/// sqlx 的 `connect()` 默认 `create_if_missing = false`——文件不存在直接报
+/// `SqliteError { code: 14, "unable to open database file" }`，在 `lib.rs` 的 setup 里
+/// 是 `.expect()`，所以全新环境（新 clone / 换机器 / 删过 db 目录）首次启动会直接 panic。
+///
+/// 另外用 [`SqliteConnectOptions::filename`] 而不是拼 `sqlite://{path}` 连接串：
+/// 路径里出现空格、`?`、`#` 时 URL 解析会出错，而用户目录含空格并不罕见。
+pub async fn open_pool(db_path: &Path) -> Result<DbPool, sqlx::Error> {
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent).map_err(sqlx::Error::Io)?;
+    }
+
+    let options = SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true);
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .min_connections(2)
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .connect_with(options)
+        .await?;
+
+    // 启用 WAL 模式
+    sqlx::query("PRAGMA journal_mode=WAL;")
+        .execute(&pool)
+        .await?;
+
+    Ok(pool)
+}
 
 /// 查找数据库路径
 pub fn find_database_path() -> Option<PathBuf> {
@@ -59,21 +91,7 @@ pub async fn create_pool() -> Result<DbPool, sqlx::Error> {
         }
     };
     
-    let connection_string = format!("sqlite://{}", final_db_path.display());
-    
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .min_connections(2)
-        .acquire_timeout(std::time::Duration::from_secs(30))
-        .connect(&connection_string)
-        .await?;
-    
-    // 启用 WAL 模式
-    sqlx::query("PRAGMA journal_mode=WAL;")
-        .execute(&pool)
-        .await?;
-    
-    Ok(pool)
+    open_pool(&final_db_path).await
 }
 
 /// 创建临时数据库连接
@@ -94,6 +112,85 @@ pub async fn create_temp_pool() -> Result<DbPool, String> {
 mod tests {
     use super::*;
     use sqlx::SqlitePool;
+
+    /// 一次性临时目录。用完即删，避免测试之间互相看到对方的库文件。
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("biga_{tag}_{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&path).expect("应创建临时目录");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `create_pool` 依赖进程级的 current_dir，测试里改它会和并行用例打架，
+    /// 所以连接逻辑抽到 `open_pool`，这几个用例直接钉它。
+    #[tokio::test]
+    async fn open_pool_creates_the_database_file_and_its_parent_directory() {
+        let dir = TempDir::new("create_if_missing");
+        // 连父目录都不存在，模拟全新 clone
+        let db_path = dir.0.join("db").join("stock_data.db");
+        assert!(!db_path.exists());
+
+        let pool = open_pool(&db_path)
+            .await
+            .expect("库文件不存在时应自动创建，而不是报 unable to open database file");
+
+        assert!(db_path.exists(), "应在磁盘上真的建出库文件");
+        sqlx::query("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("新建的库应可写");
+
+        let journal: (String,) = sqlx::query_as("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .expect("应能读取日志模式");
+        assert_eq!(journal.0.to_lowercase(), "wal", "WAL 模式应仍然生效");
+    }
+
+    #[tokio::test]
+    async fn open_pool_reuses_an_existing_database_without_wiping_it() {
+        let dir = TempDir::new("reuse");
+        let db_path = dir.0.join("stock_data.db");
+
+        let first = open_pool(&db_path).await.expect("首次应创建");
+        sqlx::query("CREATE TABLE probe (id INTEGER PRIMARY KEY)")
+            .execute(&first)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO probe (id) VALUES (42)")
+            .execute(&first)
+            .await
+            .unwrap();
+        first.close().await;
+
+        let second = open_pool(&db_path).await.expect("再次打开应复用同一个文件");
+        let id: (i64,) = sqlx::query_as("SELECT id FROM probe")
+            .fetch_one(&second)
+            .await
+            .expect("原有数据必须还在——create_if_missing 不能变成每次重建");
+        assert_eq!(id.0, 42);
+    }
+
+    #[tokio::test]
+    async fn open_pool_accepts_paths_with_spaces() {
+        // 旧实现拼 `sqlite://{path}` 连接串，路径含空格会被 URL 解析拒掉；
+        // 而「我的文档」这类带空格的用户目录很常见。
+        let dir = TempDir::new("with space");
+        let db_path = dir.0.join("stock data.db");
+        let pool = open_pool(&db_path).await.expect("带空格的路径也应能打开");
+        assert!(db_path.exists());
+        pool.close().await;
+    }
 
     async fn run_migration(pool: &SqlitePool, sql: &str) {
         for statement in sql.split(';') {
