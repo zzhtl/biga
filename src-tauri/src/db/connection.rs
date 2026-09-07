@@ -116,6 +116,74 @@ mod tests {
         .await;
     }
 
+    /// 按 `lib.rs` 的 `migration_files` 真实顺序跑全部迁移，并跑两遍。
+    ///
+    /// 迁移执行器用 `sql.split(';')` 朴素拆分、只忽略 "duplicate column name"，
+    /// 所以任何新迁移都必须：无分号字面量、无 TRIGGER、每条语句幂等。
+    /// 新增迁移文件时把它加进下面的数组——忘了加，这个测试不会失败，
+    /// 但 `lib.rs:91` 的数组会漏掉它，功能在真机上直接不存在。
+    #[tokio::test]
+    async fn app_migration_sequence_is_idempotent() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("应创建内存 SQLite");
+
+        let migrations = [
+            include_str!("../../migrations/01_create_tables.sql"),
+            include_str!("../../migrations/02_stock_prediction_model.sql"),
+            include_str!("../../migrations/03_volume_metrics.sql"),
+            include_str!("../../migrations/04_stock_fundamentals.sql"),
+            include_str!("../../migrations/05_capital_valuation.sql"),
+            include_str!("../../migrations/06_stock_category.sql"),
+            include_str!("../../migrations/07_watchlist.sql"),
+            include_str!("../../migrations/08_canonical_stock_symbols.sql"),
+            include_str!("../../migrations/09_trading_discipline.sql"),
+        ];
+
+        for round in 1..=2 {
+            for sql in migrations {
+                for statement in sql.split(';') {
+                    let statement = statement.trim();
+                    if statement.is_empty() {
+                        continue;
+                    }
+                    if let Err(e) = sqlx::query(statement).execute(&pool).await {
+                        let message = e.to_string();
+                        if message.contains("duplicate column name") {
+                            continue;
+                        }
+                        panic!("第 {round} 遍迁移失败: {e}\n{statement}");
+                    }
+                }
+            }
+        }
+
+        let tables: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                .fetch_all(&pool)
+                .await
+                .expect("应能列出建好的表");
+        let names: Vec<String> = tables.into_iter().map(|(name,)| name).collect();
+        for expected in [
+            "discipline_account",
+            "discipline_events",
+            "positions",
+            "trades",
+            "watchlist",
+            "historical_data",
+        ] {
+            assert!(names.contains(&expected.to_string()), "{expected} 表应存在");
+        }
+
+        let seeded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM discipline_account")
+            .fetch_one(&pool)
+            .await
+            .expect("应能统计账户行");
+        assert_eq!(seeded, 1, "账户种子行必须恰好一条，重复迁移不能插第二条");
+    }
+
     #[tokio::test]
     async fn canonical_symbol_migration_merges_duplicates_and_prevents_recurrence() {
         let pool = SqlitePoolOptions::new()

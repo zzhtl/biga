@@ -720,6 +720,310 @@ pub async fn backfill_volume_metrics(
     Ok(updated)
 }
 
+// =============================================================================
+// 交易纪律：账户 / 持仓 / 成交 / 事件
+// =============================================================================
+
+/// 统计两个日期之间已收盘的交易日数（左开右闭）。
+///
+/// 用 `historical_data` 里出现过的 **distinct 日期** 作为市场日历代理——
+/// 比自然日差值准确（能扣掉周末与节假日），也不需要额外维护一张交易日历表。
+/// 库里数据越全越准；数据稀疏时会低估，属于偏保守方向（冷静期/熔断会更长）。
+pub async fn count_trading_days_between(
+    from_date: &str,
+    to_date: &str,
+    pool: &SqlitePool,
+) -> Result<i64, AppError> {
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(DISTINCT date) FROM historical_data WHERE date > ? AND date <= ?",
+    )
+    .bind(from_date)
+    .bind(to_date)
+    .fetch_one(pool)
+    .await?;
+    Ok(count.0)
+}
+
+
+/// 读取账户资金与规则。迁移里已 `INSERT OR IGNORE` 种子行，所以正常不会为空；
+/// 万一为空（老库未跑迁移）返回默认值而不是报错，让页面还能打开。
+pub async fn get_discipline_account(pool: &SqlitePool) -> Result<DisciplineAccount, AppError> {
+    let account = sqlx::query_as::<_, DisciplineAccount>(
+        "SELECT cash, rules_json, updated_at FROM discipline_account WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(account.unwrap_or_default())
+}
+
+/// 覆盖写账户资金与规则（存取款 = 直接改 cash）
+pub async fn save_discipline_account(
+    pool: &SqlitePool,
+    cash: f64,
+    rules_json: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO discipline_account (id, cash, rules_json, updated_at)
+        VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+            cash = EXCLUDED.cash,
+            rules_json = EXCLUDED.rules_json,
+            updated_at = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(cash)
+    .bind(rules_json)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 现金增量更新。买入为负、卖出为正，由成交流水驱动。
+pub async fn adjust_discipline_cash(pool: &SqlitePool, delta: f64) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE discipline_account SET cash = cash + ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1",
+    )
+    .bind(delta)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+const POSITION_COLUMNS: &str = "id, symbol, status, open_date, close_date, cost_price, quantity, \
+     initial_quantity, initial_stop, stop_price, stop_basis, target_price, highest_price, \
+     highest_price_date, scale_out_done, realized_pnl, basis_suspect, note";
+
+/// 按状态列出持仓；`status` 为 None 时返回全部
+pub async fn list_positions(
+    status: Option<&str>,
+    pool: &SqlitePool,
+) -> Result<Vec<Position>, AppError> {
+    let sql = match status {
+        Some(_) => format!(
+            "SELECT {POSITION_COLUMNS} FROM positions WHERE status = ? ORDER BY open_date DESC, id"
+        ),
+        None => format!("SELECT {POSITION_COLUMNS} FROM positions ORDER BY open_date DESC, id"),
+    };
+    let mut query = sqlx::query_as::<_, Position>(&sql);
+    if let Some(status) = status {
+        query = query.bind(status);
+    }
+    Ok(query.fetch_all(pool).await?)
+}
+
+pub async fn get_position(id: &str, pool: &SqlitePool) -> Result<Option<Position>, AppError> {
+    let sql = format!("SELECT {POSITION_COLUMNS} FROM positions WHERE id = ?");
+    Ok(sqlx::query_as::<_, Position>(&sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+/// 取某股票当前未平仓的那一条（部分唯一索引保证最多一条）
+pub async fn get_open_position(symbol: &str, pool: &SqlitePool) -> Result<Option<Position>, AppError> {
+    let sql =
+        format!("SELECT {POSITION_COLUMNS} FROM positions WHERE symbol = ? AND status = 'open'");
+    Ok(sqlx::query_as::<_, Position>(&sql)
+        .bind(canonical_stock_symbol(symbol))
+        .fetch_optional(pool)
+        .await?)
+}
+
+pub async fn insert_position(pool: &SqlitePool, position: &Position) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO positions (
+            id, symbol, status, open_date, close_date, cost_price, quantity, initial_quantity,
+            initial_stop, stop_price, stop_basis, target_price, highest_price, highest_price_date,
+            scale_out_done, realized_pnl, basis_suspect, note, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        "#,
+    )
+    .bind(&position.id)
+    .bind(canonical_stock_symbol(&position.symbol))
+    .bind(&position.status)
+    .bind(&position.open_date)
+    .bind(&position.close_date)
+    .bind(position.cost_price)
+    .bind(position.quantity)
+    .bind(position.initial_quantity)
+    .bind(position.initial_stop)
+    .bind(position.stop_price)
+    .bind(&position.stop_basis)
+    .bind(position.target_price)
+    .bind(position.highest_price)
+    .bind(&position.highest_price_date)
+    .bind(position.scale_out_done)
+    .bind(position.realized_pnl)
+    .bind(position.basis_suspect)
+    .bind(&position.note)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn update_position(pool: &SqlitePool, position: &Position) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE positions SET
+            status = ?, close_date = ?, cost_price = ?, quantity = ?, initial_quantity = ?,
+            stop_price = ?, stop_basis = ?, target_price = ?, highest_price = ?,
+            highest_price_date = ?, scale_out_done = ?, realized_pnl = ?, basis_suspect = ?,
+            note = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        "#,
+    )
+    .bind(&position.status)
+    .bind(&position.close_date)
+    .bind(position.cost_price)
+    .bind(position.quantity)
+    .bind(position.initial_quantity)
+    .bind(position.stop_price)
+    .bind(&position.stop_basis)
+    .bind(position.target_price)
+    .bind(position.highest_price)
+    .bind(&position.highest_price_date)
+    .bind(position.scale_out_done)
+    .bind(position.realized_pnl)
+    .bind(position.basis_suspect)
+    .bind(&position.note)
+    .bind(&position.id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+const TRADE_COLUMNS: &str =
+    "id, position_id, symbol, side, price, quantity, trade_date, fee, rule_code, event_id";
+
+pub async fn insert_trade(pool: &SqlitePool, trade: &Trade) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        INSERT INTO trades (
+            id, position_id, symbol, side, price, quantity, trade_date, fee, rule_code, event_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        "#,
+    )
+    .bind(&trade.id)
+    .bind(&trade.position_id)
+    .bind(canonical_stock_symbol(&trade.symbol))
+    .bind(&trade.side)
+    .bind(trade.price)
+    .bind(trade.quantity)
+    .bind(&trade.trade_date)
+    .bind(trade.fee)
+    .bind(&trade.rule_code)
+    .bind(&trade.event_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 列出成交流水；`position_id` 为 None 时返回全部（按日期倒序）
+pub async fn list_trades(
+    position_id: Option<&str>,
+    pool: &SqlitePool,
+) -> Result<Vec<Trade>, AppError> {
+    let sql = match position_id {
+        Some(_) => format!(
+            "SELECT {TRADE_COLUMNS} FROM trades WHERE position_id = ? ORDER BY trade_date, id"
+        ),
+        None => format!("SELECT {TRADE_COLUMNS} FROM trades ORDER BY trade_date DESC, id DESC"),
+    };
+    let mut query = sqlx::query_as::<_, Trade>(&sql);
+    if let Some(position_id) = position_id {
+        query = query.bind(position_id);
+    }
+    Ok(query.fetch_all(pool).await?)
+}
+
+const EVENT_COLUMNS: &str = "id, position_id, symbol, event_date, rule_code, severity, \
+     action_required, resolution, reason, trigger_close, evidence_json, created_at, resolved_at";
+
+/// 幂等落事件：同一持仓 + 同一规则 + 同一天只留一条（靠唯一索引）。
+/// 返回 true 表示这是新事件。
+pub async fn insert_discipline_event(
+    pool: &SqlitePool,
+    event: &DisciplineEvent,
+) -> Result<bool, AppError> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO discipline_events (
+            id, position_id, symbol, event_date, rule_code, severity, action_required,
+            resolution, reason, trigger_close, evidence_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(position_id, rule_code, event_date) DO NOTHING
+        "#,
+    )
+    .bind(&event.id)
+    .bind(&event.position_id)
+    .bind(canonical_stock_symbol(&event.symbol))
+    .bind(&event.event_date)
+    .bind(&event.rule_code)
+    .bind(&event.severity)
+    .bind(&event.action_required)
+    .bind(&event.resolution)
+    .bind(&event.reason)
+    .bind(event.trigger_close)
+    .bind(&event.evidence_json)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// 列出纪律事件；`resolution` 为 None 时返回全部
+pub async fn list_discipline_events(
+    resolution: Option<&str>,
+    pool: &SqlitePool,
+) -> Result<Vec<DisciplineEvent>, AppError> {
+    let sql = match resolution {
+        Some(_) => format!(
+            "SELECT {EVENT_COLUMNS} FROM discipline_events WHERE resolution = ? \
+             ORDER BY event_date DESC, id"
+        ),
+        None => format!(
+            "SELECT {EVENT_COLUMNS} FROM discipline_events ORDER BY event_date DESC, id"
+        ),
+    };
+    let mut query = sqlx::query_as::<_, DisciplineEvent>(&sql);
+    if let Some(resolution) = resolution {
+        query = query.bind(resolution);
+    }
+    Ok(query.fetch_all(pool).await?)
+}
+
+pub async fn get_discipline_event(
+    id: &str,
+    pool: &SqlitePool,
+) -> Result<Option<DisciplineEvent>, AppError> {
+    let sql = format!("SELECT {EVENT_COLUMNS} FROM discipline_events WHERE id = ?");
+    Ok(sqlx::query_as::<_, DisciplineEvent>(&sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+/// 处置事件。`reason` 的非空校验在命令层做（那里能返回中文的 InvalidInput）。
+pub async fn resolve_discipline_event(
+    pool: &SqlitePool,
+    id: &str,
+    resolution: &str,
+    reason: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE discipline_events SET resolution = ?, reason = ?, resolved_at = CURRENT_TIMESTAMP \
+         WHERE id = ?",
+    )
+    .bind(resolution)
+    .bind(reason)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

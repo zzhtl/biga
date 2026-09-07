@@ -6,9 +6,11 @@
         Clock3,
         List,
         Settings as SettingsIcon,
+        ShieldCheck,
         Star,
         TrendingUp,
     } from "lucide-svelte";
+    import DisciplineBanner from "./components/discipline_banner.svelte";
 
     let activeView = $state<View>("favorites");
     let navTarget = $state<NavTarget | null>(null);
@@ -17,6 +19,7 @@
     let predictionModule: ReturnType<typeof importPrediction> | null = null;
     let realtimeModule: ReturnType<typeof importRealtime> | null = null;
     let historicalModule: ReturnType<typeof importHistorical> | null = null;
+    let disciplineModule: ReturnType<typeof importDiscipline> | null = null;
     let listModule: ReturnType<typeof importList> | null = null;
     let settingsModule: ReturnType<typeof importSettings> | null = null;
 
@@ -24,6 +27,7 @@
     function importPrediction() { return import("./components/stock_prediction.svelte"); }
     function importRealtime() { return import("./components/stock_realtime.svelte"); }
     function importHistorical() { return import("./components/stock_historical.svelte"); }
+    function importDiscipline() { return import("./components/trading_discipline.svelte"); }
     function importList() { return import("./components/stock_list.svelte"); }
     function importSettings() { return import("./components/sys_settings.svelte"); }
 
@@ -31,6 +35,7 @@
     function loadPrediction() { return predictionModule ??= importPrediction(); }
     function loadRealtime() { return realtimeModule ??= importRealtime(); }
     function loadHistorical() { return historicalModule ??= importHistorical(); }
+    function loadDiscipline() { return disciplineModule ??= importDiscipline(); }
     function loadList() { return listModule ??= importList(); }
     function loadSettings() { return settingsModule ??= importSettings(); }
 
@@ -60,6 +65,11 @@
                 </button>
             </li>
             <li>
+                <button class="nav-button" class:active={activeView === "discipline"} onclick={() => selectView("discipline")} aria-current={activeView === "discipline" ? "page" : undefined}>
+                    <ShieldCheck size={18} aria-hidden="true" />交易纪律
+                </button>
+            </li>
+            <li>
                 <button class="nav-button" class:active={activeView === "realtime"} onclick={() => selectView("realtime")} aria-current={activeView === "realtime" ? "page" : undefined}>
                     <Clock3 size={18} aria-hidden="true" />实时行情
                 </button>
@@ -83,6 +93,8 @@
     </nav>
 
     <main class="content">
+        <DisciplineBanner />
+
         {#if activeView === "favorites"}
             {#await loadFavorites() then module}
                 {@const Component = module.default}
@@ -96,6 +108,11 @@
                     navAction={navTarget?.view === "stock" && navTarget.action === "predict" ? "predict" : null}
                     onNavConsumed={() => (navTarget = null)}
                 />
+            {/await}
+        {:else if activeView === "discipline"}
+            {#await loadDiscipline() then module}
+                {@const Component = module.default}
+                <Component />
             {/await}
         {:else if activeView === "list"}
             {#await loadList() then module}

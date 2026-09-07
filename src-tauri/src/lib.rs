@@ -12,6 +12,7 @@ pub mod db;
 pub mod api;
 
 // 业务模块
+pub mod discipline;
 pub mod prediction;
 pub mod services;
 
@@ -76,6 +77,15 @@ pub fn run() {
             commands::watchlist::remove_from_watchlist,
             commands::watchlist::get_watchlist_symbols,
             commands::watchlist::comprehensive_predict,
+            // 交易纪律命令
+            commands::discipline::get_discipline_account,
+            commands::discipline::save_discipline_account,
+            commands::discipline::get_discipline_positions,
+            commands::discipline::check_buy_discipline,
+            commands::discipline::open_discipline_position,
+            commands::discipline::record_discipline_trade,
+            commands::discipline::resolve_discipline_event,
+            commands::discipline::get_discipline_review,
             // 安全设置命令
             commands::settings::get_api_token_status,
             commands::settings::save_api_token,
@@ -97,6 +107,7 @@ pub fn run() {
                     "06_stock_category.sql",
                     "07_watchlist.sql",
                     "08_canonical_stock_symbols.sql",
+                    "09_trading_discipline.sql",
                 ];
                 for file in &migration_files {
                     let path = Path::new("migrations").join(file);

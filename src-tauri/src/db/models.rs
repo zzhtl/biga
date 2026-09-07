@@ -252,3 +252,89 @@ pub struct PredictionModelInfo {
     pub prediction_days: usize,
     pub accuracy: f64,
 }
+
+// =============================================================================
+// 交易纪律
+// =============================================================================
+
+/// 账户资金与规则配置（`discipline_account` 单行表，id 固定为 1）。
+///
+/// 只存 `cash`：总资产 = cash + Σ 持仓市值，每次现算不落库
+/// （与 `07_watchlist.sql` 的「指标不落库」同一思路）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, FromRow)]
+pub struct DisciplineAccount {
+    /// 可用现金（元），由成交流水自动增减
+    pub cash: f64,
+    /// `DisciplineRules` 序列化；空串表示用出厂默认值
+    pub rules_json: String,
+    pub updated_at: String,
+}
+
+/// 持仓。一只股票同时最多一条 open 记录（由部分唯一索引强制）。
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Position {
+    pub id: String,
+    pub symbol: String,
+    /// open / closed
+    pub status: String,
+    pub open_date: String,
+    pub close_date: Option<String>,
+    /// 加权平均成本。**部分卖出不摊薄**，理由见 `commands/discipline.rs::apply_trade`
+    pub cost_price: f64,
+    pub quantity: i64,
+    pub initial_quantity: i64,
+    /// 建仓登记的止损价，永不修改，只作复盘基准
+    pub initial_stop: f64,
+    /// 当前生效止损价，棘轮：只上移不下移
+    pub stop_price: f64,
+    pub stop_basis: String,
+    pub target_price: Option<f64>,
+    /// 持仓期最高价（日线 high，每次扫描全量重算）
+    pub highest_price: Option<f64>,
+    pub highest_price_date: Option<String>,
+    pub scale_out_done: i64,
+    pub realized_pnl: f64,
+    /// 1 = 检测到价格基准变化（除权/除息），卖出规则挂起
+    pub basis_suspect: i64,
+    pub note: Option<String>,
+}
+
+/// 成交流水（append-only），是 `Position` 各字段的事实来源
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct Trade {
+    pub id: String,
+    pub position_id: String,
+    pub symbol: String,
+    /// buy / sell
+    pub side: String,
+    pub price: f64,
+    pub quantity: i64,
+    pub trade_date: String,
+    /// 手续费 + 印花税，人工填
+    pub fee: f64,
+    /// 触发本次成交的纪律码；主动操作为 NULL
+    pub rule_code: Option<String>,
+    /// 关联 `DisciplineEvent::id`：这笔成交在执行哪条裁决
+    pub event_id: Option<String>,
+}
+
+/// 纪律事件 + 处置留痕。`resolution = 'violated'` 时 `reason` 由命令层强制校验非空。
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct DisciplineEvent {
+    pub id: String,
+    pub position_id: Option<String>,
+    pub symbol: String,
+    /// 触发所依据的 K 线日期，不是系统时间 —— 事件可重放
+    pub event_date: String,
+    pub rule_code: String,
+    pub severity: String,
+    /// exit_all / reduce_half / blocked_entry
+    pub action_required: String,
+    /// pending / complied / violated
+    pub resolution: String,
+    pub reason: Option<String>,
+    pub trigger_close: f64,
+    pub evidence_json: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}

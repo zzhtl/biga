@@ -411,6 +411,7 @@ export interface PagedResponse<T> {
 export type View =
   | 'favorites'
   | 'stock'
+  | 'discipline'
   | 'list'
   | 'realtime'
   | 'historical'
@@ -442,3 +443,232 @@ export const REALTIME_SORT_COLUMNS = [
 
 export type RealtimeSortColumn = (typeof REALTIME_SORT_COLUMNS)[number];
 export type SortDirection = 'asc' | 'desc';
+
+// =============================================================================
+// 交易纪律
+// =============================================================================
+
+export type DisciplineCategory = 'exit' | 'entry' | 'sizing' | 'portfolio' | 'data';
+/** 语义强度递增：warn < blocked < must_reduce < must_sell */
+export type DisciplineAction = 'warn' | 'blocked' | 'must_reduce' | 'must_sell';
+export type StopBasis = 'fixed' | 'atr' | 'support' | 'trailing';
+export type SizingConstraint = 'risk' | 'single_position' | 'total_position' | 'cash';
+export type EventResolution = 'pending' | 'complied' | 'violated';
+
+export interface DisciplineItem {
+  code: string;
+  category: DisciplineCategory;
+  severity: RiskLevel;
+  action: DisciplineAction;
+  title: string;
+  detail: string;
+  evidence: string[];
+  trigger_price: number | null;
+  threshold_price: number | null;
+  suggested_quantity: number | null;
+}
+
+export interface DisciplineRules {
+  fixed_stop_pct: number;
+  atr_mult: number;
+  atr_period: number;
+  support_buffer_pct: number;
+  max_stop_pct: number;
+  trail_arm_pct: number;
+  trail_pct: number;
+  scale_out_tiers: [number, number];
+  scale_out_fraction: number;
+  time_stop_bars: number;
+  time_stop_min_gain_pct: number;
+  max_risk_pct: number;
+  min_rr: number;
+  max_entry_risk_level: RiskLevel;
+  max_single_pct: number;
+  max_total_pct: number;
+  max_holdings: number;
+  cooldown_bars: number;
+  breaker_losses: number;
+  breaker_bars: number;
+  stale_days: number;
+}
+
+export interface PositionMetrics {
+  market_value: number;
+  unrealized_pnl: number;
+  unrealized_pnl_percent: number;
+  distance_to_stop_percent: number;
+  drawdown_from_high_percent: number | null;
+  risk_exposure: number;
+  holding_trading_days: number;
+}
+
+export interface ExitVerdict {
+  position_id: string;
+  symbol: string;
+  event_date: string;
+  level: RiskLevel;
+  level_label: string;
+  action: DisciplineAction;
+  effective_stop: number;
+  stop_basis: StopBasis;
+  stop_raised_to: number | null;
+  highest_price: number | null;
+  highest_price_date: string | null;
+  metrics: PositionMetrics;
+  t1_locked: boolean;
+  tradable: boolean;
+  items: DisciplineItem[];
+}
+
+export interface PositionSizing {
+  risk_per_share: number;
+  risk_budget: number;
+  cap_by_risk: number;
+  cap_by_single_position: number;
+  cap_by_total_position: number;
+  cap_by_cash: number;
+  binding_constraint: SizingConstraint;
+  max_shares: number;
+  max_amount: number;
+  min_lot: number;
+  lot_step: number;
+  below_one_lot: boolean;
+  evidence: string[];
+}
+
+export interface EntryVerdict {
+  symbol: string;
+  /** 语义是「没有违反纪律」，不是「建议买入」——展示时必须带 disclaimer */
+  allowed: boolean;
+  level: RiskLevel;
+  level_label: string;
+  sizing: PositionSizing;
+  reward_risk_ratio: number | null;
+  items: DisciplineItem[];
+  disclaimer: string;
+}
+
+export interface AccountView {
+  cash: number;
+  /** 现金 + 持仓市值，后端现算 */
+  total_equity: number;
+  total_market_value: number;
+  open_position_count: number;
+  rules: DisciplineRules;
+  updated_at: string;
+}
+
+/** 后端 PositionView 用 serde(flatten) 把 Position 各列摊平在顶层 */
+export interface PositionRow {
+  id: string;
+  symbol: string;
+  status: 'open' | 'closed';
+  open_date: string;
+  close_date: string | null;
+  cost_price: number;
+  quantity: number;
+  initial_quantity: number;
+  initial_stop: number;
+  stop_price: number;
+  stop_basis: StopBasis;
+  target_price: number | null;
+  highest_price: number | null;
+  highest_price_date: string | null;
+  scale_out_done: number;
+  realized_pnl: number;
+  /** 1 = 检测到除权/除息，卖出规则已挂起 */
+  basis_suspect: number;
+  note: string | null;
+  name: string;
+  last_close: number | null;
+  verdict: ExitVerdict | null;
+  unavailable_reason: string | null;
+}
+
+export interface DisciplineEvent {
+  id: string;
+  position_id: string | null;
+  symbol: string;
+  event_date: string;
+  rule_code: string;
+  severity: RiskLevel;
+  action_required: 'exit_all' | 'reduce_half' | 'blocked_entry' | 'warn';
+  resolution: EventResolution;
+  reason: string | null;
+  trigger_close: number;
+  evidence_json: string;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+export interface DisciplineBoard {
+  account: AccountView;
+  positions: PositionRow[];
+  pending_events: DisciplineEvent[];
+  disclaimer: string;
+}
+
+export interface ReplayFill {
+  rule_code: string;
+  trigger_date: string;
+  fill_date: string;
+  fill_price: number;
+  quantity: number;
+  deferred_bars: number;
+  defer_reason: string | null;
+}
+
+export interface StopStep {
+  date: string;
+  stop_price: number;
+  basis: StopBasis;
+}
+
+export interface ReplayOutcome {
+  position_id: string;
+  symbol: string;
+  fills: ReplayFill[];
+  /** true = 因跌停/停牌顺延超限，已从统计剔除 */
+  unresolved: boolean;
+  unresolved_reason: string | null;
+  same_as_actual: boolean;
+  disciplined_pnl: number;
+  actual_pnl: number;
+  /** 守纪 − 实际。正数 = 守纪本可少亏或多赚 */
+  difference: number;
+  stop_path: StopStep[];
+}
+
+export interface ReviewRow {
+  position_id: string;
+  symbol: string;
+  name: string;
+  open_date: string;
+  close_date: string;
+  cost_price: number;
+  quantity: number;
+  outcome: ReplayOutcome;
+  violations: DisciplineEvent[];
+}
+
+export interface RuleStat {
+  rule_code: string;
+  violated_count: number;
+  difference_total: number;
+}
+
+export interface DisciplineReview {
+  closed_count: number;
+  replayed_count: number;
+  unresolved_count: number;
+  complied_count: number;
+  violated_count: number;
+  compliance_rate: number | null;
+  actual_pnl_total: number;
+  disciplined_pnl_total: number;
+  difference_total: number;
+  fee_recorded: boolean;
+  by_rule: RuleStat[];
+  rows: ReviewRow[];
+  disclaimer: string;
+}
