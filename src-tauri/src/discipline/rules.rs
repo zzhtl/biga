@@ -11,6 +11,26 @@
 //! - 单笔最大亏损锁死在总资产 **2%**：连输 10 笔才亏 20%，本金还在，还能继续。
 //! - 盈亏比门槛 **2:1**：胜率 40% 即正期望（0.4 × 2 − 0.6 × 1 = +0.2）。
 //! - 这两条合起来就是「赚大钱亏小钱」的全部数学。其余规则都是为了让这两条不被人性绕过。
+//!
+//! # `atr_mult` 为什么是 3.5
+//!
+//! 止损取四个候选里最严的一个（见 [`crate::discipline::stop`]），所以 ATR 线与固定线
+//! 的相对位置由 `atr_mult × ATR%` 和 `fixed_stop_pct` 的大小决定：
+//!
+//! ```text
+//! atr_mult × ATR% < 8%  →  ATR 线更严，它说了算
+//! 交叉点：ATR% = 8 / atr_mult
+//! ```
+//!
+//! `atr_mult = 2.0` 时交叉点是 ATR% = 4%，而 A 股日均 ATR% 多在 2–4%，等于绝大多数票
+//! 都由 ATR 线接管，止损被压到成本下方 4–6%——比标称的 8% 紧一大截，低波动股会被
+//! 正常震荡反复扫出。`atr_mult = 3.5` 把交叉点拉到 **ATR% = 2.29%**：
+//!
+//! - ATR% ≥ 2.29%（多数 A 股）→ **固定 8% 是主力线**
+//! - ATR% < 2.29%（低波动股）→ ATR 线仍接管，但落在 −7% 附近，与固定线只差 1 个点
+//!
+//! ATR 项因此从「日常止损线」退回它该有的角色：只在真正安静的票上稍作收紧。
+//! 想让 8% 在任何波动率下都当家，把 `atr_mult` 提到 4.0（交叉点 ATR% = 2%）以上。
 
 use serde::{Deserialize, Serialize};
 
@@ -97,7 +117,7 @@ pub struct DisciplineRules {
 }
 
 fn d_fixed_stop_pct() -> f64 { 8.0 }
-fn d_atr_mult() -> f64 { 2.0 }
+fn d_atr_mult() -> f64 { 3.5 }
 fn d_atr_period() -> usize { 14 }
 fn d_support_buffer_pct() -> f64 { 1.0 }
 fn d_max_stop_pct() -> f64 { 10.0 }
@@ -197,6 +217,11 @@ mod tests {
     fn default_rules_encode_the_standard_preset() {
         let rules = DisciplineRules::default();
         assert_eq!(rules.fixed_stop_pct, 8.0, "标准档硬止损应为 8%");
+        assert_eq!(rules.atr_mult, 3.5, "ATR 倍数 3.5 让交叉点落在 ATR%=2.29%，8% 固定线才是主力");
+        assert!(
+            rules.atr_mult * 2.5 > rules.fixed_stop_pct,
+            "ATR%=2.5%（A 股常见水平）时 ATR 线必须让位给固定线，否则止损会被压到 8% 以内"
+        );
         assert_eq!(rules.max_risk_pct, 2.0, "标准档单笔风险应为总资产 2%");
         assert_eq!(rules.min_rr, 2.0, "标准档盈亏比门槛应为 2:1");
         assert_eq!(rules.max_single_pct, 25.0, "标准档单票上限应为 25%");

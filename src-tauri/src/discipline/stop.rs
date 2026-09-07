@@ -169,11 +169,14 @@ mod tests {
 
     #[test]
     fn strictest_wins_means_highest_stop_wins() {
-        // ATR 很小 → cost − 2×0.5 = 99，高于固定的 92，应当胜出
+        // ATR 很小（ATR% = 0.5%）→ cost − 3.5×0.5 = 98.25，高于固定的 92，应当胜出。
+        // 期望值从 rules 现算而不是写死，免得调 atr_mult 时这里又变成一个待修的魔数。
+        let rules = DisciplineRules::default();
         let input = StopInput { atr: Some(0.5), ..base() };
-        let out = compute_stop(&input, &DisciplineRules::default());
+        let out = compute_stop(&input, &rules);
         assert_eq!(out.basis, StopBasis::Atr, "取最严 = 取 max，止损价越高越严");
-        assert!((out.stop_price - 99.0).abs() < 1e-9);
+        assert!((out.stop_price - (100.0 - rules.atr_mult * 0.5)).abs() < 1e-9);
+        assert!(out.stop_price > out.candidate_fixed, "胜出的候选必须严于固定线");
     }
 
     #[test]

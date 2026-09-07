@@ -487,14 +487,36 @@ mod tests {
     }
 
     #[test]
-    fn low_volatility_atr_tightens_the_stop_well_inside_the_fixed_line() {
-        // 「三者取最严」的直接后果：ATR(14)=1 的低波动股，止损 = 100 − 2×1 = 98，
-        // 只比成本低 2%，远严于固定的 8%。这是有意的——止损越紧，sizing 允许买越多，
-        // 风险敞口不变。但它也意味着低波动股会更频繁被扫出，不是 bug。
-        let verdict = evaluate_exit(&position(100.0, 92.0), &facts(97.0), &DisciplineRules::default());
-        assert_eq!(verdict.effective_stop, 98.0);
+    fn normal_a_share_volatility_leaves_the_fixed_line_in_charge() {
+        // atr_mult = 3.5 的交叉点是 ATR% = 8/3.5 = 2.29%。A 股日均 ATR% 多在 2–4%，
+        // 所以绝大多数票由固定 8% 说了算——这正是把 atr_mult 从 2.0 提到 3.5 的目的。
+        // 这里 ATR = 2.5（ATR% = 2.5%）：3.5 × 2.5 = 8.75% > 8%，ATR 线让位。
+        let mut market = facts(93.0);
+        market.atr = Some(2.5);
+        let verdict = evaluate_exit(&position(100.0, 92.0), &market, &DisciplineRules::default());
+        assert_eq!(verdict.stop_basis, StopBasis::Fixed, "常见波动率下必须是固定线当家");
+        assert!((verdict.effective_stop - 92.0).abs() < 1e-9, "止损就落在成本 −8%");
+        assert!(!codes(&verdict).contains(&"EXIT_HARD_STOP"), "收盘 93 在 92 之上，不该触发");
+    }
+
+    #[test]
+    fn very_low_volatility_still_lets_atr_tighten_the_stop() {
+        // ATR% = 1% 的安静票：3.5 × 1 = 3.5% < 8%，ATR 线仍接管，止损收到 96.5。
+        // 这是有意保留的——止损越紧，sizing 允许买越多，风险敞口不变；
+        // 而 3.5 倍已经把它从「日常止损线」压回「只在真正安静的票上稍作收紧」。
+        let rules = DisciplineRules::default();
+        let verdict = evaluate_exit(&position(100.0, 92.0), &facts(96.0), &rules);
         assert_eq!(verdict.stop_basis, StopBasis::Atr);
+        assert!((verdict.effective_stop - 96.5).abs() < 1e-9, "100 − 3.5×1.0");
         assert!(codes(&verdict).contains(&"EXIT_HARD_STOP"));
+
+        // 同一只票收盘 97.0：atr_mult 还是 2.0 时止损在 98.0，这天就被扫出去了；
+        // 提到 3.5 后止损退到 96.5，这档正常回撤不再触发。这就是本次调参的实际差别。
+        let survives = evaluate_exit(&position(100.0, 92.0), &facts(97.0), &rules);
+        assert!(
+            !codes(&survives).contains(&"EXIT_HARD_STOP"),
+            "3.5 倍下 97.0 不应触发——低波动股被正常震荡扫出正是要解决的问题"
+        );
     }
 
     #[test]
