@@ -74,23 +74,9 @@ pub async fn create_pool() -> Result<DbPool, sqlx::Error> {
         }
     }
     
-    let final_db_path = match db_path {
-        Some(path) => path,
-        None => {
-            let preferred_path = if current_dir.join("src-tauri").exists() {
-                current_dir.join("db/stock_data.db")
-            } else {
-                current_dir.join("db/stock_data.db")
-            };
-            
-            if let Some(parent) = preferred_path.parent() {
-                fs::create_dir_all(parent).map_err(sqlx::Error::Io)?;
-            }
-            
-            preferred_path
-        }
-    };
-    
+    // 两个候选都不存在（全新环境）时落到第一个；目录与文件由 open_pool 负责创建
+    let final_db_path = db_path.unwrap_or_else(|| current_dir.join("db/stock_data.db"));
+
     open_pool(&final_db_path).await
 }
 
