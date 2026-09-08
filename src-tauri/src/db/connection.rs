@@ -39,6 +39,49 @@ pub async fn open_pool(db_path: &Path) -> Result<DbPool, sqlx::Error> {
     Ok(pool)
 }
 
+/// 全部迁移脚本，按执行顺序排列。
+///
+/// 用 `include_str!` 编进二进制而不是运行时读盘：装机之后进程的 CWD 是用户双击时
+/// 所在的目录，`migrations/` 根本不在那里。原来的写法是
+/// `if Path::new("migrations").join(file).exists()`——找不到就**静默跳过**，
+/// 不报错、不 panic，只是一张表都建不出来，随后每一次查询都失败。
+///
+/// 编进来还顺带解决另一个坑：文件名写错或漏加会变成编译错误，而不是运行时悄悄少跑一条。
+pub const MIGRATIONS: &[(&str, &str)] = &[
+    ("01_create_tables.sql", include_str!("../../migrations/01_create_tables.sql")),
+    ("02_stock_prediction_model.sql", include_str!("../../migrations/02_stock_prediction_model.sql")),
+    ("03_volume_metrics.sql", include_str!("../../migrations/03_volume_metrics.sql")),
+    ("04_stock_fundamentals.sql", include_str!("../../migrations/04_stock_fundamentals.sql")),
+    ("05_capital_valuation.sql", include_str!("../../migrations/05_capital_valuation.sql")),
+    ("06_stock_category.sql", include_str!("../../migrations/06_stock_category.sql")),
+    ("07_watchlist.sql", include_str!("../../migrations/07_watchlist.sql")),
+    ("08_canonical_stock_symbols.sql", include_str!("../../migrations/08_canonical_stock_symbols.sql")),
+    ("09_trading_discipline.sql", include_str!("../../migrations/09_trading_discipline.sql")),
+];
+
+/// 按顺序执行全部迁移，可重复调用。
+///
+/// 语句按 `;` 朴素拆分，所以迁移 SQL 里不能出现分号字面量，也不能写 TRIGGER / BEGIN…END。
+/// SQLite 没有 `ALTER TABLE ADD COLUMN IF NOT EXISTS`，所以对 "duplicate column name" 容错；
+/// 其余错误一律带上文件名和语句原文返回，方便定位是哪一条挂了。
+pub async fn run_migrations(pool: &DbPool) -> Result<(), String> {
+    for (name, sql) in MIGRATIONS {
+        for statement in sql.split(';') {
+            let statement = statement.trim();
+            if statement.is_empty() {
+                continue;
+            }
+            if let Err(e) = sqlx::query(statement).execute(pool).await {
+                if e.to_string().contains("duplicate column name") {
+                    continue;
+                }
+                return Err(format!("迁移 {name} 执行失败: {e}\n{statement}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 查找数据库路径
 pub fn find_database_path() -> Option<PathBuf> {
     let current_dir = std::env::current_dir().ok()?;
@@ -199,12 +242,10 @@ mod tests {
         .await;
     }
 
-    /// 按 `lib.rs` 的 `migration_files` 真实顺序跑全部迁移，并跑两遍。
+    /// 按真实顺序跑全部迁移，并跑两遍。
     ///
-    /// 迁移执行器用 `sql.split(';')` 朴素拆分、只忽略 "duplicate column name"，
-    /// 所以任何新迁移都必须：无分号字面量、无 TRIGGER、每条语句幂等。
-    /// 新增迁移文件时把它加进下面的数组——忘了加，这个测试不会失败，
-    /// 但 `lib.rs:91` 的数组会漏掉它，功能在真机上直接不存在。
+    /// 直接调用生产用的 [`run_migrations`]，不再在测试里另抄一份清单——
+    /// 两份清单迟早会漂移，而漂移的表现是「某条迁移在真机上没跑」这种最难查的问题。
     #[tokio::test]
     async fn app_migration_sequence_is_idempotent() {
         let pool = SqlitePoolOptions::new()
@@ -213,34 +254,10 @@ mod tests {
             .await
             .expect("应创建内存 SQLite");
 
-        let migrations = [
-            include_str!("../../migrations/01_create_tables.sql"),
-            include_str!("../../migrations/02_stock_prediction_model.sql"),
-            include_str!("../../migrations/03_volume_metrics.sql"),
-            include_str!("../../migrations/04_stock_fundamentals.sql"),
-            include_str!("../../migrations/05_capital_valuation.sql"),
-            include_str!("../../migrations/06_stock_category.sql"),
-            include_str!("../../migrations/07_watchlist.sql"),
-            include_str!("../../migrations/08_canonical_stock_symbols.sql"),
-            include_str!("../../migrations/09_trading_discipline.sql"),
-        ];
-
         for round in 1..=2 {
-            for sql in migrations {
-                for statement in sql.split(';') {
-                    let statement = statement.trim();
-                    if statement.is_empty() {
-                        continue;
-                    }
-                    if let Err(e) = sqlx::query(statement).execute(&pool).await {
-                        let message = e.to_string();
-                        if message.contains("duplicate column name") {
-                            continue;
-                        }
-                        panic!("第 {round} 遍迁移失败: {e}\n{statement}");
-                    }
-                }
-            }
+            run_migrations(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("第 {round} 遍迁移应成功: {e}"));
         }
 
         let tables: Vec<(String,)> =

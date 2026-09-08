@@ -22,9 +22,7 @@ mod commands;
 // CSV 处理
 mod csv;
 
-use db::connection::create_pool;
-use std::path::Path;
-use std::fs;
+use db::connection::{find_database_path, open_pool, run_migrations};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -94,44 +92,30 @@ pub fn run() {
         ])
         .setup(|app| {
             tauri::async_runtime::block_on(async {
-                let pool = create_pool().await
+                // 库文件位置：已有库优先（开发时就在 src-tauri/db 下，不搬家）。
+                // 都没有时——debug 构建落在 CWD 的 db/，保持 `bun run tauri dev` 的习惯；
+                // release 构建落到系统应用数据目录，因为装机后进程 CWD 是用户双击时
+                // 所在的目录，往那儿写会到处撒 db 文件夹，换个地方启动还看不到自己的持仓。
+                let db_path = match find_database_path() {
+                    Some(path) => path,
+                    None if cfg!(debug_assertions) => std::env::current_dir()
+                        .expect("应能读取当前工作目录")
+                        .join("db/stock_data.db"),
+                    None => app
+                        .path()
+                        .app_data_dir()
+                        .expect("应能解析应用数据目录")
+                        .join("stock_data.db"),
+                };
+
+                let pool = open_pool(&db_path)
+                    .await
                     .expect("Failed to create database pool");
-                
-                // 执行迁移脚本
-                let migration_files = [
-                    "01_create_tables.sql",
-                    "02_stock_prediction_model.sql",
-                    "03_volume_metrics.sql",
-                    "04_stock_fundamentals.sql",
-                    "05_capital_valuation.sql",
-                    "06_stock_category.sql",
-                    "07_watchlist.sql",
-                    "08_canonical_stock_symbols.sql",
-                    "09_trading_discipline.sql",
-                ];
-                for file in &migration_files {
-                    let path = Path::new("migrations").join(file);
-                    if path.exists() {
-                        let sql = fs::read_to_string(&path)
-                            .expect("Failed to read migration file");
-                        // 按语句拆分执行，幂等地忽略 "duplicate column" 错误
-                        // （SQLite 不支持 ALTER TABLE ADD COLUMN IF NOT EXISTS）
-                        for statement in sql.split(';') {
-                            let statement = statement.trim();
-                            if statement.is_empty() {
-                                continue;
-                            }
-                            if let Err(e) = sqlx::query(statement).execute(&pool).await {
-                                let msg = e.to_string();
-                                if msg.contains("duplicate column name") {
-                                    continue;
-                                }
-                                panic!("Failed to execute migration {file}: {e}");
-                            }
-                        }
-                    }
-                }
-                
+
+                // 迁移脚本已编进二进制（见 db::connection::MIGRATIONS），不再读盘——
+                // 装机后 migrations/ 不在 CWD 里，原来的读盘写法会静默跳过、一张表都不建。
+                run_migrations(&pool).await.expect("数据库迁移失败");
+
                 app.manage(pool);
             });
             Ok(())
