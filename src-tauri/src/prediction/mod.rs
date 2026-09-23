@@ -12,6 +12,7 @@ pub mod analysis;
 pub mod strategy;
 pub mod model;
 pub mod backtest;
+pub mod calibration;
 pub mod factor;
 pub mod cross_section;
 

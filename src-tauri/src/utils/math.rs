@@ -155,6 +155,65 @@ pub fn clamp(value: f64, min: f64, max: f64) -> f64 {
     value.max(min).min(max)
 }
 
+/// 标准正态分布 CDF Φ(x)。
+///
+/// Zelen & Severo 有理近似（A&S 26.2.17），绝对误差 < 7.5e-8——远小于金融数据本身的
+/// 噪声，够用。仅作兜底：主路径应当用实测的经验残差分位，因为 A 股收益已被实测为厚尾
+/// （见 `prediction::analysis::prediction_interval` 的 z 倍数大于正态值）。
+pub fn normal_cdf(x: f64) -> f64 {
+    if !x.is_finite() {
+        return if x.is_nan() {
+            f64::NAN
+        } else if x > 0.0 {
+            1.0
+        } else {
+            0.0
+        };
+    }
+    const P: f64 = 0.231_641_9;
+    const B: [f64; 5] = [
+        0.319_381_530,
+        -0.356_563_782,
+        1.781_477_937,
+        -1.821_255_978,
+        1.330_274_429,
+    ];
+    let sign_negative = x < 0.0;
+    let ax = x.abs();
+    let t = 1.0 / (1.0 + P * ax);
+    let pdf = (-0.5 * ax * ax).exp() / (2.0 * std::f64::consts::PI).sqrt();
+    let poly = B
+        .iter()
+        .rev()
+        .fold(0.0, |acc, &b| (acc + b) * t)
+        .max(0.0);
+    let upper_tail = pdf * poly;
+    if sign_negative {
+        upper_tail
+    } else {
+        1.0 - upper_tail
+    }
+}
+
+/// 已排序序列的经验分位（线性插值）。
+///
+/// `p` 取 [0, 1]。空序列返回 `None`。用线性插值而不是四舍五入取整，是因为校准表要在
+/// 样本量不大的分桶上取分位，取整会引入可见的阶梯误差。
+pub fn empirical_quantile(sorted: &[f64], p: f64) -> Option<f64> {
+    if sorted.is_empty() || !p.is_finite() {
+        return None;
+    }
+    let n = sorted.len();
+    if n == 1 {
+        return Some(sorted[0]);
+    }
+    let pos = p.clamp(0.0, 1.0) * (n - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = (lo + 1).min(n - 1);
+    let frac = pos - lo as f64;
+    Some(sorted[lo] + frac * (sorted[hi] - sorted[lo]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +236,36 @@ mod tests {
         let values = vec![0.0, 50.0, 100.0];
         let normalized = normalize(&values);
         assert_eq!(normalized, vec![0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn test_normal_cdf_known_points() {
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-9);
+        assert!((normal_cdf(1.0) - 0.841_344_75).abs() < 1e-6);
+        assert!((normal_cdf(-1.0) - 0.158_655_25).abs() < 1e-6);
+        assert!((normal_cdf(1.959_964) - 0.975).abs() < 1e-6);
+        // 对称性
+        for x in [0.3_f64, 1.1, 2.7, 4.0] {
+            assert!((normal_cdf(x) + normal_cdf(-x) - 1.0).abs() < 1e-7);
+        }
+        // 单调且不越界
+        assert!(normal_cdf(-40.0) >= 0.0 && normal_cdf(40.0) <= 1.0);
+        assert!(normal_cdf(0.1) < normal_cdf(0.2));
+    }
+
+    #[test]
+    fn test_empirical_quantile_interpolates() {
+        let sorted = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        assert_eq!(empirical_quantile(&sorted, 0.0), Some(0.0));
+        assert_eq!(empirical_quantile(&sorted, 1.0), Some(4.0));
+        assert_eq!(empirical_quantile(&sorted, 0.5), Some(2.0));
+        // 0.25 * 4 = 1.0 → 恰好落在第二个次序统计量上
+        assert_eq!(empirical_quantile(&sorted, 0.25), Some(1.0));
+        // 0.3 * 4 = 1.2 → 在 1.0 和 2.0 之间线性插值
+        let q = empirical_quantile(&sorted, 0.3).unwrap();
+        assert!((q - 1.2).abs() < 1e-9, "得到 {q}");
+        assert_eq!(empirical_quantile(&[], 0.5), None);
+        assert_eq!(empirical_quantile(&[7.0], 0.9), Some(7.0));
     }
 }
 

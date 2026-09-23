@@ -159,11 +159,21 @@ export interface RiskSummary {
   metrics: RiskMetrics;
 }
 
+/** 气候基率：历史无条件上涨频率，是无技能参照，不是预测。 */
+export interface BaselineUpProbability {
+  /** P(预测周期后上涨 | 非平盘)，0-1 */
+  probability: number;
+  samples: number;
+  horizon_days: number;
+  note: string;
+}
+
 export interface PredictionDiagnostics {
   point_estimate_kind: 'historical_unconditional_drift' | 'candle_model' | string;
   point_estimate_note: string;
   uncertainty_method: string;
   risk_summary: RiskSummary;
+  baseline_up_probability?: BaselineUpProbability | null;
 }
 
 export interface TechnicalIndicatorValues {

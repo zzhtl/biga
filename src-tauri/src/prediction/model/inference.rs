@@ -11,7 +11,7 @@
 //! 6. 信号冲突检测 - 多重信号确认与假信号过滤
 
 use crate::prediction::types::{
-    PredictionRequest, PredictionResponse, Prediction, LastRealData,
+    BaselineUpProbability, PredictionRequest, PredictionResponse, Prediction, LastRealData,
     EvaluationResult, TechnicalIndicatorValues, ModelInfo, PredictionDiagnostics,
 };
 use crate::prediction::model::ml_inference::MlPredictor;
@@ -176,6 +176,7 @@ pub fn predict_from_historical(
         &prices,
         current_price,
         prediction_interval::DEFAULT_COVERAGE,
+        Some(&request.stock_code),
     );
 
     let diagnostics = diagnostics_from_analysis(
@@ -185,6 +186,7 @@ pub fn predict_from_historical(
         "historical_unconditional_drift",
         "点估计为对应预测周期的历史无条件漂移中枢；技术信号仅描述当前状态，不参与点预测方向。",
         None,
+        prediction_days,
     );
 
     Ok(PredictionResponse {
@@ -215,6 +217,7 @@ fn diagnostics_from_analysis(
     point_estimate_kind: &str,
     point_estimate_note: &str,
     model: Option<ModelRiskInput>,
+    horizon: usize,
 ) -> PredictionDiagnostics {
     let current_price = historical.last().map_or(0.0, |bar| bar.close);
     let risk_summary = risk_warning::analyze_prediction_risk(RiskAnalysisInput {
@@ -231,11 +234,27 @@ fn diagnostics_from_analysis(
         model,
     });
 
+    // 基率此前在 calibrate_professional_result 里算完就被丢掉了（两个生产调用点都 discard
+    // 掉返回的 EngineCalibration）。它是唯一一个有实证含义的概率，必须露出来。
+    let baseline_up_probability =
+        empirical_horizon_stats(historical, horizon).map(|stats| BaselineUpProbability {
+            probability: stats.up_ratio,
+            samples: stats.samples,
+            horizon_days: horizon.max(1),
+            note: format!(
+                "该股近 {} 个样本中，{} 个交易日后收涨的比例（剔除平盘）。这是无技能基率，\
+                 不是预测——任何上涨概率都要先赢过它才谈得上有信息。",
+                stats.samples,
+                horizon.max(1)
+            ),
+        });
+
     PredictionDiagnostics {
         point_estimate_kind: point_estimate_kind.to_string(),
         point_estimate_note: point_estimate_note.to_string(),
         uncertainty_method: prediction_interval::METHOD.to_string(),
         risk_summary,
+        baseline_up_probability,
     }
 }
 
@@ -403,15 +422,32 @@ pub struct EngineCalibration {
     pub used_empirical_baseline: bool,
 }
 
-/// 用该股票最近真实历史 walk-forward 表现校准规则引擎输出。
-pub fn calibrate_professional_result(
-    historical: &[HistoricalData],
-    result: &mut professional_engine::ProfessionalPredictionResult,
-    horizon: usize,
-    _stock_code: Option<&str>,
-) -> Option<EngineCalibration> {
-    const MIN_EMPIRICAL_SAMPLES: usize = 20;
+/// 该股票 H 日前向收益的无条件统计量。
+///
+/// `up_ratio` 就是气候基率（climatology）——**无技能参照概率**。任何号称有预测力的
+/// P(涨) 都必须拿它作对照打分（见 `prediction::calibration::score_probabilities_against`），
+/// 否则「55% 上涨概率」听着像判断，实际可能只是复述这只票历史上本来就 55% 天数在涨。
+#[derive(Debug, Clone, Copy)]
+pub struct HorizonStats {
+    /// 有效样本数
+    pub samples: usize,
+    /// P(H 日后上涨 | 非平盘)。平盘样本被剔除，所以是条件频率。
+    pub up_ratio: f64,
+    /// 同期平均涨跌幅（百分点）
+    pub average_change: f64,
+}
 
+/// 估 [`HorizonStats`] 所需的最小样本数
+const MIN_EMPIRICAL_SAMPLES: usize = 20;
+
+/// 统计该股票历史上 H 日前向收益的上涨频率与平均涨跌幅。
+///
+/// 回看窗口：h ≤ 5 用 500 根，更长周期用 800 根。剔除 |涨跌幅| < 0.01% 的平盘样本——
+/// 它们既不算涨也不算跌，计进去会把基率往 50% 拉。
+pub fn empirical_horizon_stats(
+    historical: &[HistoricalData],
+    horizon: usize,
+) -> Option<HorizonStats> {
     let horizon = horizon.max(1);
     if historical.len() <= horizon + MIN_EMPIRICAL_SAMPLES {
         return None;
@@ -420,9 +456,9 @@ pub fn calibrate_professional_result(
     let closes: Vec<f64> = historical.iter().map(|h| h.close).collect();
     let empirical_window = if horizon <= 5 { 500 } else { 800 };
     let empirical_start = historical.len().saturating_sub(empirical_window);
-    let mut empirical_samples = 0usize;
-    let mut empirical_up = 0usize;
-    let mut empirical_sum = 0.0;
+    let mut samples = 0usize;
+    let mut ups = 0usize;
+    let mut sum = 0.0;
     for i in empirical_start..historical.len().saturating_sub(horizon) {
         let base = closes[i];
         let future = closes[i + horizon];
@@ -433,17 +469,29 @@ pub fn calibrate_professional_result(
         if actual.abs() < 0.01 || !actual.is_finite() {
             continue;
         }
-        empirical_samples += 1;
-        empirical_up += usize::from(actual > 0.0);
-        empirical_sum += actual;
+        samples += 1;
+        ups += usize::from(actual > 0.0);
+        sum += actual;
     }
 
-    if empirical_samples < MIN_EMPIRICAL_SAMPLES {
-        return None;
-    }
+    (samples >= MIN_EMPIRICAL_SAMPLES).then(|| HorizonStats {
+        samples,
+        up_ratio: ups as f64 / samples as f64,
+        average_change: sum / samples as f64,
+    })
+}
 
-    let actual_up_ratio = empirical_up as f64 / empirical_samples as f64;
-    let average_actual_change = empirical_sum / empirical_samples as f64;
+/// 用该股票最近真实历史 walk-forward 表现校准规则引擎输出。
+pub fn calibrate_professional_result(
+    historical: &[HistoricalData],
+    result: &mut professional_engine::ProfessionalPredictionResult,
+    horizon: usize,
+    _stock_code: Option<&str>,
+) -> Option<EngineCalibration> {
+    let stats = empirical_horizon_stats(historical, horizon)?;
+    let empirical_samples = stats.samples;
+    let actual_up_ratio = stats.up_ratio;
+    let average_actual_change = stats.average_change;
     let original_change = result.expected_change;
 
     // 诚实校准：单股方向无 alpha（见 .claude/CLAUDE.md），不下方向赌注、不含任何评测拟合阈值。
@@ -827,6 +875,7 @@ pub fn predict_with_model_from_historical(
         &closes,
         current_price,
         prediction_interval::DEFAULT_COVERAGE,
+        Some(&request.stock_code),
     );
 
     let prices: Vec<f64> = historical.iter().map(|bar| bar.close).collect();
@@ -856,6 +905,7 @@ pub fn predict_with_model_from_historical(
             direction_accuracy: model.accuracy,
             test_samples: model.test_samples,
         }),
+        request.prediction_days.max(1),
     );
 
     Ok(PredictionResponse {
@@ -1051,6 +1101,80 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    /// 按给定日收益序列造历史
+    fn history_from_returns(rets: &[f64]) -> Vec<HistoricalData> {
+        let start = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let mut close = 100.0;
+        rets.iter()
+            .enumerate()
+            .map(|(i, r)| {
+                close *= 1.0 + r;
+                HistoricalData {
+                    symbol: "test".to_string(),
+                    date: start + Duration::days(i as i64),
+                    open: close,
+                    close,
+                    high: close,
+                    low: close,
+                    volume: 1000,
+                    amount: close * 1000.0,
+                    amplitude: 1.0,
+                    turnover_rate: 1.0,
+                    volume_ratio: 1.0,
+                    change_percent: r * 100.0,
+                    change: 0.0,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_horizon_stats_on_monotone_series() {
+        let hist = history_with_mild_uptrend();
+        let stats = empirical_horizon_stats(&hist, 1).expect("样本够");
+        assert!((stats.up_ratio - 1.0).abs() < 1e-12, "单调上涨的基率必须是 1.0");
+        assert!(stats.average_change > 0.0);
+        assert_eq!(stats.samples, hist.len() - 1);
+
+        let down = empirical_horizon_stats(&history_with_mild_downtrend(), 1).expect("样本够");
+        assert!(down.up_ratio.abs() < 1e-12, "单调下跌的基率必须是 0.0");
+    }
+
+    #[test]
+    fn test_horizon_stats_excludes_flat_bars() {
+        // 一半平盘、一半上涨：平盘被剔除后基率应为 1.0 而不是 0.5
+        let rets: Vec<f64> = (0..120)
+            .map(|i| if i % 2 == 0 { 0.0 } else { 0.01 })
+            .collect();
+        let hist = history_from_returns(&rets);
+        let stats = empirical_horizon_stats(&hist, 1).expect("样本够");
+        assert!(
+            (stats.up_ratio - 1.0).abs() < 1e-9,
+            "平盘样本必须被剔除，否则基率会被拉向 50%: {}",
+            stats.up_ratio
+        );
+        assert!(stats.samples < rets.len() - 1, "确实丢掉了平盘样本");
+    }
+
+    #[test]
+    fn test_horizon_stats_needs_enough_samples() {
+        let hist = history_from_returns(&[0.01; 10]);
+        assert!(empirical_horizon_stats(&hist, 1).is_none(), "样本不足应返回 None 而不是编造");
+        assert!(empirical_horizon_stats(&[], 5).is_none());
+    }
+
+    #[test]
+    fn test_horizon_stats_matches_calibration_output() {
+        // 基率与漂移锚必须同源：诊断里露出来的数和点预测用的数不能对不上
+        let hist = history_with_mild_uptrend();
+        let stats = empirical_horizon_stats(&hist, 3).expect("样本够");
+        let mut result = bearish_result();
+        let calib = calibrate_professional_result(&hist, &mut result, 3, None).expect("应能校准");
+        assert_eq!(calib.samples, stats.samples);
+        assert!((calib.actual_up_ratio - stats.up_ratio).abs() < 1e-12);
+        assert!((calib.average_actual_change - stats.average_change).abs() < 1e-12);
     }
 
     fn history_with_mild_downtrend() -> Vec<HistoricalData> {

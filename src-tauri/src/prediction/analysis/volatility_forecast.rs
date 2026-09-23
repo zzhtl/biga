@@ -396,6 +396,109 @@ pub fn calculate_realized_volatility(prices: &[f64]) -> f64 {
     variance.sqrt()
 }
 
+/// RiskMetrics 标准的 EWMA 衰减系数（日频）
+pub const EWMA_LAMBDA: f64 = 0.94;
+
+/// 日收益序列（简单收益）。
+fn daily_returns(closes: &[f64]) -> Vec<f64> {
+    closes
+        .windows(2)
+        .filter(|w| w[0] > 0.0)
+        .map(|w| (w[1] - w[0]) / w[0])
+        .filter(|r| r.is_finite())
+        .collect()
+}
+
+/// EWMA 日波动率（指数加权、**零均值**）。
+///
+/// 与 [`calculate_realized_volatility`] 的两处关键差别：
+/// 1. **不减样本均值**。日频下漂移相对波动是二阶小量，减样本均值等于把一部分真实漂移
+///    当成噪声扣掉，还额外引入估计误差；短窗口尤其明显。
+/// 2. **指数加权**而非等权。波动率有聚集效应，20 日等权窗把 20 天前的信息和昨天同等看待，
+///    在波动状态切换时反应迟钝——这正是"名义 80% 的带在高波动段覆盖不足"的来源之一。
+///
+/// λ 用 [`EWMA_LAMBDA`] 时有效窗口约 1/(1−λ) ≈ 17 个交易日。
+pub fn ewma_daily_vol(closes: &[f64], lambda: f64) -> Option<f64> {
+    let returns = daily_returns(closes);
+    if returns.is_empty() || !(0.0..1.0).contains(&lambda) {
+        return None;
+    }
+    // σ² = (1−λ)/(1−λ^N) · Σ λ^i r²_{t−i}，归一化写法，省掉初值选择
+    let mut weighted = 0.0;
+    let mut weight_sum = 0.0;
+    let mut w = 1.0;
+    for r in returns.iter().rev() {
+        weighted += w * r * r;
+        weight_sum += w;
+        w *= lambda;
+        if w < 1e-12 {
+            break;
+        }
+    }
+    if weight_sum <= 0.0 {
+        return None;
+    }
+    let var = weighted / weight_sum;
+    (var.is_finite() && var > 0.0).then(|| var.sqrt())
+}
+
+/// 零均值已实现日波动率（等权），用作长期波动基准。
+pub fn realized_daily_vol_zero_mean(closes: &[f64]) -> Option<f64> {
+    let returns = daily_returns(closes);
+    if returns.is_empty() {
+        return None;
+    }
+    let var = returns.iter().map(|r| r * r).sum::<f64>() / returns.len() as f64;
+    (var.is_finite() && var > 0.0).then(|| var.sqrt())
+}
+
+/// 累计波动率的期限结构：返回第 1..=`days` 个预测日的**累计**标准差。
+///
+/// 现行区间用的是 `σ·√d`，等价于假设日收益 IID、且当前波动会一直持续下去。实际上波动率
+/// 均值回归：当前处在高波动段时 `√d` 会高估远期不确定性，低波动段则低估。在方差上按
+/// GARCH 的期限结构递推可以消掉这一层系统性偏差：
+///
+/// ```text
+/// σ²_{t+k} = V + φ^k (σ²_t − V)
+/// 累计方差(H) = Σ_{k=1..H} σ²_{t+k} = H·V + (σ²_t − V)·φ(1−φ^H)/(1−φ)
+/// ```
+///
+/// `φ`（持续性）为 1 时退化回 `σ·√d`；`sigma_now == sigma_long` 时也精确等于 `σ·√d`。
+///
+/// - `sigma_now`：当前条件日波动（建议用 [`ewma_daily_vol`]）
+/// - `sigma_long`：长期日波动（建议用长窗的 [`realized_daily_vol_zero_mean`]）
+/// - `persistence`：φ ∈ [0, 1)，可由 [`estimate_garch_params`] 的 `alpha + beta` 得到
+pub fn cumulative_sigma_path(
+    sigma_now: f64,
+    sigma_long: f64,
+    persistence: f64,
+    days: usize,
+) -> Vec<f64> {
+    if days == 0 || !sigma_now.is_finite() || sigma_now <= 0.0 {
+        return Vec::new();
+    }
+    let var_now = sigma_now * sigma_now;
+    let var_long = if sigma_long.is_finite() && sigma_long > 0.0 {
+        sigma_long * sigma_long
+    } else {
+        var_now
+    };
+    let phi = persistence.clamp(0.0, 1.0);
+
+    // σ²_{t+k} = V + φ^(k−1)·(σ²_now − V)。指数是 k−1 而不是 k：`sigma_now` 是**下一日**的
+    // 条件波动预测（EWMA 在 t 时刻给出的就是对 t+1 的预测），所以 d=1 必须精确等于它，
+    // 均值回归从第二天才开始起作用。
+    let mut out = Vec::with_capacity(days);
+    let mut cumulative_var = 0.0;
+    let mut phi_pow = 1.0;
+    for _ in 1..=days {
+        cumulative_var += var_long + phi_pow * (var_now - var_long);
+        out.push(cumulative_var.max(0.0).sqrt());
+        phi_pow *= phi;
+    }
+    out
+}
+
 /// 波动率比率（当前vs长期）
 pub fn calculate_volatility_ratio(prices: &[f64], short_period: usize, long_period: usize) -> f64 {
     let len = prices.len();
@@ -425,6 +528,142 @@ mod tests {
         assert!(params.half_life() > 0.0);
     }
     
+    /// 由日收益序列造价格序列
+    fn prices_from_returns(start: f64, rets: &[f64]) -> Vec<f64> {
+        let mut out = vec![start];
+        for r in rets {
+            let last = *out.last().unwrap();
+            out.push(last * (1.0 + r));
+        }
+        out
+    }
+
+    #[test]
+    fn test_ewma_recovers_constant_volatility() {
+        // 收益恒为 ±1% → 零均值日波动就是 1%
+        let rets: Vec<f64> = (0..200)
+            .map(|i| if i % 2 == 0 { 0.01 } else { -0.01 })
+            .collect();
+        let prices = prices_from_returns(100.0, &rets);
+        let v = ewma_daily_vol(&prices, EWMA_LAMBDA).expect("应能算出");
+        assert!((v - 0.01).abs() < 5e-4, "EWMA 应恢复出 1%，得到 {v}");
+    }
+
+    #[test]
+    fn test_ewma_reacts_faster_than_equal_weight() {
+        // 前 100 天日波动 0.5%，最近 20 天跳到 3%
+        let mut rets: Vec<f64> = (0..100)
+            .map(|i| if i % 2 == 0 { 0.005 } else { -0.005 })
+            .collect();
+        rets.extend((0..20).map(|i| if i % 2 == 0 { 0.03 } else { -0.03 }));
+        let prices = prices_from_returns(100.0, &rets);
+
+        let ewma = ewma_daily_vol(&prices, EWMA_LAMBDA).expect("应能算出");
+        let equal_all = realized_daily_vol_zero_mean(&prices).expect("应能算出");
+
+        assert!(
+            ewma > equal_all,
+            "波动跳升后 EWMA 必须高于全样本等权: ewma={ewma} equal={equal_all}"
+        );
+        assert!(ewma > 0.02, "EWMA 应贴近新状态的 3%，得到 {ewma}");
+    }
+
+    #[test]
+    fn test_zero_mean_vol_keeps_drift_in() {
+        // 单边上涨：减样本均值会把漂移当噪声扣掉，零均值口径则保留
+        let rets: Vec<f64> = (0..100).map(|_| 0.01).collect();
+        let prices = prices_from_returns(100.0, &rets);
+        let zero_mean = realized_daily_vol_zero_mean(&prices).expect("应能算出");
+        let demeaned = calculate_realized_volatility(&prices);
+        assert!((zero_mean - 0.01).abs() < 1e-6, "零均值口径应为 1%，得到 {zero_mean}");
+        assert!(demeaned < 1e-6, "减掉样本均值后恒定漂移的波动为 0，得到 {demeaned}");
+        assert!(zero_mean > demeaned);
+    }
+
+    #[test]
+    fn test_ewma_rejects_bad_input() {
+        assert!(ewma_daily_vol(&[], EWMA_LAMBDA).is_none());
+        assert!(ewma_daily_vol(&[100.0], EWMA_LAMBDA).is_none());
+        assert!(ewma_daily_vol(&[100.0, 101.0], 1.0).is_none(), "λ 必须 <1");
+        // 价格恒定 → 方差为 0，无法用作区间宽度
+        assert!(ewma_daily_vol(&[100.0; 30], EWMA_LAMBDA).is_none());
+    }
+
+    #[test]
+    fn test_sigma_path_reduces_to_sqrt_d_when_no_mean_reversion() {
+        let sigma = 0.02;
+        // φ=1：完全持续，退化回 σ·√d
+        let path = cumulative_sigma_path(sigma, 0.05, 1.0, 5);
+        for (i, v) in path.iter().enumerate() {
+            let want = sigma * ((i + 1) as f64).sqrt();
+            assert!((v - want).abs() < 1e-12, "d={} 得到 {v} 期望 {want}", i + 1);
+        }
+        // 当前波动恰等于长期波动时也应精确等于 σ·√d
+        let path = cumulative_sigma_path(sigma, sigma, 0.9, 5);
+        for (i, v) in path.iter().enumerate() {
+            let want = sigma * ((i + 1) as f64).sqrt();
+            assert!((v - want).abs() < 1e-12, "d={} 得到 {v} 期望 {want}", i + 1);
+        }
+    }
+
+    #[test]
+    fn test_sigma_path_mean_reverts_in_both_directions() {
+        let phi = 0.94;
+        let horizon = 20;
+
+        // 当前高于长期 → 累计波动应低于 √d 外推（√d 高估了远期不确定性）
+        let high = cumulative_sigma_path(0.05, 0.02, phi, horizon);
+        let naive_high = 0.05 * (horizon as f64).sqrt();
+        assert!(
+            *high.last().unwrap() < naive_high,
+            "高波动段应低于 √d 外推: {} vs {naive_high}",
+            high.last().unwrap()
+        );
+
+        // 当前低于长期 → 累计波动应高于 √d 外推
+        let low = cumulative_sigma_path(0.01, 0.03, phi, horizon);
+        let naive_low = 0.01 * (horizon as f64).sqrt();
+        assert!(
+            *low.last().unwrap() > naive_low,
+            "低波动段应高于 √d 外推: {} vs {naive_low}",
+            low.last().unwrap()
+        );
+
+        // 第一天永远等于当日条件波动，与均值回归无关
+        assert!((high[0] - 0.05).abs() < 1e-12);
+        assert!((low[0] - 0.01).abs() < 1e-12);
+
+        // 累计波动必须随 horizon 单调变宽
+        assert!(high.windows(2).all(|w| w[1] > w[0]));
+        assert!(low.windows(2).all(|w| w[1] > w[0]));
+    }
+
+    #[test]
+    fn test_sigma_path_converges_to_long_run() {
+        // H 足够大时 σ_H/√H 应收敛到长期波动
+        // 收敛速度是 O(1/H)：初始偏离被摊到 H 天上，所以要取足够大的 H 才看得出极限
+        let long_run = 0.025;
+        let horizon = 5000;
+        let path = cumulative_sigma_path(0.06, long_run, 0.94, horizon);
+        let implied = path.last().unwrap() / (horizon as f64).sqrt();
+        assert!(
+            (implied - long_run).abs() < 1e-3,
+            "远期隐含波动应收敛到长期值: {implied} vs {long_run}"
+        );
+    }
+
+    #[test]
+    fn test_sigma_path_edge_cases() {
+        assert!(cumulative_sigma_path(0.02, 0.02, 0.9, 0).is_empty());
+        assert!(cumulative_sigma_path(0.0, 0.02, 0.9, 3).is_empty());
+        assert!(cumulative_sigma_path(f64::NAN, 0.02, 0.9, 3).is_empty());
+        // 长期波动非法时退化成用当前波动（即 √d）
+        let path = cumulative_sigma_path(0.02, 0.0, 0.5, 3);
+        for (i, v) in path.iter().enumerate() {
+            assert!((v - 0.02 * ((i + 1) as f64).sqrt()).abs() < 1e-12);
+        }
+    }
+
     #[test]
     fn test_volatility_forecast() {
         // 生成模拟价格

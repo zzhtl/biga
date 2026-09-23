@@ -36,26 +36,7 @@ const MA20_PERIOD: usize = 20;
 /// 但接口给的 `pre_close` 是除权后基准，两者对不上即可识别。
 const BASIS_CHANGE_TOLERANCE: f64 = 0.02;
 
-/// A 股涨跌停限幅（百分比，返回 `(跌停, 涨停)`）。
-///
-/// 与 `professional_engine::get_stock_price_limits` 的区别：那个函数为预测留了裕度
-/// （主板返回 ±9.5），这里需要**真实**限幅来判断"一字板是否可成交"，所以单独实现。
-/// 刻意不改动预测引擎（外科手术式改动）。
-pub fn price_limit_percent(symbol: &str, name: &str) -> (f64, f64) {
-    let code = symbol.trim_start_matches(|c: char| !c.is_ascii_digit());
-    // 创业板 / 科创板即使被 ST 也是 ±20%，所以先判板块
-    if code.starts_with("688") || code.starts_with("300") || code.starts_with("301") {
-        return (-20.0, 20.0);
-    }
-    if name.to_uppercase().contains("ST") {
-        return (-5.0, 5.0);
-    }
-    // 北交所 ±30%。库内目前无此类标的，保留分支避免误判为主板（known gap）
-    if code.starts_with('4') || code.starts_with('8') {
-        return (-30.0, 30.0);
-    }
-    (-10.0, 10.0)
-}
+pub use crate::utils::symbol::price_limit_percent;
 
 /// 检测价格基准变化（除权 / 除息 / 复权口径切换）。
 ///
@@ -230,18 +211,6 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn star_and_st_boards_get_their_real_limits() {
-        assert_eq!(price_limit_percent("688981", "中芯国际"), (-20.0, 20.0));
-        assert_eq!(price_limit_percent("300750", "宁德时代"), (-20.0, 20.0));
-        assert_eq!(price_limit_percent("600519", "贵州茅台"), (-10.0, 10.0));
-        assert_eq!(price_limit_percent("600666", "*ST奥瑞"), (-5.0, 5.0));
-        assert_eq!(
-            price_limit_percent("300123", "ST太空"),
-            (-20.0, 20.0),
-            "创业板即使 ST 也是 ±20%"
-        );
-    }
 
     #[test]
     fn basis_change_is_detected_from_pre_close_mismatch() {

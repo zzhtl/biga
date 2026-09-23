@@ -5,7 +5,7 @@
     import PredictionRangeChart from './prediction_range_chart.svelte';
     import RiskAlertPanel from './risk_alert_panel.svelte';
     import { errorMessage as readableError, invokeCommand } from '../services';
-    import type { PredictionDiagnostics, RiskCategory, RiskLevel, RiskSummary } from '../types';
+    import type { BaselineUpProbability, PredictionDiagnostics, RiskCategory, RiskLevel, RiskSummary } from '../types';
 
     // 跨页导航（收藏页等跳转进入）：navSymbol 带入股票代码，navAction="predict" 时自动运行一键综合预测
     export let navSymbol: string | null = null;
@@ -480,6 +480,19 @@
             point_estimate_note: String(raw.point_estimate_note ?? ""),
             uncertainty_method: String(raw.uncertainty_method ?? ""),
             risk_summary: normalizeRiskSummary(raw.risk_summary),
+            baseline_up_probability: normalizeBaselineUpProbability(raw.baseline_up_probability),
+        };
+    }
+
+    function normalizeBaselineUpProbability(raw: any): BaselineUpProbability | null {
+        if (!raw || typeof raw.probability !== "number" || !Number.isFinite(raw.probability)) {
+            return null;
+        }
+        return {
+            probability: normalizeNumber(raw.probability),
+            samples: Math.trunc(normalizeNumber(raw.samples)),
+            horizon_days: Math.trunc(normalizeNumber(raw.horizon_days)),
+            note: String(raw.note ?? ""),
         };
     }
 
@@ -2006,6 +2019,20 @@
                         <span class="ci-label">平均信号强度</span>
                         <span class="ci-value" title="技术信号强度，非方向命中概率">{predAvgConfidence.toFixed(1)}%</span>
                     </div>
+                    {#if predictionDiagnostics?.baseline_up_probability}
+                        <div class="conclusion-item">
+                            <span class="ci-label">历史上涨基率</span>
+                            <span
+                                class="ci-value baseline-rate"
+                                title={predictionDiagnostics.baseline_up_probability.note}
+                                >{(predictionDiagnostics.baseline_up_probability.probability * 100).toFixed(1)}%
+                                <small
+                                    >（{predictionDiagnostics.baseline_up_probability.horizon_days}日·{predictionDiagnostics
+                                        .baseline_up_probability.samples}样本）</small
+                                ></span
+                            >
+                        </div>
+                    {/if}
                     {#if predHorizonBand}
                         <div class="conclusion-item">
                             <span class="ci-label">{(predHorizonBand.confidence * 100).toFixed(0)}%校准区间</span>
@@ -2037,7 +2064,7 @@
                         </div>
                     {/if}
                 </div>
-                <div class="conclusion-note">单股方向没有稳定预测力；点估计仅为历史无条件漂移中枢，信号强度不是命中概率，不确定性以80%校准区间和95%压力区间为准。</div>
+                <div class="conclusion-note">单股方向没有稳定预测力；点估计仅为历史无条件漂移中枢，信号强度不是命中概率，不确定性以80%校准区间和95%压力区间为准。「历史上涨基率」是该股自身的无条件上涨频率，属于无技能参照——本系统目前不输出优于它的上涨概率。</div>
             </div>
 
             <RiskAlertPanel summary={predictionDiagnostics?.risk_summary ?? comprehensiveReport?.risk_summary ?? null} />
@@ -2938,6 +2965,13 @@
     .ci-value.risk-level.low { color: #10b981; }
     .ci-value.risk-level.medium { color: #f59e0b; }
     .ci-value.risk-level.high { color: #ef4444; }
+    .ci-value.baseline-rate small {
+        font-weight: 400;
+        opacity: 0.65;
+        font-size: 0.82em;
+        margin-left: 2px;
+    }
+
     .conclusion-note {
         margin-top: 0.9rem;
         font-size: 0.75rem;

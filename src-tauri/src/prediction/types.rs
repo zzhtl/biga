@@ -212,6 +212,26 @@ pub struct PredictionDiagnostics {
     pub point_estimate_note: String,
     pub uncertainty_method: String,
     pub risk_summary: RiskSummary,
+    /// 无技能参照概率：该股票历史上「预测周期后上涨」的无条件频率。
+    /// 数据不足时为 `None`。
+    pub baseline_up_probability: Option<BaselineUpProbability>,
+}
+
+/// 气候基率（climatology）——**无技能**的上涨概率参照。
+///
+/// 它不是预测，是对照物：任何号称有预测力的 P(涨) 都要相对它打 Brier Skill Score，
+/// BSS ≤ 0 就说明那个"预测"并不比复述历史频率更有信息。本项目实证单股方向无 alpha
+/// （见 README），所以当前界面上应当只出现这一个概率，且必须标明它是基率。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaselineUpProbability {
+    /// P(预测周期后上涨 | 非平盘)，0-1
+    pub probability: f64,
+    /// 估计所用的历史样本数
+    pub samples: usize,
+    /// 预测周期（交易日）
+    pub horizon_days: usize,
+    /// 口径说明，直接展示给用户
+    pub note: String,
 }
 
 /// 最新真实数据
