@@ -3,8 +3,9 @@
     import { onMount } from "svelte";
     import { CalendarDays, Clock3, List, RefreshCw, RotateCw, Search, ShieldAlert, Target, Trophy, X } from "lucide-svelte";
     import RiskAlertPanel from "./risk_alert_panel.svelte";
+    import CyclePhasePanel from "./cycle_phase_panel.svelte";
     import { errorMessage as readableError, getStockList, invokeCommand, refreshHistoricalData, setWatchlistMembership } from "../services";
-    import type { NavTarget, RiskLevel, RiskSummary } from "../types";
+    import type { CycleAnalysis, NavTarget, RiskLevel, RiskSummary } from "../types";
 
     // ---------- 类型（内联，snake_case 对齐后端 serde） ----------
     interface WatchlistItem {
@@ -73,6 +74,8 @@
         up_ratio_250d: number | null;
         avg_daily_change_250d: number | null;
         disclaimer: string;
+        // 完整预测明细这里只取周期阶段，其余由预测页渲染
+        prediction?: { predictions?: { diagnostics?: { cycle?: CycleAnalysis | null } | null } };
     }
 
     interface SearchStock {
@@ -884,6 +887,7 @@
                                         <div class="risk-detail-error">{reportErrors[item.symbol]}</div>
                                     {:else if reports[item.symbol]}
                                         <RiskAlertPanel summary={reports[item.symbol].risk_summary} />
+                                        <CyclePhasePanel cycle={reports[item.symbol].prediction?.predictions?.diagnostics?.cycle ?? null} />
                                         <p class="risk-detail-disclaimer">{reports[item.symbol].disclaimer}</p>
                                     {:else}
                                         <div class="risk-detail-empty">数据已变化或尚未分析，请点击“风险分析”生成最新明细。</div>
