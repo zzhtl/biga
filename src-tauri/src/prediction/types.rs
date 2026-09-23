@@ -1,6 +1,7 @@
 //! 预测模块类型定义
 
 use serde::{Deserialize, Serialize};
+use crate::prediction::analysis::cycle_phase::CycleAnalysis;
 use crate::prediction::analysis::{PatternRecognition, SupportResistance};
 use crate::prediction::strategy::{MultiFactorScore, MultiTimeframeSignal};
 
@@ -215,6 +216,10 @@ pub struct PredictionDiagnostics {
     /// 无技能参照概率：该股票历史上「预测周期后上涨」的无条件频率。
     /// 数据不足时为 `None`。
     pub baseline_up_probability: Option<BaselineUpProbability>,
+    /// 周期阶段（箱体 → 主升 → 高位横盘 → 下跌）。只描述阶段与关键价位，不参与点预测。
+    /// 历史不足 250 根时为 `None`。
+    #[serde(default)]
+    pub cycle: Option<CycleAnalysis>,
 }
 
 /// 气候基率（climatology）——**无技能**的上涨概率参照。

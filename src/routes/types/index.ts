@@ -168,12 +168,70 @@ export interface BaselineUpProbability {
   note: string;
 }
 
+export type CyclePhase = 'box' | 'markup' | 'top' | 'markdown';
+/** markup：暴涨后的典型周期；range_high：未经暴涨、从一年内高点深跌 */
+export type CycleKind = 'markup' | 'range_high';
+export type CycleEpisodeOutcome = 'new_high' | 'v_reversal' | 'new_markup' | 'base_held';
+
+export interface CycleLevel {
+  label: string;
+  price: number;
+  /** 相对最新收盘的距离（%） */
+  distance_percent: number;
+  meaning: string;
+}
+
+/** 全库历史结局频率 hits/samples，不是对本股的预测。 */
+export interface CycleOdds {
+  label: string;
+  probability: number;
+  hits: number;
+  samples: number;
+  note: string;
+}
+
+export interface CycleEpisode {
+  kind: CycleKind;
+  base_date: string | null;
+  base_price: number | null;
+  peak_date: string;
+  peak_price: number;
+  trough_date: string;
+  trough_price: number;
+  rally_percent: number | null;
+  rally_days: number | null;
+  /** 峰值到谷底最大回撤（%，负数） */
+  max_drawdown_percent: number;
+  decline_days: number;
+  /** null 表示仍在进行 */
+  outcome: CycleEpisodeOutcome | null;
+  outcome_label: string;
+}
+
+/** 周期阶段（箱体 → 主升 → 高位横盘 → 下跌）。只描述阶段与关键价位，不参与点预测；价格为前复权。 */
+export interface CycleAnalysis {
+  phase: CyclePhase;
+  phase_label: string;
+  phase_since: string;
+  days_in_phase: number;
+  cycle_kind: CycleKind | null;
+  tentative_base: boolean;
+  summary: string;
+  key_levels: CycleLevel[];
+  odds: CycleOdds[];
+  facts: string[];
+  history: CycleEpisode[];
+  price_basis: string;
+  method_note: string;
+}
+
 export interface PredictionDiagnostics {
   point_estimate_kind: 'historical_unconditional_drift' | 'candle_model' | string;
   point_estimate_note: string;
   uncertainty_method: string;
   risk_summary: RiskSummary;
   baseline_up_probability?: BaselineUpProbability | null;
+  cycle?: CycleAnalysis | null;
 }
 
 export interface TechnicalIndicatorValues {

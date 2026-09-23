@@ -21,6 +21,7 @@ use crate::prediction::indicators;
 use crate::prediction::analysis::{trend, volume, pattern, support_resistance};
 use crate::prediction::analysis::{market_regime, divergence, signal_confirmation, volatility_forecast};
 use crate::prediction::analysis::prediction_interval;
+use crate::prediction::analysis::cycle_phase;
 use crate::prediction::analysis::risk_warning::{self, ModelRiskInput, RiskAnalysisInput};
 use crate::prediction::strategy::{multi_factor, professional_engine, adaptive_weights, price_model};
 use crate::utils::date::get_next_trading_day;
@@ -54,6 +55,7 @@ pub async fn predict_with_history(
     if let Some(last) = historical.last() {
         attach_live_data_staleness(&mut response, last.date);
     }
+    attach_cycle_analysis(&mut response, &historical);
     Ok(response)
 }
 
@@ -255,6 +257,27 @@ fn diagnostics_from_analysis(
         uncertainty_method: prediction_interval::METHOD.to_string(),
         risk_summary,
         baseline_up_probability,
+        cycle: None,
+    }
+}
+
+/// 周期阶段只作描述与关键价位：写进诊断、在每条预测的关键因素里留一行，不碰点预测。
+///
+/// 放在异步入口而不是 `predict_from_historical` 里：周期要看到上一轮峰值，历史长度得由入口
+/// 保证（ML 路径平时只取 250 根）；回测也用不到它。
+fn attach_cycle_analysis(response: &mut PredictionResponse, historical: &[HistoricalData]) {
+    let Some(cycle) = cycle_phase::analyze_cycle(historical) else {
+        return;
+    };
+    let factor = cycle.key_factor();
+    for prediction in &mut response.predictions {
+        prediction
+            .key_factors
+            .get_or_insert_with(Vec::new)
+            .push(factor.clone());
+    }
+    if let Some(diagnostics) = response.diagnostics.as_mut() {
+        diagnostics.cycle = Some(cycle);
     }
 }
 
@@ -797,6 +820,11 @@ pub async fn predict_with_model(request: PredictionRequest) -> Result<Prediction
     if let Some(last) = historical.last() {
         attach_live_data_staleness(&mut response, last.date);
     }
+    // 模型只用 250 根，周期阶段要单独取长历史才看得到上一轮峰值
+    let cycle_history = get_recent_historical_data(&request.stock_code, MAX_ANALYSIS_DAYS, &pool)
+        .await
+        .map_err(|e| format!("获取历史数据失败: {e}"))?;
+    attach_cycle_analysis(&mut response, &cycle_history);
     Ok(response)
 }
 
@@ -1451,5 +1479,80 @@ mod tests {
 
         assert_eq!(response.predictions.len(), 1);
         assert!(response.predictions[0].predicted_price.is_finite());
+    }
+
+    #[test]
+    fn test_cycle_analysis_is_descriptive_only() {
+        // 箱体 300 日 → 30 日翻倍 → 40 日跌去 45%：落在下跌通道
+        let start = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let mut closes = vec![10.0; 300];
+        closes.extend((1..=30).map(|i| 10.0 * 2f64.powf(i as f64 / 30.0)));
+        closes.extend((1..=40).map(|i| 20.0 * 0.55f64.powf(i as f64 / 40.0)));
+        let historical: Vec<HistoricalData> = closes
+            .iter()
+            .enumerate()
+            .map(|(i, &close)| {
+                let prev = if i == 0 { close } else { closes[i - 1] };
+                HistoricalData {
+                    symbol: "test".to_string(),
+                    date: start + Duration::days(i as i64),
+                    open: close,
+                    close,
+                    high: close * 1.005,
+                    low: close * 0.995,
+                    volume: 1000,
+                    amount: close * 1000.0,
+                    amplitude: 1.0,
+                    turnover_rate: 1.0,
+                    volume_ratio: 1.0,
+                    change_percent: (close / prev - 1.0) * 100.0,
+                    change: close - prev,
+                }
+            })
+            .collect();
+        let request = PredictionRequest {
+            stock_code: "600000".to_string(),
+            model_name: None,
+            prediction_days: 5,
+            use_candle: false,
+        };
+        let before = predict_from_historical(&request, &historical).unwrap();
+        let mut after = before.clone();
+        attach_cycle_analysis(&mut after, &historical);
+
+        let cycle = after
+            .diagnostics
+            .as_ref()
+            .and_then(|d| d.cycle.as_ref())
+            .expect("足够长的历史应产出周期分析");
+        assert_eq!(cycle.phase, cycle_phase::CyclePhase::Markdown);
+        for (b, a) in before.predictions.iter().zip(&after.predictions) {
+            assert_eq!(
+                b.predicted_price, a.predicted_price,
+                "周期阶段不得改动点预测"
+            );
+            assert_eq!(b.predicted_change_percent, a.predicted_change_percent);
+            assert_eq!(
+                b.interval.as_ref().map(|i| (i.lower_price, i.upper_price)),
+                a.interval.as_ref().map(|i| (i.lower_price, i.upper_price))
+            );
+            let factors = a.key_factors.as_ref().unwrap();
+            assert!(
+                factors.iter().any(|f| f.starts_with("周期阶段: 下跌通道")),
+                "{factors:?}"
+            );
+        }
+
+        // 历史不足 250 根：不输出，也不留关键因素
+        let short = &historical[historical.len() - 200..];
+        let mut response = predict_from_historical(&request, short).unwrap();
+        attach_cycle_analysis(&mut response, short);
+        assert!(response.diagnostics.unwrap().cycle.is_none());
+        assert!(response.predictions[0]
+            .key_factors
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|f| !f.starts_with("周期阶段")));
     }
 }

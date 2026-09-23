@@ -12,6 +12,7 @@ pub mod signal_confirmation;
 pub mod volatility_forecast;
 pub mod prediction_interval;
 pub mod risk_warning;
+pub mod cycle_phase;
 
 pub use trend::*;
 pub use volume::*;

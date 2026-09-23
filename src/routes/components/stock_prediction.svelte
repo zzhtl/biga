@@ -4,8 +4,9 @@
     import { BrainCircuit, FlaskConical, History, LoaderCircle, Play, ShieldCheck, Star } from 'lucide-svelte';
     import PredictionRangeChart from './prediction_range_chart.svelte';
     import RiskAlertPanel from './risk_alert_panel.svelte';
+    import CyclePhasePanel from './cycle_phase_panel.svelte';
     import { errorMessage as readableError, invokeCommand } from '../services';
-    import type { BaselineUpProbability, PredictionDiagnostics, RiskCategory, RiskLevel, RiskSummary } from '../types';
+    import type { BaselineUpProbability, CycleAnalysis, PredictionDiagnostics, RiskCategory, RiskLevel, RiskSummary } from '../types';
 
     // 跨页导航（收藏页等跳转进入）：navSymbol 带入股票代码，navAction="predict" 时自动运行一键综合预测
     export let navSymbol: string | null = null;
@@ -481,6 +482,53 @@
             uncertainty_method: String(raw.uncertainty_method ?? ""),
             risk_summary: normalizeRiskSummary(raw.risk_summary),
             baseline_up_probability: normalizeBaselineUpProbability(raw.baseline_up_probability),
+            cycle: normalizeCycle(raw.cycle),
+        };
+    }
+
+    function normalizeCycle(raw: any): CycleAnalysis | null {
+        if (!raw || typeof raw.phase !== "string") return null;
+        const list = (value: any): any[] => (Array.isArray(value) ? value : []);
+        const optional = (value: any): number | null => (value == null ? null : normalizeNumber(value));
+        return {
+            phase: raw.phase,
+            phase_label: String(raw.phase_label ?? ""),
+            phase_since: String(raw.phase_since ?? ""),
+            days_in_phase: Math.trunc(normalizeNumber(raw.days_in_phase)),
+            cycle_kind: raw.cycle_kind ?? null,
+            tentative_base: Boolean(raw.tentative_base),
+            summary: String(raw.summary ?? ""),
+            key_levels: list(raw.key_levels).map((level) => ({
+                label: String(level?.label ?? ""),
+                price: normalizeNumber(level?.price),
+                distance_percent: normalizeNumber(level?.distance_percent),
+                meaning: String(level?.meaning ?? ""),
+            })),
+            odds: list(raw.odds).map((odds) => ({
+                label: String(odds?.label ?? ""),
+                probability: normalizeNumber(odds?.probability),
+                hits: Math.trunc(normalizeNumber(odds?.hits)),
+                samples: Math.trunc(normalizeNumber(odds?.samples)),
+                note: String(odds?.note ?? ""),
+            })),
+            facts: list(raw.facts).map((fact) => String(fact)),
+            history: list(raw.history).map((episode) => ({
+                kind: episode?.kind,
+                base_date: episode?.base_date ?? null,
+                base_price: optional(episode?.base_price),
+                peak_date: String(episode?.peak_date ?? ""),
+                peak_price: normalizeNumber(episode?.peak_price),
+                trough_date: String(episode?.trough_date ?? ""),
+                trough_price: normalizeNumber(episode?.trough_price),
+                rally_percent: optional(episode?.rally_percent),
+                rally_days: episode?.rally_days == null ? null : Math.trunc(normalizeNumber(episode.rally_days)),
+                max_drawdown_percent: normalizeNumber(episode?.max_drawdown_percent),
+                decline_days: Math.trunc(normalizeNumber(episode?.decline_days)),
+                outcome: episode?.outcome ?? null,
+                outcome_label: String(episode?.outcome_label ?? ""),
+            })),
+            price_basis: String(raw.price_basis ?? ""),
+            method_note: String(raw.method_note ?? ""),
         };
     }
 
@@ -2068,6 +2116,8 @@
             </div>
 
             <RiskAlertPanel summary={predictionDiagnostics?.risk_summary ?? comprehensiveReport?.risk_summary ?? null} />
+
+            <CyclePhasePanel cycle={predictionDiagnostics?.cycle ?? null} />
 
             {#if predictionDiagnostics?.point_estimate_note}
                 <div class="method-note">
