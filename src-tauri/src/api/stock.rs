@@ -367,7 +367,9 @@ mod tests {
             "test-token",
             &[
                 (&url, std::time::Duration::from_millis(20)),
-                (&url, std::time::Duration::from_millis(20)),
+                // 回退请求服务端立即应答，上限只防挂死；20ms 在 CI 虚拟机上偶发不够，
+                // 会把本该通过的重试判成超时
+                (&url, std::time::Duration::from_secs(5)),
             ],
         )
         .await
