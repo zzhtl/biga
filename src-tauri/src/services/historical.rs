@@ -1,65 +1,45 @@
 //! 历史数据服务
 
-use crate::api::stock;
+use crate::services::market_data::{canonical_symbol, ensure_data, QueryBudget, Resource};
 use crate::db::{models::*, repository, DbPool};
 use crate::error::AppError;
 
 /// 单只股票一键全量刷新的结果汇总
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RefreshSummary {
-    /// 写入的历史K线条数
+    /// 可供分析的历史K线条数（最多 3000 条）
     pub bars: u64,
     /// 股本+估值(PE/PB)是否更新成功
     pub capital_updated: bool,
     /// 写入的基本面报告期行数
     pub fundamental_reports: u32,
+    pub requests: u32,
+    pub cache_hits: u32,
+    pub warnings: Vec<String>,
 }
 
 /// **一键刷新单只股票的全部所需数据**：历史K线 + 股本/估值(PE/PB) + 基本面财务指标
 /// + 量比/换手率回填。一次调用更新全部相关表，避免零散重复操作。
 ///
-/// 各非历史步骤失败不阻断主流程（优雅降级）：历史拉取/入库失败才返回 Err。
+/// 缓存优先，最多三个外部请求。取数失败时返回已有数据及警告，无历史数据才报错。
 pub async fn refresh_stock_full(symbol: &str, pool: &DbPool) -> Result<RefreshSummary, AppError> {
-    // 1. 历史K线（主流程，失败即返回 Err）
-    let api_data = stock::fetch_historical_data(symbol).await?;
-    let bars = repository::batch_insert_historical_data(symbol, pool, api_data).await?;
-
-    // 2. 股本 + 估值（ssjy 一次返回 lt/sz/hs/lb/pe/sjl）
-    let mut capital_updated = false;
-    if let Ok(quote) = stock::fetch_stock_capital(symbol).await {
-        if let Some(close) = repository::get_latest_close_price(symbol, pool).await? {
-            if close > 0.0 {
-                let capital = StockCapital {
-                    symbol: symbol.to_string(),
-                    circulating_shares: quote.circulating_market_cap / close,
-                    total_shares: quote.total_market_cap / close,
-                    circulating_market_cap: quote.circulating_market_cap,
-                    pe: quote.pe,
-                    pb: quote.pb,
-                };
-                repository::upsert_stock_capital(pool, &capital).await?;
-                capital_updated = true;
-            }
-        }
+    let symbol = canonical_symbol(symbol)?;
+    let budget = QueryBudget::new(3);
+    let history = ensure_data(pool, &symbol, Resource::History, &budget).await?;
+    let data = repository::get_recent_historical_data(&symbol, 3000, pool).await?;
+    if data.is_empty() {
+        return Err(AppError::InvalidInput(history.warning.unwrap_or_else(|| "没有可用历史数据".into())));
     }
-
-    // 3. 基本面财务指标（cwzb：ROE/EPS/BPS/增长率等，非技术预测维度）
-    let mut fundamental_reports = 0u32;
-    if let Ok(reports) = stock::fetch_financial_indicators(symbol).await {
-        for f in &reports {
-            if repository::upsert_stock_fundamental(pool, f).await.is_ok() {
-                fundamental_reports += 1;
-            }
-        }
-    }
-
-    // 4. 量比/换手率回填（量比始终可算；换手率依赖上面的股本）
-    repository::backfill_volume_metrics(symbol, pool).await?;
-
+    let capital = ensure_data(pool, &symbol, Resource::Valuation, &budget).await?;
+    let fundamentals = ensure_data(pool, &symbol, Resource::Fundamentals, &budget).await?;
+    let (requests, cache_hits) = budget.counts();
     Ok(RefreshSummary {
-        bars,
-        capital_updated,
-        fundamental_reports,
+        bars: data.len() as u64,
+        capital_updated: !capital.stale,
+        fundamental_reports: repository::get_stock_fundamentals(&symbol, pool).await?.len() as u32,
+        requests,
+        cache_hits,
+        warnings: [history, capital, fundamentals].into_iter().filter_map(|r| r.warning).collect(),
     })
 }
 

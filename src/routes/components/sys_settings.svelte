@@ -1,5 +1,6 @@
 <script lang="ts">
     import { onMount } from "svelte";
+    import AiSettings from './ai_settings.svelte';
     import { confirm } from "@tauri-apps/plugin-dialog";
     import {
         CheckCircle2,
@@ -112,6 +113,8 @@
             <p>管理股票数据服务凭据。密钥仅保存在操作系统安全存储中。</p>
         </div>
     </header>
+
+    <AiSettings />
 
     <section class="settings-section" aria-labelledby="api-heading">
         <div class="section-heading">

@@ -1,5 +1,7 @@
 #[derive(thiserror::Error, Debug)]
 pub enum AppError {
+    #[error("行情接口限流，请在 {0} 秒后重试")]
+    MarketRateLimited(u64),
     #[error("Database error: {0}")]
     SqlxError(#[from] sqlx::Error),
 

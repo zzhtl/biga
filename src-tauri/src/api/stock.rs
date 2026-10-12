@@ -17,6 +17,20 @@ const REALTIME_API: &str = "https://api.zhituapi.com/hs/real/ssjy";
 const FINANCIAL_API: &str = "https://api.zhituapi.com/hs/gs/cwzb";
 const TOKEN_VALIDATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+fn check_rate_limit(response: &reqwest::Response) -> Result<(), AppError> {
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry = response.headers().get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok().or_else(|| {
+                chrono::DateTime::parse_from_rfc2822(value).ok().map(|date| {
+                    (date.timestamp() - chrono::Utc::now().timestamp()).max(0) as u64
+                })
+            })).unwrap_or(60).max(60);
+        return Err(AppError::MarketRateLimited(retry));
+    }
+    Ok(())
+}
+
 /// 将各种格式的股票代码归一化为 zhitu 实时接口所需的纯 6 位数字代码。
 /// 例如 "000002.SZ" / "sz000002" → "000002"。
 fn normalize_quote_symbol(symbol: &str) -> String {
@@ -34,6 +48,7 @@ pub async fn fetch_stock_infos() -> Result<Vec<StockInfo>, AppError> {
         .send()
         .await?;
     
+    check_rate_limit(&response)?;
     if !response.status().is_success() {
         println!("API请求失败: {}", response.status());
         return Err(AppError::InvalidInput(format!("API请求失败: {}", response.status())));
@@ -71,6 +86,7 @@ pub async fn fetch_historical_data(symbol: &str) -> Result<Vec<HistoricalData>, 
         .send()
         .await?;
     
+    check_rate_limit(&response)?;
     if !response.status().is_success() {
         println!("API请求失败: {}", response.status());
         return Err(AppError::InvalidInput(format!("获取历史数据失败: {}", response.status())));
@@ -161,6 +177,7 @@ pub async fn fetch_stock_capital(symbol: &str) -> Result<RealtimeQuoteItem, AppE
         .send()
         .await?;
 
+    check_rate_limit(&response)?;
     if !response.status().is_success() {
         return Err(AppError::InvalidInput(format!(
             "获取股本数据失败: {}",
@@ -200,6 +217,7 @@ pub async fn fetch_financial_indicators(symbol: &str) -> Result<Vec<StockFundame
         .send()
         .await?;
 
+    check_rate_limit(&response)?;
     if !response.status().is_success() {
         return Err(AppError::InvalidInput(format!(
             "获取财务指标失败: {}",
@@ -296,6 +314,7 @@ pub async fn validate_api_token(token: &str) -> Result<(), AppError> {
     )
     .await?;
 
+    check_rate_limit(&response)?;
     if !response.status().is_success() {
         return Err(AppError::InvalidInput(format!(
             "API 密钥验证失败: {}",
@@ -313,6 +332,25 @@ pub async fn validate_api_token(token: &str) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rate_limit_obeys_retry_after_without_exposing_the_token() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            let bytes_read = connection.read(&mut request).await.unwrap();
+            assert!(bytes_read > 0);
+            connection.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 120\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        });
+        let response = reqwest::Client::builder().no_proxy().build().unwrap().get(format!("http://{address}/?token=secret")).send().await.unwrap();
+        let error = check_rate_limit(&response).unwrap_err();
+        assert!(matches!(error, AppError::MarketRateLimited(120)));
+        assert!(!error.to_string().contains("secret"));
+        server.await.unwrap();
+    }
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]

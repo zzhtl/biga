@@ -5,6 +5,7 @@
 pub mod stock;
 pub mod historical;
 pub mod prediction;
+pub mod market_data;
 
 pub use stock::*;
 pub use historical::*;

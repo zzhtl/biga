@@ -477,6 +477,7 @@ export interface PagedResponse<T> {
 }
 
 export type View =
+  | 'ai'
   | 'favorites'
   | 'stock'
   | 'discipline'

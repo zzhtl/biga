@@ -11,3 +11,4 @@ pub mod watchlist;
 pub mod discipline;
 pub mod settings;
 mod pagination;
+pub mod ai;

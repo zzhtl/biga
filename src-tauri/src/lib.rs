@@ -15,6 +15,7 @@ pub mod api;
 pub mod discipline;
 pub mod prediction;
 pub mod services;
+pub mod ai;
 
 // 命令层
 mod commands;
@@ -40,6 +41,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            commands::ai::list_ai_connections,
+            commands::ai::save_ai_connection,
+            commands::ai::delete_ai_connection,
+            commands::ai::check_ai_connection,
+            commands::ai::start_ai_prediction,
+            commands::ai::cancel_ai_prediction,
+            commands::ai::get_ai_prediction,
+            commands::ai::list_ai_predictions,
             // 股票列表命令
             commands::stock_list::get_stock_list,
             // 股票信息命令
@@ -115,6 +124,9 @@ pub fn run() {
                 // 迁移脚本已编进二进制（见 db::connection::MIGRATIONS），不再读盘——
                 // 装机后 migrations/ 不在 CWD 里，原来的读盘写法会静默跳过、一张表都不建。
                 run_migrations(&pool).await.expect("数据库迁移失败");
+
+                ai::service::recover_jobs(&pool).await.expect("AI 任务恢复失败");
+                app.manage(std::sync::Arc::new(ai::service::AiState::default()));
 
                 app.manage(pool);
             });

@@ -224,7 +224,11 @@ pub async fn batch_insert_historical_data(
                 .push_bind(data.change_percent);
         });
 
-        query_builder.push(" ON CONFLICT(symbol, date) DO NOTHING");
+        query_builder.push(" ON CONFLICT(symbol, date) DO UPDATE SET
+            open=excluded.open, close=excluded.close, high=excluded.high, low=excluded.low,
+            volume=excluded.volume, amount=excluded.amount, amplitude=excluded.amplitude,
+            turnover_rate=excluded.turnover_rate, volume_ratio=excluded.volume_ratio,
+            change=excluded.change, change_percent=excluded.change_percent");
         let result = query_builder.build().execute(&mut *tx).await?;
         batch_size += result.rows_affected();
     }

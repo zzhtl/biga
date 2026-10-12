@@ -57,6 +57,7 @@ pub const MIGRATIONS: &[(&str, &str)] = &[
     ("07_watchlist.sql", include_str!("../../migrations/07_watchlist.sql")),
     ("08_canonical_stock_symbols.sql", include_str!("../../migrations/08_canonical_stock_symbols.sql")),
     ("09_trading_discipline.sql", include_str!("../../migrations/09_trading_discipline.sql")),
+    ("10_ai_prediction.sql", include_str!("../../migrations/10_ai_prediction.sql")),
 ];
 
 /// 按顺序执行全部迁移，可重复调用。

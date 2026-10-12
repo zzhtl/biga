@@ -14,6 +14,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Frontend checks and build
+        working-directory: .
+        run: |
+          bun install --frozen-lockfile
+          bun test
+          bun run check
+          bun run build
+
+      - name: AI report browser tests (mocked services)
+        working-directory: .
+        run: |
+          bun x playwright install --with-deps chromium
+          bun run test:e2e
+
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update

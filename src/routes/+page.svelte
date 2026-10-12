@@ -3,6 +3,7 @@
     import type { NavTarget, View } from "./types";
     import {
         CalendarDays,
+        BrainCircuit,
         Clock3,
         List,
         Settings as SettingsIcon,
@@ -12,10 +13,11 @@
     } from "lucide-svelte";
     import DisciplineBanner from "./components/discipline_banner.svelte";
 
-    let activeView = $state<View>("favorites");
+    let activeView = $state<View>("ai");
     let navTarget = $state<NavTarget | null>(null);
 
     let favoritesModule: ReturnType<typeof importFavorites> | null = null;
+    let aiModule: ReturnType<typeof importAi> | null = null;
     let predictionModule: ReturnType<typeof importPrediction> | null = null;
     let realtimeModule: ReturnType<typeof importRealtime> | null = null;
     let historicalModule: ReturnType<typeof importHistorical> | null = null;
@@ -24,6 +26,7 @@
     let settingsModule: ReturnType<typeof importSettings> | null = null;
 
     function importFavorites() { return import("./components/stock_favorites.svelte"); }
+    function importAi() { return import("./components/ai_prediction.svelte"); }
     function importPrediction() { return import("./components/stock_prediction.svelte"); }
     function importRealtime() { return import("./components/stock_realtime.svelte"); }
     function importHistorical() { return import("./components/stock_historical.svelte"); }
@@ -32,6 +35,7 @@
     function importSettings() { return import("./components/sys_settings.svelte"); }
 
     function loadFavorites() { return favoritesModule ??= importFavorites(); }
+    function loadAi() { return aiModule ??= importAi(); }
     function loadPrediction() { return predictionModule ??= importPrediction(); }
     function loadRealtime() { return realtimeModule ??= importRealtime(); }
     function loadHistorical() { return historicalModule ??= importHistorical(); }
@@ -40,6 +44,7 @@
     function loadSettings() { return settingsModule ??= importSettings(); }
 
     function navigate(target: NavTarget) {
+        if (target.view === "stock") target = { ...target, view: "ai" };
         navTarget = target;
         activeView = target.view;
     }
@@ -55,13 +60,18 @@
         <div class="logo">BigA</div>
         <ul>
             <li>
+                <button class="nav-button" class:active={activeView === "ai"} onclick={() => selectView("ai")} aria-current={activeView === "ai" ? "page" : undefined}>
+                    <BrainCircuit size={18} aria-hidden="true" />AI 股票预测
+                </button>
+            </li>
+            <li>
                 <button class="nav-button" class:active={activeView === "favorites"} onclick={() => selectView("favorites")} aria-current={activeView === "favorites" ? "page" : undefined}>
                     <Star size={18} aria-hidden="true" />我的收藏
                 </button>
             </li>
             <li>
                 <button class="nav-button" class:active={activeView === "stock"} onclick={() => selectView("stock")} aria-current={activeView === "stock" ? "page" : undefined}>
-                    <TrendingUp size={18} aria-hidden="true" />股票预测
+                    <TrendingUp size={18} aria-hidden="true" />量化预测
                 </button>
             </li>
             <li>
@@ -95,7 +105,12 @@
     <main class="content">
         <DisciplineBanner />
 
-        {#if activeView === "favorites"}
+        {#if activeView === "ai"}
+            {#await loadAi() then module}
+                {@const Component = module.default}
+                <Component navSymbol={navTarget?.view === "ai" ? (navTarget.symbol ?? null) : null} onNavigate={navigate} />
+            {/await}
+        {:else if activeView === "favorites"}
             {#await loadFavorites() then module}
                 {@const Component = module.default}
                 <Component onNavigate={navigate} />

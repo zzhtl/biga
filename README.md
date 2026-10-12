@@ -1,6 +1,6 @@
 # 📈 BigA - 大A股票智能预测系统
 
-**基于深度学习的股票预测平台 | 模块化架构 + 技术指标 + 多因子策略**
+**Claude / Codex AI 股票预测工作台 | 本地与 SSH 接入 + 行情缓存 + 文字与图表报告**
 
 [![下载最新版](https://img.shields.io/github/v/release/zzhtl/biga?label=%E4%B8%8B%E8%BD%BD%E6%9C%80%E6%96%B0%E7%89%88&color=31b5c8&style=for-the-badge)](https://github.com/zzhtl/biga/releases/latest)
 [![Release](https://github.com/zzhtl/biga/actions/workflows/release.yml/badge.svg)](https://github.com/zzhtl/biga/actions/workflows/release.yml)
@@ -16,11 +16,89 @@ Windows / Linux / macOS（Apple Silicon）三平台安装包由 GitHub Actions �
 BigA 是一个跨平台的股票数据分析与预测系统，采用 Rust + Svelte 构建，具有清晰的模块化架构：
 
 - 📊 **沪深股市数据采集与管理**
+- 🤖 **Claude / Codex AI 预测**（本地 CLI / SSH、受控数据查询、报告历史）
 - 🧠 **深度学习股票预测**（Candle 框架）
 - 💎 **金融级预测策略**（多因子评分、买卖点识别）
 - 📈 **技术指标分析**（MACD、KDJ、RSI、布林带等）
 - 🛡️ **交易纪律引擎**（止损棘轮、头寸规模、违纪留痕、守纪复盘）
 - 📱 **跨平台支持**（Windows、macOS、Linux）
+
+## Claude / Codex AI 预测
+
+应用默认进入「AI 股票预测」。在「系统设置 → Claude / Codex 连接」添加本机或远程
+连接，再选择股票与预测交易日，点击「生成 AI 预测」。无需训练 Candle 模型；既有
+技术指标作为 AI 的分析依据，原有训练、回测等功能保留在「量化预测」。
+
+### 连接要求
+
+- **本地**：先安装并登录 `claude` 或 `codex`；桌面应用的 PATH 找不到命令时，填写可执行文件的绝对路径。
+- **SSH**：服务器支持 Linux/macOS，已安装并登录对应 CLI；复用本机 OpenSSH 配置、密钥或 agent。
+  主机可填写 `~/.ssh/config` 中的别名。使用别名时端口和用户留空以继承配置。
+  首次请在终端连接并验证主机指纹，应用不会跳过主机身份检查。
+- CLI 需要支持结构化输出及隔离参数；「检查连接」会检查参数能力，不生成报告、不消耗模型额度。
+- 分析在临时目录中运行，不加载个人项目工具与 MCP 配置。Codex 使用 `--ignore-user-config`，
+  仍复用 CLI 登录，但不会继承个人 `config.toml` 中的模型、代理提供方或工具；模型可在连接配置中指定。
+  Claude 同样不加载项目与用户 settings。第一版不提供自定义 HTTP 模型服务或 SSH 密码认证。
+
+### 数据与额度
+
+- 历史行情、股本估值、基本面均复用 SQLite，与已有「刷新行情」共用缓存。
+  日线缓存到下一个可更新的交易日 16:00（上海时间），估值 15 分钟，基本面 24 小时。
+- 同一接口、同一股票的并发请求合并。股票代码的前缀、后缀写法共用缓存；查询不同历史范围从本地截取。
+- 每次预测最多 **3 次行情请求**，失败尝试计数；失败不自动重试，至少冷却 60 秒，429 遵循 `Retry-After`。
+  空财务结果也缓存。界面显示本次请求和命中数，不表示供应商账户剩余额度。
+- AI 可通过结构化请求补充本股数据，由 Rust 数据层执行；不向 AI 或远程机器提供行情密钥。
+  每个任务最多 3 轮 CLI 分析，每轮约 3 分钟，应用不自动重新生成；CLI 自身的模型请求策略由 CLI 管理。
+- 相同连接、模型选项、周期、数据版本和提示词版本复用报告。「重新生成」只绕过报告缓存，
+  不绕过行情缓存；「刷新行情」同样遵循缓存时效。打开历史报告不调用行情或 AI。
+- 无法更新时显示旧数据的截止日期与警告；日线不足 60 根不生成价格预测。未来日期以该数据日期为起点，
+  使用仓库交易日工具。日历覆盖范围之外的节假日需维护现有日历规则。
+
+### 报告与实现决策
+
+报告提供中文摘要、证据来源、乐观/基准/悲观情景、风险和失效条件，配合历史价格、
+未来情景范围及真实成交量图。图表与文字共用通过后端校验的 JSON 数据；情景范围未作概率校准，
+不标为方向命中率或 80%/95% 置信区间。报告保留数据快照、生成时间和 CLI 实际返回的用量。
+
+实现选择沿用 Tauri/Rust 服务层与 SQLite，不部署额外常驻服务。CLI 只负责分析并返回报告或
+受限查询请求，数据取用与预算统一由本机控制；这样本地和 SSH 可以共享协议、缓存与验收用例。
+新增迁移保存连接、查询时间与报告；任务中断后标记为中断，重启不自动调用付费服务。
+SSH 意外断开时，远端看门狗会在本轮超时后结束 CLI；断开连接不保证撤销供应商已接收的请求。
+
+### 验收与复现
+
+```bash
+bun test
+bun run check
+bun run build
+bun x playwright install chromium
+bun run test:e2e
+cd src-tauri
+cargo test
+cargo clippy --all-targets --all-features
+```
+
+浏览器测试模拟 Tauri，不使用真实行情或模型。Rust 测试覆盖本地/SSH 包装脚本、两种 CLI 的
+结构化输出、超时取消、并发去重、缓存重启、空结果、429 冷却、行情修订和报告校验。
+已有 Chrome 可通过 `BIGA_CHROME_PATH=/path/to/chrome bun run test:e2e` 使用。
+
+真实联调工具读取已有数据库并复制行情到临时数据库，不改动用户的行情或持仓：
+
+```bash
+cd src-tauri
+# 一次真实 AI 任务，行情 API 请求为 0；不自动重试。
+cargo run --example ai_smoke -- db/stock_data.db 600111 codex /absolute/path/to/codex
+# 可选：允许最多 3 次行情补齐；本次任务仍只有一次模型报告生成。
+cargo run --example ai_smoke -- db/stock_data.db 601899 codex /absolute/path/to/codex --refresh
+# SSH 使用已配置的主机别名。
+cargo run --example ai_smoke -- db/stock_data.db 600111 claude /remote/path/to/claude research-server
+```
+
+报告输出到 `src-tauri/target/ai-smoke-股票代码-提供方.json`。
+2026-10-12 本机 Codex 已用三只股票完成真实报告验证，累计行情请求 **4 次**，有效 AI 报告 **3 份**。
+后两份报告使用截至 2026-10-09 的日线；第三份验证了基于技术事实独立推导价格的流程。
+Claude 与真实 SSH 服务器尚未配置，因此只完成离线协议验收，
+不计为真实联调通过。
 
 ## 📦 下载安装
 
