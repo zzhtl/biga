@@ -1,7 +1,7 @@
 name: Release
 
 # 打 v* 标签即出包；也可手动触发（手动时必须给标签名，产物同样挂到该标签的草稿 Release）。
-# Release 一律建成 draft：本项目没有代码签名，发出去之前你应该先自己装一遍确认能跑。
+# 标签发布在三平台出包成功后公开；手动触发保留草稿，便于安装验证。
 on:
   push:
     tags: ["v*"]
@@ -151,3 +151,15 @@ jobs:
             ---
 
             股市有风险，投资需谨慎。本工具不构成任何投资建议。
+
+  publish:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 三平台出包成功后公开 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: BigA ${{ env.RELEASE_TAG }}
+          draft: false

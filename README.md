@@ -347,15 +347,15 @@ bun run tauri build --target aarch64-apple-darwin --bundles dmg   # macOS（M �
 
 ### 发布 Release
 
-完整链条：**打标签 → CI 三平台并行出包 → 草稿 Release → 人工检查后 Publish →
+完整链条：**打标签 → CI 三平台并行出包 → 自动公开 Release →
 README 顶部的下载入口生效**。
 
 ```
-git tag v0.1.1                        # ① 标签必须与 tauri.conf.json 的 version 一致
-git push origin v0.1.1                # ② 推送标签触发 .github/workflows/release.yml
+git tag v0.4.0                        # ① 标签必须与 tauri.conf.json 的 version 一致
+git push origin v0.4.0                # ② 推送标签触发 .github/workflows/release.yml
                                       # ③ ubuntu-22.04 / windows-latest / macos-14 并行构建
                                       # ④ 产物自动挂到该标签的草稿 Release
-                                      # ⑤ 你到 Releases 页面自己装一遍，确认没问题再 Publish
+                                      # ⑤ 三平台全部出包成功后，CI 自动公开 Release
 ```
 
 | 步骤 | 谁做 | 说明 |
@@ -363,12 +363,10 @@ git push origin v0.1.1                # ② 推送标签触发 .github/workflows
 | 改版本号 | 人 | `src-tauri/tauri.conf.json` 的 `version`。workflow 的 `verify` job 会校验它与标签一致，对不上直接失败——避免「标签 v0.3.0 里躺着 `BigA_0.1.0_amd64.deb`」 |
 | 构建三平台 | CI | Windows `nsis,msi` / Linux `deb,appimage` / macOS `dmg`（`aarch64-apple-darwin`） |
 | 创建 Release | CI | `softprops/action-gh-release`，**建成草稿** |
-| Publish | 人 | 草稿不对外可见 |
+| Publish | CI | 标签触发时，三平台全部出包成功后公开；手动触发保留草稿 |
 
-> ⚠️ **草稿 Release 不会被 `/releases/latest` 收录**。CI 跑完之后 README 顶部的下载
-> 链接仍然是 404，必须先到 Releases 页面点 Publish 才会生效。这是有意的：
-> 包没做代码签名，发出去之前应该自己装一遍确认能跑。
-> 真的想让 CI 直接公开发布，把 `release.yml` 里的 `draft: true` 改成 `false`。
+> 标签发布会在三平台构建成功后公开，并更新 `/releases/latest` 下载入口。
+> 手动触发创建的草稿不会被 `/releases/latest` 收录，可在安装验证后到 Releases 页面点 Publish。
 
 也可在 Actions 页面手动触发（需填标签名），用于验证流程而不正式发版。
 包未做代码签名，Windows 会弹 SmartScreen、macOS 需 `xattr -cr`，已写进 Release 正文。

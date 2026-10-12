@@ -1,6 +1,6 @@
 {
   "name": "biga",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "BigA 股票分析工作台",
   "type": "module",
   "scripts": {
