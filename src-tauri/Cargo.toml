@@ -37,6 +37,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 tauri-plugin-log = "2"
 csv = "1.2"
+fin-primitives = { version = "4.0.1", default-features = false, features = ["indicators"] }
 # Machine Learning dependencies
 candle-core = "0.9.1"
 candle-nn = "0.9.1"
