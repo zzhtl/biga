@@ -2,7 +2,7 @@
 //! 
 //! ATR（Average True Range）
 //! TR = max(最高价-最低价, |最高价-前收盘|, |最低价-前收盘|)
-//! ATR = TR 的 N 日移动平均
+//! ATR = TR 的 Wilder 平滑（RMA），与 TA-Lib 一致
 
 /// 计算 ATR 指标
 pub fn calculate_atr(
@@ -15,21 +15,14 @@ pub fn calculate_atr(
         return 0.0;
     }
     
-    let mut trs = Vec::new();
-    
-    for i in 1..closes.len() {
-        let high_low = highs[i] - lows[i];
-        let high_close = (highs[i] - closes[i - 1]).abs();
-        let low_close = (lows[i] - closes[i - 1]).abs();
-        let tr = high_low.max(high_close).max(low_close);
-        trs.push(tr);
-    }
-    
-    if trs.len() < period {
-        return 0.0;
-    }
-    
-    trs[trs.len() - period..].iter().sum::<f64>() / period as f64
+    let atr = fin_primitives::signals::batch_f64::atr(
+        highs,
+        lows,
+        closes,
+        period,
+        fin_primitives::signals::batch_f64::AtrSeed::TaLib,
+    );
+    atr.last().copied().filter(|v| v.is_finite()).unwrap_or(0.0)
 }
 
 /// 计算 ATR 百分比（相对于当前价格）
@@ -90,6 +83,18 @@ mod tests {
         let atr = calculate_atr(&highs, &lows, &closes, 14);
         
         assert!(atr > 0.0);
+    }
+
+    #[test]
+    fn test_atr_is_wilder_smoothed() {
+        let highs = vec![10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 12.0, 10.0];
+        let lows = vec![9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 8.0, 9.0];
+        let closes = vec![9.5; 8];
+        // TR[1..] = 1,1,1,1,1,4,1; seed = mean(1,1,1,1,1) = 1.0
+        // Wilder: (1.0*4 + 4)/5 = 1.6, then (1.6*4 + 1)/5 = 1.48; simple mean of last 5 = 1.6
+        let atr = calculate_atr(&highs, &lows, &closes, 5);
+        assert!((atr - 1.48).abs() < 1e-12, "atr = {atr}");
+        assert_eq!(calculate_atr(&highs[..5], &lows[..5], &closes[..5], 5), 0.0);
     }
 
     #[test]

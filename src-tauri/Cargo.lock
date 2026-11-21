@@ -371,6 +371,7 @@ dependencies = [
  "chrono",
  "csv",
  "dirs",
+ "fin-primitives",
  "keyring",
  "ndarray",
  "rand 0.8.5",
@@ -1159,7 +1160,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1452,6 +1453,18 @@ checksum = "38e2275cc4e4fc009b0669731a1e5ab7ebf11f469eaede2bab9309a5b4d6057f"
 dependencies = [
  "memoffset",
  "rustc_version",
+]
+
+[[package]]
+name = "fin-primitives"
+version = "4.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea881ed57c18c5e839ac4ea0b0d91b3f9e499412e5957e4608ac9efa62c716b"
+dependencies = [
+ "chrono",
+ "libm",
+ "rust_decimal",
+ "thiserror 2.0.12",
 ]
 
 [[package]]
